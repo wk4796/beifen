@@ -88,7 +88,7 @@
      nano ~/personal_backup.sh
      ```
 
-   * 将本 `README.md` 文件中提供的最新脚本代码（在 GitHub 仓库中将是 `personal_backup.sh` 的文件内容）完整复制并粘贴到 `nano` 编辑器中。
+   * 将本 `personal_backup.sh` 文件中提供的最新脚本代码（在 GitHub 仓库中将是 `personal_backup.sh` 的文件内容）完整复制并粘贴到 `nano` 编辑器中。
 
    * 保存并退出 `nano`：按下 `Ctrl + X`，输入 `Y`，然后按 `Enter`。
 
