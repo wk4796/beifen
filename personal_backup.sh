@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e # Exit immediately if a command exits with a non-zero status.
 
 # 脚本全局配置
 SCRIPT_NAME="个人自用数据备份"
@@ -34,7 +35,7 @@ WEBDAV_PASSWORD=""
 WEBDAV_BACKUP_PATH="" # WebDAV 备份的目标路径
 
 # 备份目标标志
-BACKUP_TARGET_S3="false"   # 是否启用 S3/R2 备份 (true/false)
+BACKUP_TARGET_S3="false"    # 是否启用 S3/R2 备份 (true/false)
 BACKUP_TARGET_WEBDAV="false" # 是否启用 WebDAV 备份 (true/false)
 
 # Telegram 通知变量 (现在从配置文件加载/保存)
@@ -74,21 +75,31 @@ clear_screen() {
 display_header() {
     clear_screen
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}       $SCRIPT_NAME       ${NC}"
+    echo -e "${GREEN}      $SCRIPT_NAME        ${NC}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 }
 
 # 显示消息并记录到日志
+# 参数 1: 消息内容
+# 参数 2: 颜色代码 (可选)
+# 参数 3: 输出目的地 (可选，默认为 /dev/stdout。使用 /dev/stderr 将输出到标准错误)
 log_and_display() {
     local message="$1"
     local color="$2"
-    # 使用 tee -a 将消息同时输出到标准输出和日志文件
+    local output_destination="${3:-/dev/stdout}" # Default to stdout
+    local plain_message
+    # Strip ANSI escape codes from the message for logging
+    plain_message=$(echo -e "$message" | sed 's/\x1b\[[0-9;]*m//g')
+
+    # Log to file with timestamp
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - ${plain_message}" >> "$LOG_FILE"
+
+    # Display to specified destination with optional color
     if [[ -n "$color" ]]; then
-        echo -e "$(date '+%Y-%m-%d %H:%M:%S') - ${message}" | tee -a "$LOG_FILE"
-        echo -e "$color$message$NC"
+        echo -e "$color$message$NC" > "$output_destination"
     else
-        echo -e "$(date '+%Y-%m-%d %H:%M:%S') - ${message}" | tee -a "$LOG_FILE"
+        echo -e "$message" > "$output_destination"
     fi
 }
 
@@ -202,7 +213,7 @@ check_dependencies() {
     # 仅当 S3/R2 凭证在配置中设置时才检查 S3/R2 依赖项
     if [[ -n "$S3_ACCESS_KEY" && -n "$S3_SECRET_KEY" && -n "$S3_ENDPOINT" && -n "$S3_BUCKET_NAME" ]]; then
         # 优先检测 awscli，其次 s3cmd
-        if ! command -v aws &> /dev/null && ! command -v s3cmd &> /dev/null; then
+        if ! (command -v aws &> /dev/null || command -v s3cmd &> /dev/null); then
             missing_deps+=("awscli 或 s3cmd (用于S3/R2)")
         fi
     fi
@@ -231,13 +242,13 @@ check_dependencies() {
 send_telegram_message() {
     local message_content="$1"
     if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
-        log_and_display "${YELLOW}Telegram 通知未配置，跳过发送消息。${NC}" ""
+        log_and_display "${YELLOW}Telegram 通知未配置，跳过发送消息。${NC}" "" "/dev/stderr"
         return 1
     fi
 
     # 再次检查 curl 和 jq 是否存在
     if ! command -v curl &> /dev/null; then
-        log_and_display "${RED}错误：发送 Telegram 消息需要 'curl' 命令，但未找到。${NC}" ""
+        log_and_display "${RED}错误：发送 Telegram 消息需要 'curl' 命令，但未找到。${NC}" "" "/dev/stderr"
         return 1
     fi
 
@@ -245,19 +256,19 @@ send_telegram_message() {
     if command -v jq &> /dev/null; then
         encoded_message=$(printf %s "$message_content" | jq -sRr @uri)
     else
-        log_and_display "${YELLOW}警告：未找到 'jq'，将使用简单的 URL 编码，可能不完全可靠。${NC}"
+        log_and_display "${YELLOW}警告：未找到 'jq'，将使用简单的 URL 编码，可能不完全可靠。${NC}" "" "/dev/stderr"
         # 备用简单编码 (对于复杂字符不太可靠)
         encoded_message=$(printf %s "$message_content" | sed 's/[^a-zA-Z0-9._~-]/%&/g; s/ /%20/g')
     fi
 
-    log_and_display "正在发送 Telegram 消息..." ""
+    log_and_display "正在发送 Telegram 消息..." "" "/dev/stderr"
     if curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
         -d "chat_id=${TELEGRAM_CHAT_ID}" \
         -d "text=${encoded_message}" \
         -d "parse_mode=Markdown" > /dev/null; then
-        log_and_display "${GREEN}Telegram 消息发送成功。${NC}" ""
+        log_and_display "${GREEN}Telegram 消息发送成功。${NC}" "" "/dev/stderr"
     else
-        log_and_display "${RED}Telegram 消息发送失败，请检查 Bot Token 和 Chat ID，或网络连接。${NC}" ""
+        log_and_display "${RED}Telegram 消息发送失败，请检查 Bot Token 和 Chat ID，或网络连接。${NC}" "" "/dev/stderr"
     fi
 }
 
@@ -452,11 +463,11 @@ display_compression_info() {
 # 测试 S3/R2 连接
 test_s3_r2_connection() {
     if [[ -z "$S3_ACCESS_KEY" || -z "$S3_SECRET_KEY" || -z "$S3_ENDPOINT" || -z "$S3_BUCKET_NAME" ]]; then
-        log_and_display "${RED}S3/R2 配置不完整，无法测试连接。请先填写 Access Key, Secret Key, Endpoint 和 Bucket 名称。${NC}"
+        log_and_display "${RED}S3/R2 配置不完整，无法测试连接。请先填写 Access Key, Secret Key, Endpoint 和 Bucket 名称。${NC}" "" "/dev/stderr"
         return 1
     fi
 
-    log_and_display "正在测试 S3/R2 连接到桶：${S3_BUCKET_NAME}..." "${BLUE}"
+    log_and_display "正在测试 S3/R2 连接到桶：${S3_BUCKET_NAME}..." "${BLUE}" "/dev/stderr"
 
     # 临时设置 AWS 环境变量以供 awscli 使用
     export AWS_ACCESS_KEY_ID="$S3_ACCESS_KEY"
@@ -470,12 +481,12 @@ test_s3_r2_connection() {
         test_output=$(aws s3 ls "s3://${S3_BUCKET_NAME}/" --endpoint-url "$S3_ENDPOINT" --page-size 1 --cli-read-timeout 10 --cli-connect-timeout 10 2>&1)
         test_status=$?
     elif command -v s3cmd &> /dev/null; then
-        log_and_display "${YELLOW}正在使用 s3cmd 进行连接测试。请确保 ~/.s3cfg 已正确配置 Cloudflare R2。${NC}"
+        log_and_display "${YELLOW}正在使用 s3cmd 进行连接测试。请确保 ~/.s3cfg 已正确配置 Cloudflare R2。${NC}" "" "/dev/stderr"
         # s3cmd 通常会读取 ~/.s3cfg 或通过命令行参数，这里不强制传递凭证
         test_output=$(s3cmd ls "s3://${S3_BUCKET_NAME}/" 2>&1)
         test_status=$?
     else
-        log_and_display "${RED}未找到 'awscli' 或 's3cmd' 命令，无法测试 S3/R2 连接。${NC}"
+        log_and_display "${RED}未找到 'awscli' 或 's3cmd' 命令，无法测试 S3/R2 连接。${NC}" "" "/dev/stderr"
         unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
         return 1
     fi
@@ -484,40 +495,40 @@ test_s3_r2_connection() {
     unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
 
     if [ "$test_status" -eq 0 ]; then
-        log_and_display "${GREEN}S3/R2 连接成功！${NC}"
+        log_and_display "${GREEN}S3/R2 连接成功！${NC}" "" "/dev/stderr"
         return 0
     else
-        log_and_display "${RED}S3/R2 连接失败！请检查配置、凭证和网络连接。错误信息: ${test_output}${NC}"
+        log_and_display "${RED}S3/R2 连接失败！请检查配置、凭证和网络连接。错误信息: ${test_output}${NC}" "" "/dev/stderr"
         return 1
     fi
 }
 
 # 获取 S3/R2 桶中的文件夹列表
 get_s3_r2_folders() {
+    # test_s3_r2_connection 的输出现在会到 stderr，不会影响这里的捕获
     if test_s3_r2_connection; then
-        log_and_display "正在获取 S3/R2 存储桶中的文件夹列表 (最多显示50个)：" "${BLUE}"
+        log_and_display "正在获取 S3/R2 存储桶中的文件夹列表 (最多显示50个)：" "${BLUE}" "/dev/stderr"
         export AWS_ACCESS_KEY_ID="$S3_ACCESS_KEY"
         export AWS_SECRET_ACCESS_KEY="$S3_SECRET_KEY"
         local folders=()
 
+        # 捕获 aws 或 s3cmd 的标准输出，将标准错误重定向到 /dev/null
         if command -v aws &> /dev/null; then
-            # 使用 --delimiter '/' 和 --query "CommonPrefixes[].Prefix" 来获取顶层文件夹
             folders=($(aws s3 ls "s3://${S3_BUCKET_NAME}/" --endpoint-url "$S3_ENDPOINT" --delimiter '/' --query "CommonPrefixes[].Prefix" --output text 2>/dev/null))
         elif command -v s3cmd &> /dev/null; then
-            # s3cmd 的输出需要进一步处理以提取文件夹名称
-            folders=($(s3cmd ls "s3://${S3_BUCKET_NAME}/" | grep -E '\/$' | awk '{print $NF}' | sed 's|s3://'"${S3_BUCKET_NAME//./\\.}"'\///' | head -n 50)) # 仅显示前50个
+            log_and_display "${YELLOW}正在使用 s3cmd 尝试列出 S3/R2 文件夹。${NC}" "" "/dev/stderr"
+            folders=($(s3cmd ls "s3://${S3_BUCKET_NAME}/" 2>/dev/null | grep -E '\/$' | awk '{print $NF}' | sed 's|s3://'"${S3_BUCKET_NAME//./\\.}"'\///' | head -n 50))
         fi
         unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
 
         if [ ${#folders[@]} -eq 0 ]; then
-            log_and_display "${YELLOW}S3/R2 存储桶中没有检测到文件夹。${NC}"
+            log_and_display "${YELLOW}S3/R2 存储桶中没有检测到文件夹。${NC}" "" "/dev/stderr"
         else
-            # 返回一个换行符分隔的字符串，方便调用者解析
-            printf '%s\n' "${folders[@]}"
+            printf '%s\n' "${folders[@]}" # Only folder names go to stdout
             return 0
         fi
     else
-        log_and_display "${RED}S3/R2 连接失败，无法获取文件夹列表。${NC}"
+        log_and_display "${RED}S3/R2 连接失败，无法获取文件夹列表。${NC}" "" "/dev/stderr"
         return 1
     fi
 }
@@ -525,22 +536,22 @@ get_s3_r2_folders() {
 # 测试 WebDAV 连接
 test_webdav_connection() {
     if [[ -z "$WEBDAV_URL" || -z "$WEBDAV_USERNAME" || -z "$WEBDAV_PASSWORD" ]]; then
-        log_and_display "${RED}WebDAV 配置不完整，无法测试连接。请先填写 URL, 用户名和密码。${NC}"
+        log_and_display "${RED}WebDAV 配置不完整，无法测试连接。请先填写 URL, 用户名和密码。${NC}" "" "/dev/stderr"
         return 1
     fi
 
-    log_and_display "正在测试 WebDAV 连接到：${WEBDAV_URL}..." "${BLUE}"
+    log_and_display "正在测试 WebDAV 连接到：${WEBDAV_URL}..." "${BLUE}" "/dev/stderr"
 
     # 使用 PROPFIND 方法测试连接，并检查 HTTP 状态码
     local http_code=$(curl -s -o /dev/null -w "%{http_code}" -L -k --user "$WEBDAV_USERNAME:$WEBDAV_PASSWORD" --request PROPFIND --header "Depth: 1" "${WEBDAV_URL%/}/" 2>/dev/null)
     local curl_status=$? # 获取 curl 的退出状态码
 
     if [ "$curl_status" -eq 0 ] && [[ "$http_code" -ge 200 && "$http_code" -lt 300 ]]; then
-        log_and_display "${GREEN}WebDAV 连接成功！ (HTTP状态码: ${http_code})${NC}"
+        log_and_display "${GREEN}WebDAV 连接成功！ (HTTP状态码: ${http_code})${NC}" "" "/dev/stderr"
         return 0
     else
-        log_and_display "${RED}WebDAV 连接失败！HTTP状态码: ${http_code}。请检查配置、凭证和网络连接。${NC}"
-        log_and_display "${RED}Curl 错误码: ${curl_status}。${NC}"
+        log_and_display "${RED}WebDAV 连接失败！HTTP状态码: ${http_code}。请检查配置、凭证和网络连接。${NC}" "" "/dev/stderr"
+        log_and_display "${RED}Curl 错误码: ${curl_status}。${NC}" "" "/dev/stderr"
         return 1
     fi
 }
@@ -548,7 +559,7 @@ test_webdav_connection() {
 # 获取 WebDAV 服务器中的文件夹列表
 get_webdav_folders() {
     if test_webdav_connection; then
-        log_and_display "正在获取 WebDAV 服务器中的文件夹列表 (最多显示50个)：" "${BLUE}"
+        log_and_display "正在获取 WebDAV 服务器中的文件夹列表 (最多显示50个)：" "${BLUE}" "/dev/stderr"
         local folders=()
         local curl_output=""
 
@@ -565,20 +576,19 @@ get_webdav_folders() {
         fi
 
         if [ ${#folders[@]} -eq 0 ]; then
-            log_and_display "${YELLOW}WebDAV 服务器中没有检测到文件夹。${NC}"
+            log_and_display "${YELLOW}WebDAV 服务器中没有检测到文件夹。${NC}" "" "/dev/stderr"
         else
-            # 返回一个换行符分隔的字符串
-            printf '%s\n' "${folders[@]}"
+            printf '%s\n' "${folders[@]}" # Only folder names go to stdout
             return 0
         fi
     else
-        log_and_display "${RED}WebDAV 连接失败，无法获取文件夹列表。${NC}"
+        log_and_display "${RED}WebDAV 连接失败，无法获取文件夹列表。${NC}" "" "/dev/stderr"
         return 1
     fi
 }
 
 # ================================================================
-# ===               ↓↓↓ 全新重写的函数 ↓↓↓                     ===
+# ===         ↓↓↓ 全新重写的函数 ↓↓↓                           ===
 # ================================================================
 # 让用户选择/输入 S3/R2 备份路径 (已根据新要求重写)
 choose_s3_r2_path() {
@@ -590,6 +600,7 @@ choose_s3_r2_path() {
         echo -e "当前路径: ${YELLOW}${S3_BACKUP_PATH:-/ (根目录)}${NC}\n"
 
         # 获取并显示云端文件夹列表
+        # 现在 get_s3_r2_folders 的日志信息会输出到 stderr，stdout 只包含文件夹列表
         local s3_folders_str=$(get_s3_r2_folders)
         local s3_folders_array=()
         if [[ -n "$s3_folders_str" ]]; then
@@ -677,6 +688,7 @@ choose_webdav_path() {
         echo -e "当前路径: ${YELLOW}${WEBDAV_BACKUP_PATH:-/ (根目录)}${NC}\n"
 
         # 获取并显示云端文件夹列表
+        # 现在 get_webdav_folders 的日志信息会输出到 stderr，stdout 只包含文件夹列表
         local webdav_folders_str=$(get_webdav_folders)
         local webdav_folders_array=()
         if [[ -n "$webdav_folders_str" ]]; then
@@ -754,7 +766,7 @@ choose_webdav_path() {
     fi
 }
 # ================================================================
-# ===               ↑↑↑ 全新重写的函数 ↑↑↑                     ===
+# ===         ↑↑↑ 全新重写的函数 ↑↑↑                           ===
 # ================================================================
 
 
@@ -789,11 +801,16 @@ manage_s3_r2_account() {
             1)
                 log_and_display "--- 添加/修改 S3/R2 账号凭证 ---"
                 log_and_display "${YELLOW}凭证将保存到本地配置文件，请确保配置文件安全！${NC}"
-                read -rp "请输入 S3/R2 Access Key ID [当前: ${S3_ACCESS_KEY}]: " input_key
+                # Changed: Do not display current Access Key directly
+                read -rp "请输入 S3/R2 Access Key ID [当前: $(if [[ -n "$S3_ACCESS_KEY" ]]; then echo "已设置"; else echo "未设置"; fi)]: " input_key
                 S3_ACCESS_KEY="${input_key:-$S3_ACCESS_KEY}" # 如果输入为空，保留当前值
 
-                read -rp "请输入 S3/R2 Secret Access Key [当前: ${S3_SECRET_KEY}]: " input_secret
-                S3_SECRET_KEY="${input_secret:-$S3_SECRET_KEY}"
+                # Changed: Use -s for secret key and hide current value
+                read -s -rp "请输入 S3/R2 Secret Access Key (留空不修改当前密钥): " input_secret
+                echo "" # Newline after hidden input
+                if [[ -n "$input_secret" ]]; then # Only update if new secret is provided
+                    S3_SECRET_KEY="$input_secret"
+                fi
 
                 read -rp "请输入 S3/R2 Endpoint URL (例如 Cloudflare R2 的 https://<ACCOUNT_ID>.r2.cloudflarestorage.com) [当前: ${S3_ENDPOINT}]: " input_endpoint
                 S3_ENDPOINT="${input_endpoint:-$S3_ENDPOINT}"
@@ -958,7 +975,7 @@ select_backup_targets() {
             echo -n "1. S3/R2 存储 (当前: "
             if [[ "$BACKUP_TARGET_S3" == "true" ]]; then echo -e "${GREEN}启用${NC})"
             else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "   (已配置账号并设置路径: ${S3_BACKUP_PATH})"
+            echo "    (已配置账号并设置路径: ${S3_BACKUP_PATH})"
         else
             echo -e "1. S3/R2 存储 (${RED}未完全配置，无法启用${NC})"
         fi
@@ -969,7 +986,7 @@ select_backup_targets() {
             echo -n "2. WebDAV 存储 (当前: "
             if [[ "$BACKUP_TARGET_WEBDAV" == "true" ]]; then echo -e "${GREEN}启用${NC})"
             else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "   (已配置账号并设置路径: ${WEBDAV_BACKUP_PATH})"
+            echo "    (已配置账号并设置路径: ${WEBDAV_BACKUP_PATH})"
         else
             echo -e "2. WebDAV 存储 (${RED}未完全配置，无法启用${NC})"
         fi
@@ -1052,8 +1069,8 @@ set_cloud_storage() {
         fi
 
         echo "1. 选择云备份目标 (S3/R2: ${BACKUP_TARGET_S3}, WebDAV: ${BACKUP_TARGET_WEBDAV})"
-        echo "   当前S3/R2账号: $s3_info"
-        echo "   当前WebDAV账号: $webdav_info"
+        echo "    当前S3/R2账号: $s3_info"
+        echo "    当前WebDAV账号: $webdav_info"
         echo "2. 管理 S3/R2 账号设置"
         echo "3. 管理 WebDAV 账号设置"
         echo "0. 返回主菜单"
@@ -1380,16 +1397,15 @@ perform_backup() {
         # --- 压缩文件 ---
         log_and_display "正在压缩路径 '$current_backup_path' 到文件 '$archive_name'..."
         local zip_command_status=1 # 默认为失败
-        local zip_error_output=""
+        local zip_output="" # Capture all output (stdout and stderr)
 
         if [[ -d "$current_backup_path" ]]; then
             # 压缩目录，只包含目录内的内容，不包含父目录本身
-            # (cd "$(dirname "$current_backup_path")" && zip -r "$temp_archive_path" "$(basename "$current_backup_path")") 2> >(zip_error_output=$(cat); typeset -p zip_error_output)
-            (cd "$(dirname "$current_backup_path")" && zip -r "$temp_archive_path" "$(basename "$current_backup_path")") &> /dev/null
+            zip_output=$( (cd "$(dirname "$current_backup_path")" && zip -r "$temp_archive_path" "$(basename "$current_backup_path")") 2>&1 )
             zip_command_status=$?
         elif [[ -f "$current_backup_path" ]]; then
             # 压缩单个文件
-            zip "$temp_archive_path" "$current_backup_path" &> /dev/null
+            zip_output=$(zip "$temp_archive_path" "$current_backup_path" 2>&1)
             zip_command_status=$?
         fi
 
@@ -1404,7 +1420,7 @@ perform_backup() {
             fi
         else
             log_and_display "${RED}文件压缩失败！请检查路径权限或磁盘空间。错误码: ${zip_command_status}${NC}"
-            send_telegram_message "*个人自用数据备份：压缩失败*\n路径: \`${current_backup_path}\`\n文件: \`${archive_name}\`\n原因: 压缩失败，错误码: ${zip_command_status}。"
+            send_telegram_message "*个人自用数据备份：压缩失败*\n路径: \`${current_backup_path}\`\n文件: \`${archive_name}\`\n原因: 压缩失败，错误码: ${zip_command_status}\n详细错误: \`${zip_output}\`"
             rm -f "$temp_archive_path" 2>/dev/null # 尝试清理失败的临时文件
             continue # 跳过当前路径的上传，继续下一个
         fi
