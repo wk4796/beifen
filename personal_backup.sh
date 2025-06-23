@@ -34,7 +34,7 @@ WEBDAV_PASSWORD=""
 WEBDAV_BACKUP_PATH="" # WebDAV 备份的目标路径
 
 # 备份目标标志
-BACKUP_TARGET_S3="false"    # 是否启用 S3/R2 备份 (true/false)
+BACKUP_TARGET_S3="false"   # 是否启用 S3/R2 备份 (true/false)
 BACKUP_TARGET_WEBDAV="false" # 是否启用 WebDAV 备份 (true/false)
 
 # Telegram 通知变量 (现在从配置文件加载/保存)
@@ -74,7 +74,7 @@ clear_screen() {
 display_header() {
     clear_screen
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}          $SCRIPT_NAME          ${NC}"
+    echo -e "${GREEN}         $SCRIPT_NAME         ${NC}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 }
@@ -737,8 +737,9 @@ manage_s3_r2_account() {
         echo "S3/R2 目标路径状态: $s3_path_status"
         echo ""
         echo "1. 添加/修改 S3/R2 账号凭证"
-        echo "2. 测试 S3/R2 连接并设置备份目标路径"
-        echo "3. 清除 S3/R2 账号配置"
+        echo "2. 测试 S3/R2 连接"
+        echo "3. 设置备份目标路径"
+        echo "4. 清除 S3/R2 账号配置"
         echo "0. 返回云存储设定主菜单"
         echo -e "${BLUE}------------------------------------------------${NC}"
         read -rp "请输入选项: " sub_choice
@@ -764,14 +765,21 @@ manage_s3_r2_account() {
                 press_enter_to_continue
                 ;;
             2)
-                # 先测试连接，如果成功再选择路径
-                if test_s3_r2_connection; then
-                    choose_s3_r2_path "$S3_BACKUP_PATH" # 传递当前路径作为默认值
-                    save_config # 路径选择后保存配置
-                fi
+                test_s3_r2_connection
                 press_enter_to_continue
                 ;;
             3)
+                # 检查凭证是否已设置
+                if [[ -z "$S3_ACCESS_KEY" || -z "$S3_SECRET_KEY" || -z "$S3_ENDPOINT" || -z "$S3_BUCKET_NAME" ]]; then
+                    log_and_display "${RED}S3/R2 配置不完整，无法设置目标路径。请先通过选项 '1' 添加凭证。${NC}"
+                else
+                    if choose_s3_r2_path "$S3_BACKUP_PATH"; then
+                        save_config # 仅在路径成功设置后保存
+                    fi
+                fi
+                press_enter_to_continue
+                ;;
+            4)
                 log_and_display "${YELLOW}警告：这将清除所有 S3/R2 账号配置。确定吗？(y/N)${NC}"
                 read -rp "请确认: " confirm_clear
                 if [[ "$confirm_clear" =~ ^[Yy]$ ]]; then
@@ -823,8 +831,9 @@ manage_webdav_account() {
         echo "WebDAV 目标路径状态: $webdav_path_status"
         echo ""
         echo "1. 添加/修改 WebDAV 账号凭证"
-        echo "2. 测试 WebDAV 连接并设置备份目标路径"
-        echo "3. 清除 WebDAV 账号配置"
+        echo "2. 测试 WebDAV 连接"
+        echo "3. 设置备份目标路径"
+        echo "4. 清除 WebDAV 账号配置"
         echo "0. 返回云存储设定主菜单"
         echo -e "${BLUE}------------------------------------------------${NC}"
         read -rp "请输入选项: " sub_choice
@@ -839,7 +848,7 @@ manage_webdav_account() {
                 read -rp "请输入 WebDAV 用户名 [当前: ${WEBDAV_USERNAME}]: " input_username
                 WEBDAV_USERNAME="${input_username:-$WEBDAV_USERNAME}"
 
-                read -rp "请输入 WebDAV 密码 (留空不修改当前密码): " -s input_password
+                read -s -rp "请输入 WebDAV 密码 (留空不修改当前密码): " input_password
                 echo "" # 隐藏输入后换行
                 if [[ -n "$input_password" ]]; then # 仅在提供了新密码时才更新
                     WEBDAV_PASSWORD="$input_password"
@@ -850,14 +859,20 @@ manage_webdav_account() {
                 press_enter_to_continue
                 ;;
             2)
-                # 先测试连接，如果成功再选择路径
-                if test_webdav_connection; then
-                    choose_webdav_path "$WEBDAV_BACKUP_PATH" # 传递当前路径作为默认值
-                    save_config # 路径选择后保存配置
-                fi
+                test_webdav_connection
                 press_enter_to_continue
                 ;;
             3)
+                if [[ -z "$WEBDAV_URL" || -z "$WEBDAV_USERNAME" || -z "$WEBDAV_PASSWORD" ]]; then
+                    log_and_display "${RED}WebDAV 配置不完整，无法设置目标路径。请先通过选项 '1' 添加凭证。${NC}"
+                else
+                    if choose_webdav_path "$WEBDAV_BACKUP_PATH"; then
+                        save_config # 仅在路径成功设置后保存
+                    fi
+                fi
+                press_enter_to_continue
+                ;;
+            4)
                 log_and_display "${YELLOW}警告：这将清除所有 WebDAV 账号配置。确定吗？(y/N)${NC}"
                 read -rp "请确认: " confirm_clear
                 if [[ "$confirm_clear" =~ ^[Yy]$ ]]; then
