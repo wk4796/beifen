@@ -74,7 +74,7 @@ clear_screen() {
 display_header() {
     clear_screen
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}         $SCRIPT_NAME         ${NC}"
+    echo -e "${GREEN}       $SCRIPT_NAME       ${NC}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 }
@@ -512,11 +512,10 @@ get_s3_r2_folders() {
         if [ ${#folders[@]} -eq 0 ]; then
             log_and_display "${YELLOW}S3/R2 存储桶中没有检测到文件夹。${NC}"
         else
-            for i in "${!folders[@]}"; do
-                echo "  $((i+1)). ${folders[$i]}"
-            done
+            # 返回一个换行符分隔的字符串，方便调用者解析
+            printf '%s\n' "${folders[@]}"
+            return 0
         fi
-        echo "${folders[@]}" # 返回一个空格分隔的字符串，方便调用者解析
     else
         log_and_display "${RED}S3/R2 连接失败，无法获取文件夹列表。${NC}"
         return 1
@@ -568,153 +567,195 @@ get_webdav_folders() {
         if [ ${#folders[@]} -eq 0 ]; then
             log_and_display "${YELLOW}WebDAV 服务器中没有检测到文件夹。${NC}"
         else
-            for i in "${!folders[@]}"; do
-                echo "  $((i+1)). ${folders[$i]}"
-            done
+            # 返回一个换行符分隔的字符串
+            printf '%s\n' "${folders[@]}"
+            return 0
         fi
-        echo "${folders[@]}" # 返回一个空格分隔的字符串
     else
         log_and_display "${RED}WebDAV 连接失败，无法获取文件夹列表。${NC}"
         return 1
     fi
 }
 
-# 让用户选择/输入 S3/R2 备份路径
+# ================================================================
+# ===               ↓↓↓ 全新重写的函数 ↓↓↓                     ===
+# ================================================================
+# 让用户选择/输入 S3/R2 备份路径 (已根据新要求重写)
 choose_s3_r2_path() {
-    local default_path="$1" # 当前默认路径
     local selected_path=""
 
     while true; do
-        log_and_display "当前 S3/R2 备份目标路径: ${S3_BACKUP_PATH:-未设置}" "${BLUE}"
-        echo ""
-        log_and_display "请选择 S3/R2 上的备份目标路径："
-        log_and_display "1. 从云端现有文件夹中选择"
-        log_and_display "2. 手动输入新路径（例如: my_backups/daily/ 或 just_files/）"
-        log_and_display "0. 取消设置"
-        read -rp "请输入选项: " path_choice
+        display_header
+        echo -e "${BLUE}=== 设置 S3/R2 备份目标路径 ===${NC}"
+        echo -e "当前路径: ${YELLOW}${S3_BACKUP_PATH:-/ (根目录)}${NC}\n"
 
-        case "$path_choice" in
-            1)
-                local s3_folders_str=$(get_s3_r2_folders)
-                if [ -z "$s3_folders_str" ]; then
-                    log_and_display "${YELLOW}S3/R2 存储桶中没有可用文件夹，请选择手动输入。${NC}"
-                    press_enter_to_continue
-                    continue # 重新显示路径选择菜单
-                fi
-                local IFS=$'\n' s3_folders_array=($s3_folders_str) # 重新解析为数组
-                unset IFS
+        # 获取并显示云端文件夹列表
+        local s3_folders_str=$(get_s3_r2_folders)
+        local s3_folders_array=()
+        if [[ -n "$s3_folders_str" ]]; then
+            # 将换行符分隔的字符串读入数组
+            mapfile -t s3_folders_array <<< "$s3_folders_str"
+        fi
 
-                read -rp "请输入文件夹序号或直接输入完整路径（例如 backup/）: " folder_input
-                if [[ "$folder_input" =~ ^[0-9]+$ ]] && [ "$folder_input" -ge 1 ] && [ "$folder_input" -le ${#s3_folders_array[@]} ]; then
-                    selected_path="${s3_folders_array[$((folder_input-1))]}"
-                else
-                    selected_path="$folder_input"
-                fi
-                # 确保路径以斜杠结尾，如果非空
-                if [[ -n "$selected_path" && "${selected_path: -1}" != "/" ]]; then
-                    selected_path="${selected_path}/"
-                fi
+        if [ ${#s3_folders_array[@]} -gt 0 ]; then
+            echo "云端可用文件夹:"
+            for i in "${!s3_folders_array[@]}"; do
+                echo "  $((i+1)). ${s3_folders_array[$i]}"
+            done
+            echo ""
+            echo "请输入数字以选择一个现有文件夹。"
+        else
+            echo "云端未找到任何文件夹。"
+        fi
+
+        echo -e "${BLUE}------------------------------------------------${NC}"
+        echo "操作选项:"
+        echo -e "  ${GREEN}a${NC} - 手动输入一个新的文件夹路径 (例如 my_new_folder/)"
+        echo -e "  ${GREEN}r${NC} - 设置备份路径为存储桶的根目录"
+        echo -e "  ${GREEN}c${NC} - 取消并返回上一级菜单"
+        echo -e "${BLUE}------------------------------------------------${NC}"
+
+        read -rp "请输入您的选择 (数字或字母): " choice
+
+        # --- 处理用户输入 ---
+        if [[ "$choice" =~ ^[0-9]+$ ]]; then # 如果是数字
+            if [ "$choice" -ge 1 ] && [ "$choice" -le ${#s3_folders_array[@]} ]; then
+                selected_path="${s3_folders_array[$((choice-1))]}"
                 break # 退出循环，进行路径确认
-                ;;
-            2)
-                read -rp "请输入 S3/R2 上的新备份目标路径 (例如 my_backups/daily/): " new_path
-                # 确保路径以斜杠结尾，如果非空
-                if [[ -n "$new_path" && "${new_path: -1}" != "/" ]]; then
-                    new_path="${new_path}/"
-                fi
-                selected_path="$new_path"
-                break # 退出循环，进行路径确认
-                ;;
-            0)
-                log_and_display "取消设置 S3/R2 备份路径。" "${BLUE}"
-                return 1 # 表示取消
-                ;;
-            *)
-                log_and_display "${RED}无效的选项，请重新输入。${NC}"
+            else
+                log_and_display "${RED}无效的数字序号，请重新输入。${NC}"
                 press_enter_to_continue
-                ;;
-        esac
+                continue
+            fi
+        elif [[ "$choice" =~ ^[aArRcC]$ ]]; then # 如果是字母选项
+            case "${choice,,}" in # 转换为小写处理
+                a)
+                    read -rp "请输入新的 S3/R2 目标路径 (例如 my_backups/daily/): " new_path
+                    selected_path="$new_path"
+                    break
+                    ;;
+                r)
+                    selected_path="" # 空字符串代表根目录
+                    break
+                    ;;
+                c)
+                    log_and_display "取消设置 S3/R2 备份路径。" "${BLUE}"
+                    return 1 # 表示取消
+                    ;;
+            esac
+        else
+            log_and_display "${RED}无效的输入，请输入列表中的数字或指定的字母选项。${NC}"
+            press_enter_to_continue
+        fi
     done
 
-    # 确认路径
-    read -rp "您选择的 S3/R2 目标路径是 '${selected_path}'。确认吗？(y/N): " confirm_path
+    # --- 格式化并确认路径 ---
+    # 确保非根目录路径以斜杠结尾
+    if [[ -n "$selected_path" && "${selected_path: -1}" != "/" ]]; then
+        selected_path="${selected_path}/"
+    fi
+
+    local display_path_confirm="${selected_path:-/ (根目录)}"
+    read -rp "您选择的 S3/R2 目标路径是 '${display_path_confirm}'。确认吗？(y/N): " confirm_path
     if [[ "$confirm_path" =~ ^[Yy]$ ]]; then
         S3_BACKUP_PATH="$selected_path"
-        log_and_display "${GREEN}S3/R2 备份路径已设置为：${S3_BACKUP_PATH}${NC}"
+        log_and_display "${GREEN}S3/R2 备份路径已设置为：${display_path_confirm}${NC}"
         return 0 # 表示成功设置
     else
-        log_and_display "${YELLOW}取消设置 S3/R2 备份路径，请重新选择。${NC}"
+        log_and_display "${YELLOW}取消设置，请重新选择。${NC}"
         return 1 # 表示用户决定重新选择
     fi
 }
 
-# 让用户选择/输入 WebDAV 备份路径
+# 让用户选择/输入 WebDAV 备份路径 (已根据新要求重写)
 choose_webdav_path() {
-    local default_path="$1" # 当前默认路径
     local selected_path=""
 
     while true; do
-        log_and_display "当前 WebDAV 备份目标路径: ${WEBDAV_BACKUP_PATH:-未设置}" "${BLUE}"
-        echo ""
-        log_and_display "请选择 WebDAV 上的备份目标路径："
-        log_and_display "1. 从云端现有文件夹中选择"
-        log_and_display "2. 手动输入新路径（例如: my_backups/daily/ 或 just_files/）"
-        log_and_display "0. 取消设置"
-        read -rp "请输入选项: " path_choice
+        display_header
+        echo -e "${BLUE}=== 设置 WebDAV 备份目标路径 ===${NC}"
+        echo -e "当前路径: ${YELLOW}${WEBDAV_BACKUP_PATH:-/ (根目录)}${NC}\n"
 
-        case "$path_choice" in
-            1)
-                local webdav_folders_str=$(get_webdav_folders)
-                if [ -z "$webdav_folders_str" ]; then
-                    log_and_display "${YELLOW}WebDAV 服务器中没有可用文件夹，请选择手动输入。${NC}"
-                    press_enter_to_continue
-                    continue # 重新显示路径选择菜单
-                fi
-                local IFS=$'\n' webdav_folders_array=($webdav_folders_str)
-                unset IFS
+        # 获取并显示云端文件夹列表
+        local webdav_folders_str=$(get_webdav_folders)
+        local webdav_folders_array=()
+        if [[ -n "$webdav_folders_str" ]]; then
+            # 将换行符分隔的字符串读入数组
+            mapfile -t webdav_folders_array <<< "$webdav_folders_str"
+        fi
 
-                read -rp "请输入文件夹序号或直接输入完整路径（例如 backup/）: " folder_input
-                if [[ "$folder_input" =~ ^[0-9]+$ ]] && [ "$folder_input" -ge 1 ] && [ "$folder_input" -le ${#webdav_folders_array[@]} ]; then
-                    selected_path="${webdav_folders_array[$((folder_input-1))]}"
-                else
-                    selected_path="$folder_input"
-                fi
-                # 确保路径以斜杠结尾，如果非空
-                if [[ -n "$selected_path" && "${selected_path: -1}" != "/" ]]; then
-                    selected_path="${selected_path}/"
-                fi
+        if [ ${#webdav_folders_array[@]} -gt 0 ]; then
+            echo "云端可用文件夹:"
+            for i in "${!webdav_folders_array[@]}"; do
+                echo "  $((i+1)). ${webdav_folders_array[$i]}"
+            done
+            echo ""
+            echo "请输入数字以选择一个现有文件夹。"
+        else
+            echo "云端未找到任何文件夹。"
+        fi
+
+        echo -e "${BLUE}------------------------------------------------${NC}"
+        echo "操作选项:"
+        echo -e "  ${GREEN}a${NC} - 手动输入一个新的文件夹路径 (例如 my_new_folder/)"
+        echo -e "  ${GREEN}r${NC} - 设置备份路径为 WebDAV 的根目录"
+        echo -e "  ${GREEN}c${NC} - 取消并返回上一级菜单"
+        echo -e "${BLUE}------------------------------------------------${NC}"
+
+        read -rp "请输入您的选择 (数字或字母): " choice
+
+        # --- 处理用户输入 ---
+        if [[ "$choice" =~ ^[0-9]+$ ]]; then # 如果是数字
+            if [ "$choice" -ge 1 ] && [ "$choice" -le ${#webdav_folders_array[@]} ]; then
+                selected_path="${webdav_folders_array[$((choice-1))]}"
                 break # 退出循环，进行路径确认
-                ;;
-            2)
-                read -rp "请输入 WebDAV 上的新备份目标路径 (例如 my_backups/daily/): " new_path
-                # 确保路径以斜杠结尾，如果非空
-                if [[ -n "$new_path" && "${new_path: -1}" != "/" ]]; then
-                    new_path="${new_path}/"
-                fi
-                selected_path="$new_path"
-                break # 退出循环，进行路径确认
-                ;;
-            0)
-                log_and_display "取消设置 WebDAV 备份路径。" "${BLUE}"
-                return 1 # 表示取消
-                ;;
-            *)
-                log_and_display "${RED}无效的选项，请重新输入。${NC}"
+            else
+                log_and_display "${RED}无效的数字序号，请重新输入。${NC}"
                 press_enter_to_continue
-                ;;
-        esac
+                continue
+            fi
+        elif [[ "$choice" =~ ^[aArRcC]$ ]]; then # 如果是字母选项
+            case "${choice,,}" in # 转换为小写处理
+                a)
+                    read -rp "请输入新的 WebDAV 目标路径 (例如 my_backups/daily/): " new_path
+                    selected_path="$new_path"
+                    break
+                    ;;
+                r)
+                    selected_path="" # 空字符串代表根目录
+                    break
+                    ;;
+                c)
+                    log_and_display "取消设置 WebDAV 备份路径。" "${BLUE}"
+                    return 1 # 表示取消
+                    ;;
+            esac
+        else
+            log_and_display "${RED}无效的输入，请输入列表中的数字或指定的字母选项。${NC}"
+            press_enter_to_continue
+        fi
     done
 
-    read -rp "您选择的 WebDAV 目标路径是 '${selected_path}'。确认吗？(y/N): " confirm_path
+    # --- 格式化并确认路径 ---
+    # 确保非根目录路径以斜杠结尾
+    if [[ -n "$selected_path" && "${selected_path: -1}" != "/" ]]; then
+        selected_path="${selected_path}/"
+    fi
+
+    local display_path_confirm="${selected_path:-/ (根目录)}"
+    read -rp "您选择的 WebDAV 目标路径是 '${display_path_confirm}'。确认吗？(y/N): " confirm_path
     if [[ "$confirm_path" =~ ^[Yy]$ ]]; then
         WEBDAV_BACKUP_PATH="$selected_path"
-        log_and_display "${GREEN}WebDAV 备份路径已设置为：${WEBDAV_BACKUP_PATH}${NC}"
+        log_and_display "${GREEN}WebDAV 备份路径已设置为：${display_path_confirm}${NC}"
         return 0 # 表示成功设置
     else
-        log_and_display "${YELLOW}取消设置 WebDAV 备份路径，请重新选择。${NC}"
+        log_and_display "${YELLOW}取消设置，请重新选择。${NC}"
         return 1 # 表示用户决定重新选择
     fi
 }
+# ================================================================
+# ===               ↑↑↑ 全新重写的函数 ↑↑↑                     ===
+# ================================================================
 
 
 # 管理 S3/R2 账号设置
@@ -773,7 +814,7 @@ manage_s3_r2_account() {
                 if [[ -z "$S3_ACCESS_KEY" || -z "$S3_SECRET_KEY" || -z "$S3_ENDPOINT" || -z "$S3_BUCKET_NAME" ]]; then
                     log_and_display "${RED}S3/R2 配置不完整，无法设置目标路径。请先通过选项 '1' 添加凭证。${NC}"
                 else
-                    if choose_s3_r2_path "$S3_BACKUP_PATH"; then
+                    if choose_s3_r2_path; then
                         save_config # 仅在路径成功设置后保存
                     fi
                 fi
@@ -866,7 +907,7 @@ manage_webdav_account() {
                 if [[ -z "$WEBDAV_URL" || -z "$WEBDAV_USERNAME" || -z "$WEBDAV_PASSWORD" ]]; then
                     log_and_display "${RED}WebDAV 配置不完整，无法设置目标路径。请先通过选项 '1' 添加凭证。${NC}"
                 else
-                    if choose_webdav_path "$WEBDAV_BACKUP_PATH"; then
+                    if choose_webdav_path; then
                         save_config # 仅在路径成功设置后保存
                     fi
                 fi
@@ -1004,7 +1045,7 @@ set_cloud_storage() {
         fi
         local webdav_info="${RED}未配置${NC}"
         if [[ -n "$WEBDAV_URL" && -n "$WEBDAV_USERNAME" ]]; then
-             # 隐藏密码显示
+                # 隐藏密码显示
             local display_url="${WEBDAV_URL}"
             display_url="${display_url/:\/\/www./:\/\/\*\*\*./}"
             webdav_info="${GREEN}已配置${NC} (URL: ${display_url} | 用户名: ${WEBDAV_USERNAME} | 路径: ${WEBDAV_BACKUP_PATH:-未设置})"
