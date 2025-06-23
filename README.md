@@ -7,7 +7,7 @@ LOG_FILE="$HOME/.personal_backup_log.txt"
 
 # Default values (if config file not found)
 BACKUP_SOURCE_PATH=""
-AUTO_BACKUP_INTERVAL_SEC=3600 # Default auto backup interval in seconds (e.g., 3600s = 1 hour)
+AUTO_BACKUP_INTERVAL_DAYS=7 # Default auto backup interval in days (e.g., 7 days = 1 week)
 
 # Cloud storage credentials variables (do NOT hardcode here, enter at runtime or via env/awscli config)
 S3_ACCESS_KEY=""
@@ -67,7 +67,7 @@ press_enter_to_continue() {
 # Save configuration to file
 save_config() {
     echo "BACKUP_SOURCE_PATH=\"$BACKUP_SOURCE_PATH\"" > "$CONFIG_FILE"
-    echo "AUTO_BACKUP_INTERVAL_SEC=$AUTO_BACKUP_INTERVAL_SEC" >> "$CONFIG_FILE"
+    echo "AUTO_BACKUP_INTERVAL_DAYS=$AUTO_BACKUP_INTERVAL_DAYS" >> "$CONFIG_FILE" # Updated variable name
     # Do NOT save sensitive credentials to config file
     log_and_display "配置已保存到 $CONFIG_FILE"
 }
@@ -105,19 +105,20 @@ check_dependencies() {
 set_auto_backup_interval() {
     display_header
     echo -e "${BLUE}=== 1. 自动备份设定 ===${NC}"
-    echo "当前自动备份间隔: ${AUTO_BACKUP_INTERVAL_SEC} 秒"
+    echo "当前自动备份间隔: ${AUTO_BACKUP_INTERVAL_DAYS} 天" # Display in days
     echo ""
-    read -rp "请输入新的自动备份间隔时间（秒，最小60秒，例如 3600 为 1 小时）: " interval_input
+    read -rp "请输入新的自动备份间隔时间（天数，最小1天，例如 7 为 1 周）: " interval_input
 
-    if [[ "$interval_input" =~ ^[0-9]+$ ]] && [ "$interval_input" -ge 60 ]; then
-        AUTO_BACKUP_INTERVAL_SEC="$interval_input"
+    if [[ "$interval_input" =~ ^[0-9]+$ ]] && [ "$interval_input" -ge 1 ]; then # Minimum 1 day
+        AUTO_BACKUP_INTERVAL_DAYS="$interval_input" # Store in days
         save_config
-        log_and_display "${GREEN}自动备份间隔已成功设置为：${AUTO_BACKUP_INTERVAL_SEC} 秒。${NC}"
+        log_and_display "${GREEN}自动备份间隔已成功设置为：${AUTO_BACKUP_INTERVAL_DAYS} 天。${NC}"
         log_and_display "${YELLOW}提示：要使自动备份真正生效，您需要配置 Cron Job 或 Systemd Service 来定期调用此脚本的备份功能。${NC}"
-        log_and_display "${YELLOW}例如，每小时执行一次备份的 Cron Job 条目 (请将 /path/to/your_script.sh 替换为实际路径):${NC}"
-        log_and_display "${YELLOW}0 * * * * bash /path/to/your_script.sh manual_backup_from_cron > /dev/null 2>&1${NC}"
+        # Update cron example to use days if desired, or keep it flexible
+        log_and_display "${YELLOW}例如，每周执行一次备份的 Cron Job 条目 (请将 /path/to/your_script.sh 替换为实际路径):${NC}"
+        log_and_display "${YELLOW}0 0 * * 0 bash /path/to/your_script.sh manual_backup_from_cron > /dev/null 2>&1${NC}" # Example for Sunday midnight
     else
-        log_and_display "${RED}输入无效，请输入一个大于等于 60 的整数。${NC}"
+        log_and_display "${RED}输入无效，请输入一个大于等于 1 的整数。${NC}"
     fi
     press_enter_to_continue
 }
@@ -145,7 +146,7 @@ set_backup_path() {
         log_and_display "${GREEN}备份路径已成功设置为：${BACKUP_SOURCE_PATH}${NC}"
     else
         log_and_display "${RED}错误：输入的路径无效或不存在。${NC}"
-    fi # Corrected from 'F' to 'fi'
+    fi
     press_enter_to_continue
 }
 
@@ -269,7 +270,7 @@ perform_backup() {
                 log_and_display "${GREEN}WebDAV 上传成功！${NC}"
             else
                 log_and_display "${RED}WebDAV 上传失败！请检查 WebDAV 配置、凭证和网络连接。${NC}"
-            fi # Corrected from 'F' to 'fi'
+            fi
         else
             log_and_display "${RED}未找到 'curl' 命令，无法上传到 WebDAV。${NC}"
         fi
@@ -328,7 +329,7 @@ uninstall_script() {
 show_main_menu() {
     display_header
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 功能选项 ━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  1. ${YELLOW}自动备份设定${NC} (当前间隔: ${AUTO_BACKUP_INTERVAL_SEC} 秒)"
+    echo -e "  1. ${YELLOW}自动备份设定${NC} (当前间隔: ${AUTO_BACKUP_INTERVAL_DAYS} 天)" # Display in days
     echo -e "  2. ${YELLOW}手动备份${NC}"
     echo -e "  3. ${YELLOW}自定义备份路径${NC} (当前路径: ${BACKUP_SOURCE_PATH:-未设置})"
     echo -e "  4. ${YELLOW}压缩包格式${NC} (当前支持: ZIP)"
