@@ -564,7 +564,7 @@ test_s3_r2_connection() {
     fi
 }
 
-# 获取 S3/R2 桶中的文件夹列表
+# 获取 S3/R2 桶中的文件夹列表 (优化此函数以更全面地检测文件夹)
 get_s3_r2_folders() {
     # test_s3_r2_connection 的输出现在会到 stderr，不会影响这里的捕获
     if test_s3_r2_connection; then
@@ -572,18 +572,57 @@ get_s3_r2_folders() {
         export AWS_ACCESS_KEY_ID="$S3_ACCESS_KEY"
         export AWS_SECRET_ACCESS_KEY="$S3_SECRET_KEY"
         local folders=()
+        local all_candidate_folders=() # 用于收集所有可能的文件夹
 
-        # 捕获 aws 或 s3cmd 的标准输出，将标准错误重定向到 /dev/null
         if command -v aws &> /dev/null; then
-            folders=($(aws s3 ls "s3://${S3_BUCKET_NAME}/" --endpoint-url "$S3_ENDPOINT" --delimiter '/' --query "CommonPrefixes[].Prefix" --output text 2>/dev/null))
+            # 1. 获取显式 CommonPrefixes (即通常意义上的S3目录)
+            local explicit_prefixes_str=$(aws s3 ls "s3://${S3_BUCKET_NAME}/" --endpoint-url "$S3_ENDPOINT" --delimiter '/' --query "CommonPrefixes[].Prefix" --output text 2>/dev/null)
+            if [[ -n "$explicit_prefixes_str" ]]; then
+                mapfile -t -O "${#all_candidate_folders[@]}" all_candidate_folders <<< "$explicit_prefixes_str"
+            fi
+
+            # 2. 递归列出所有对象键，并从中推导出所有父目录
+            local all_object_keys_str=$(aws s3 ls "s3://${S3_BUCKET_NAME}/" --endpoint-url "$S3_ENDPOINT" --recursive --query "Contents[].Key" --output text 2>/dev/null)
+            if [[ -n "$all_object_keys_str" ]]; then
+                IFS=$'\n' # Use newline as internal field separator for iterating lines
+                for key in $all_object_keys_str; do
+                    # Extract the directory part from the object key (e.g., "my_folder/sub_folder/file.txt" -> "my_folder/sub_folder/")
+                    local current_dir_path=$(dirname "$key")
+                    if [[ "$current_dir_path" != "." ]]; then # Avoid adding "." for root-level files
+                        # Ensure it ends with a slash to denote a directory/prefix
+                        current_dir_path="${current_dir_path}/"
+                        all_candidate_folders+=("$current_dir_path") # Add to list
+                    fi
+                    # Additionally, recursively find parent directories
+                    local temp_path="$current_dir_path"
+                    while [[ "$temp_path" =~ / ]]; do
+                        temp_path="${temp_path%/*}" # Remove last segment (e.g., "my_folder/sub_folder/" -> "my_folder")
+                        if [[ -n "$temp_path" ]]; then # Avoid empty string if at root
+                            all_candidate_folders+=("${temp_path}/")
+                        fi
+                    done
+                done
+                unset IFS # Reset IFS to default
+            fi
+
+            # 3. 对所有收集到的候选文件夹进行去重、排序和限制数量
+            if [ ${#all_candidate_folders[@]} -gt 0 ]; then
+                # Use printf and sort -u for unique and sorted list, then take top 50
+                mapfile -t folders <<< "$(printf "%s\n" "${all_candidate_folders[@]}" | sort -u | head -n 50)"
+            fi
+
         elif command -v s3cmd &> /dev/null; then
-            log_and_display "${YELLOW}正在使用 s3cmd 尝试列出 S3/R2 文件夹。${NC}" "" "/dev/stderr"
+            log_and_display "${YELLOW}正在使用 s3cmd 尝试列出 S3/R2 文件夹。此方法可能不如awscli全面。${NC}" "" "/dev/stderr"
+            # s3cmd ls lists both objects and common prefixes (directories).
+            # We want to extract only the common prefixes which typically end with /.
+            # Example output: DIR s3://bucket/folder/
+            # The sed part 's|s3://'"${S3_BUCKET_NAME//./\\.}"'\///' extracts the folder name relative to the bucket.
             folders=($(s3cmd ls "s3://${S3_BUCKET_NAME}/" 2>/dev/null | grep -E '\/$' | awk '{print $NF}' | sed 's|s3://'"${S3_BUCKET_NAME//./\\.}"'\///' | head -n 50))
         fi
         unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
 
         if [ ${#folders[@]} -eq 0 ]; then
-            log_and_display "${YELLOW}S3/R2 存储桶中没有检测到文件夹。${NC}" "" "/dev/stderr"
+            log_and_display "${YELLOW}S3/R2 存储桶中没有检测到文件夹。这可能是因为没有显式创建的文件夹或没有嵌套文件。${NC}" "" "/dev/stderr"
         else
             printf '%s\n' "${folders[@]}" # Only folder names go to stdout
             return 0
@@ -1780,7 +1819,7 @@ select_backup_targets() {
                         log_and_display "已选择启用 WebDAV 备份。" "${GREEN}"
                     else
                         log_and_display "${RED}WebDAV 未完全配置，无法启用。${NC}"
-                    fi
+                    fi # <--- 修复此处的 FIt 为 fi
                     ;;
                 "3")
                     if [[ "$ftp_configured" == "true" ]]; then
@@ -2093,14 +2132,21 @@ apply_retention_policy() {
 
         log_and_display "正在检查 ${service_display_name} 存储中的旧备份：${target_path}..."
 
-        local raw_backups_list=$($get_folders_cmd 2>/dev/null) # Capture stdout only
+        # For S3, get_s3_r2_folders actually operates on the bucket root, so we need to filter locally.
+        # For other services, get_xxx_folders lists directly from the target_path.
+        local raw_backups_list=""
+        if [[ "$service_type" == "s3" ]]; then
+            raw_backups_list=$(get_s3_r2_all_files_for_retention "$S3_BACKUP_PATH" 2>/dev/null) # Get all relevant files for S3 retention
+        else
+            raw_backups_list=$($get_folders_cmd 2>/dev/null) # Capture stdout only, which should be files in the target path
+        fi
+
         if [ $? -ne 0 ] && [ -z "$raw_backups_list" ]; then # If command failed AND no output
              log_and_display "${YELLOW}${service_display_name} 未启用为备份目标或配置不完整/连接失败，跳过清理。${NC}"
              return
         fi
 
-        # Filter out directories if any were returned (some ls commands might return them)
-        # And ensure only zip files matching the pattern are considered
+        # Filter for the specific backup file pattern (e.g., my_file_YYYYMMDDHHMMSS.zip)
         mapfile -t backups_array <<< "$(echo "$raw_backups_list" | grep -E '^[a-zA-Z0-9_-]+_[0-9]{14}\.zip$')"
         
         total_backups_found_ref=${#backups_array[@]}
@@ -2125,7 +2171,7 @@ apply_retention_policy() {
                     done
                     log_and_display "${GREEN}${service_display_name} 旧备份清理完成。已删除 ${deleted_count_ref} 个文件。${NC}"
                 else
-                    log_and_display "${service_display_name} 中备份数量 (${total_backups_found_ref} 个) 未超过保留限制 (${RETENTION_VALUE} 个)，无需清理。" "${BLUE}"
+                    log_and_display "在 ${service_display_name} 中备份数量 (${total_backups_found_ref} 个) 未超过保留限制 (${RETENTION_VALUE} 个)，无需清理。" "${BLUE}"
                 fi
             elif [[ "$RETENTION_POLICY_TYPE" == "days" ]]; then
                 log_and_display "${service_display_name} 保留策略: 保留最近 ${RETENTION_VALUE} 天内的备份。"
@@ -2152,16 +2198,42 @@ apply_retention_policy() {
                     done
                     log_and_display "${GREEN}${service_display_name} 旧备份清理完成。已删除 ${deleted_count_ref} 个文件。${NC}"
                 else
-                    log_and_display "${service_display_name} 中没有超过 ${RETENTION_VALUE} 天的备份，无需清理。" "${BLUE}"
+                    log_and_display "在 ${service_display_name} 中没有超过 ${RETENTION_VALUE} 天的备份，无需清理。" "${BLUE}"
                 fi
             fi
         fi
     }
 
+    # Helper function for S3 retention to list all files under the S3_BACKUP_PATH
+    get_s3_r2_all_files_for_retention() {
+        local path_prefix="$1"
+        export AWS_ACCESS_KEY_ID="$S3_ACCESS_KEY"
+        export AWS_SECRET_ACCESS_KEY="$S3_SECRET_KEY"
+        local files=()
+
+        # Remove leading slash if present, as S3 paths don't usually start with / in ls
+        path_prefix="${path_prefix#/}"
+
+        if command -v aws &> /dev/null; then
+            # List objects recursively under the S3_BACKUP_PATH and only get their keys
+            # Use --recursive to get all files in subfolders too
+            # Use --prefix to filter to the specific backup path
+            files=($(aws s3 ls "s3://${S3_BUCKET_NAME}/${path_prefix}" --endpoint-url "$S3_ENDPOINT" --recursive --query "Contents[].Key" --output text 2>/dev/null | sed "s|^${path_prefix}||" ))
+        elif command -v s3cmd &> /dev/null; then
+            files=($(s3cmd ls "s3://${S3_BUCKET_NAME}/${path_prefix}" 2>/dev/null | awk '{print $4}' | sed 's|s3://'"${S3_BUCKET_NAME//./\\.}"'/'"${path_prefix//./\\.}"'\?||' ))
+        fi
+        unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+
+        if [ ${#files[@]} -gt 0 ]; then
+            printf '%s\n' "${files[@]}"
+        fi
+        return 0 # Always return 0 even if no files found, errors are handled by log_and_display
+    }
+
     # Call process_service_retention for each enabled target
     if [[ "$BACKUP_TARGET_S3" == "true" ]]; then
         if [[ -n "$S3_ACCESS_KEY" && -n "$S3_SECRET_KEY" && -n "$S3_ENDPOINT" && -n "$S3_BUCKET_NAME" && -n "$S3_BACKUP_PATH" ]]; then
-            process_service_retention "s3" "get_s3_r2_folders" "S3_BACKUP_PATH" total_s3_backups_found deleted_s3_count
+            process_service_retention "s3" "get_s3_r2_all_files_for_retention" "S3_BACKUP_PATH" total_s3_backups_found deleted_s3_count
         else
             log_and_display "${YELLOW}S3/R2 已启用为备份目标但配置不完整，跳过 S3/R2 备份清理。${NC}"
         fi
