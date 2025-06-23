@@ -1,6 +1,6 @@
 # 个人自用数据备份脚本
 
-这是一个为个人用户设计的 Bash 脚本，用于实现数据文件的自动化和手动备份到云存储（支持 S3 兼容服务如 Cloudflare R2 和 WebDAV）。脚本提供了友好的命令行菜单界面，方便用户进行配置和操作。
+这是一个为个人用户设计的 Bash 脚本，用于实现数据文件的自动化和手动备份到云存储（支持 S3 兼容服务如 Cloudflare R2 和 WebDAV），并提供详细的 Telegram 消息通知和云端备份保留策略。脚本提供了友好的命令行菜单界面，方便用户进行配置和操作。
 
 ## 目录
 
@@ -24,9 +24,13 @@
 
   * [5. 云存储设定](#5-云存储设定)
 
+  * [6. 消息通知设定 (Telegram)](#6-消息通知设定-telegram)
+
+  * [7. 设置备份保留策略 (云端)](#7-设置备份保留策略-云端)
+
   * [0. 退出脚本](#0-退出脚本)
 
-  * [999. 卸载脚本](#999-卸载脚本)
+  * [99. 卸载脚本](#99-卸载脚本)
 
 * [常见问题与故障排除](#常见问题与故障排除)
 
@@ -34,25 +38,27 @@
 
 * [许可证](#许可证)
 
----
-
 ## 功能特性
 
 本脚本提供以下核心功能：
 
-1.  **自动备份设定**：允许用户设置自动备份的间隔天数。一旦设定，配合 Cron Job，脚本将根据此间隔智能判断是否执行备份，无需频繁修改 Cron 任务。
+1. **自动备份设定**：允许用户设置自动备份的间隔天数。一旦设定，配合 Cron Job，脚本将根据此间隔智能判断是否执行备份，无需频繁修改 Cron 任务。
 
-2.  **手动备份**：随时触发一次立即备份上传操作，并将备份过程和结果实时展示在终端。
+2. **手动备份**：随时触发一次立即备份上传操作，并将备份过程和结果实时展示在终端。
 
-3.  **自定义备份路径**：用户可以根据需求指定要备份的文件或文件夹的绝对路径。
+3. **自定义备份路径**：用户可以根据需求指定要备份的文件或文件夹的绝对路径。
 
-4.  **压缩包格式**：支持将备份数据压缩成 `.zip` 格式。
+4. **压缩包格式**：支持将备份数据压缩成 `.zip` 格式。
 
-5.  **云存储支持**：
+5. **云存储支持**：
 
-    * **S3 兼容存储**：完全兼容 Amazon S3 API 的服务，包括 **Cloudflare R2 存储桶**。
+   * **S3 兼容存储**：完全兼容 Amazon S3 API 的服务，包括 **Cloudflare R2 存储桶**。
 
-    * **WebDAV 存储**：支持上传到任何 WebDAV 服务器。
+   * **WebDAV 存储**：支持上传到任何 WebDAV 服务器。
+
+6. **消息通知 (Telegram)**：在备份开始、压缩完成、上传成功/失败以及保留策略执行后，通过 Telegram 机器人发送详细的通知消息。
+
+7. **备份保留策略 (云端)**：允许用户设置自动清理云端旧备份的策略，支持按数量（保留最新 N 个）或按天数（保留 N 天内）进行清理，有效管理存储空间。
 
 ## 系统要求
 
@@ -62,11 +68,11 @@
 
 * **必要工具 (依赖项)**：
 
-    * `zip`: 用于文件压缩。
+  * `zip`: 用于文件压缩。
 
-    * `awscli` 或 `s3cmd`: 用于 S3/R2 存储上传。（推荐使用 `awscli`，对 R2 有良好支持）
+  * `awscli` 或 `s3cmd`: 用于 S3/R2 存储上传。（推荐使用 `awscli`，对 R2 有良好支持）
 
-    * `curl`: 用于 WebDAV 存储上传。
+  * `curl`: 用于 WebDAV 存储上传和 Telegram 消息通知。
 
 * **Cron 服务**：用于设置自动备份的定时任务 (Linux/macOS 系统自带)。
 
@@ -74,94 +80,94 @@
 
 请按照以下步骤将脚本安装到你的系统并进行初步设置：
 
-1.  **保存脚本文件**
+1. **保存脚本文件**
 
-    * 在你的终端中，创建一个名为 `personal_backup.sh` 的文件。例如，将其保存在你的主目录 (`~`) 下：
+   * 在你的终端中，创建一个名为 `personal_backup.sh` 的文件。例如，将其保存在你的主目录 (`~`) 下：
 
-        ```bash
-        nano ~/personal_backup.sh
-        ```
+     ```bash
+     nano ~/personal_backup.sh
+     ```
 
-    * 将本 `README.md` 文件中提供的最新脚本代码（在 GitHub 仓库中将是 `personal_backup.sh` 的文件内容）完整复制并粘贴到 `nano` 编辑器中。
+   * 将本 `README.md` 文件中提供的最新脚本代码（在 GitHub 仓库中将是 `personal_backup.sh` 的文件内容）完整复制并粘贴到 `nano` 编辑器中。
 
-    * 保存并退出 `nano`：按下 `Ctrl + X`，输入 `Y`，然后按 `Enter`。
+   * 保存并退出 `nano`：按下 `Ctrl + X`，输入 `Y`，然后按 `Enter`。
 
-2.  **给予脚本执行权限**
+2. **给予脚本执行权限**
 
-    * 在终端中执行以下命令，使脚本可运行：
+   * 在终端中执行以下命令，使脚本可运行：
 
-        ```bash
-        chmod +x ~/personal_backup.sh
-        ```
+     ```bash
+     chmod +x ~/personal_backup.sh
+     ```
 
-3.  **设置快捷启动 (可选，但推荐)**
+3. **设置快捷启动 (可选，但推荐)**
 
-    * 为了方便每次输入 `bf` 即可运行脚本，请在你常用的 Shell 配置文件（如 `~/.bashrc` 或 `~/.zshrc`）中添加一个别名：
+   * 为了方便每次输入 `bf` 即可运行脚本，请在你常用的 Shell 配置文件（如 `~/.bashrc` 或 `~/.zshrc`）中添加一个别名：
 
-        ```bash
-        nano ~/.bashrc  # 或 nano ~/.zshrc
-        ```
+     ```bash
+     nano ~/.bashrc  # 或 nano ~/.zshrc
+     ```
 
-    * 滚动到文件底部，添加以下行：
+   * 滚动到文件底部，添加以下行：
 
-        ```bash
-        alias bf='bash ~/personal_backup.sh'
-        ```
+     ```bash
+     alias bf='bash ~/personal_backup.sh'
+     ```
 
-        **注意**：如果 `personal_backup.sh` 文件不在你的主目录，请替换为其实际的完整路径。
+     **注意**：如果 `personal_backup.sh` 文件不在你的主目录，请替换为其实际的完整路径。
 
-    * 保存并退出 (`Ctrl + X`, `Y`, `Enter`)。
+   * 保存并退出 (`Ctrl + X`, `Y`, `Enter`)。
 
-    * 使配置立即生效：
+   * 使配置立即生效：
 
-        ```bash
-        source ~/.bashrc  # 或 source ~/.zshrc
-        ```
+     ```bash
+     source ~/.bashrc  # 或 source ~/.zshrc
+     ```
 
-        或者，直接关闭并重新打开终端。
+     或者，直接关闭并重新打开终端。
 
-4.  **安装脚本依赖**
+4. **安装脚本依赖**
 
-    * 首次运行脚本时，它会检测并提示你安装缺失的依赖项。请根据你的操作系统选择相应的命令进行安装。
+   * 首次运行脚本时，它会检测并提示你安装缺失的依赖项。请根据你的操作系统选择相应的命令进行安装。
 
-        * **Debian/Ubuntu 系统**：
+     * **Debian/Ubuntu 系统**：
 
-            ```bash
-            sudo apt update
-            sudo apt install zip awscli curl
-            ```
+       ```bash
+       sudo apt update
+       sudo apt install zip awscli curl
+       ```
 
-        * **CentOS/RHEL 系统**：
+     * **CentOS/RHEL 系统**：
 
-            ```bash
-            sudo yum install zip awscli curl
-            # 或 sudo dnf install zip awscli curl
-            ```
+       ```bash
+       sudo yum install zip awscli curl
+       # 或 sudo dnf install zip awscli curl
+       ```
 
-    * 在执行安装命令时，系统可能会要求输入 `root` 密码。
+   * 在执行安装命令时，系统可能会要求输入 `root` 密码。
 
-5.  **设置 Cron Job (实现自动备份)**
+5. **设置 Cron Job (实现自动备份)**
 
-    * 为了让自动备份功能生效，你需要设置一个 Cron Job，让它每天定期运行你的脚本来检查是否到了备份时间。
+   * 为了让自动备份功能生效，你需要设置一个 Cron Job，让它每天定期运行你的脚本来检查是否到了备份时间。
 
-    * 在终端中打开 Cron 表编辑器：
+   * 在终端中打开 Cron 表编辑器：
 
-        ```bash
-        crontab -e
-        ```
+     ```bash
+     crontab -e
+     ```
 
-    * 如果之前有设置过旧的备份 Cron 任务，请务必将其删除。
+   * 如果之前有设置过旧的备份 Cron 任务，请务必将其删除。
 
-    * 在文件底部添加以下一行新的 Cron Job 条目：
+   * 在文件底部添加以下一行新的 Cron Job 条目：
 
-        ```cron
-        0 0 * * * bash /root/personal_backup.sh check_auto_backup > /dev/null 2>&1
-        ```
+     ```cron
+     0 0 * * * bash /root/personal_backup.sh check_auto_backup > /dev/null 2>&1
+     ```
 
-        **重要**：请务必将 `/root/personal_backup.sh` 替换为你脚本的**实际完整路径**。
-        这行 Cron Job 的含义是：每天的午夜 00:00，执行你的备份脚本并带上 `check_auto_backup` 参数。脚本会根据你设定的间隔智能判断是否需要执行备份。
+     **重要**：请务必将 `/root/personal_backup.sh` 替换为你脚本的**实际完整路径**。
+     这行 Cron Job 的含义是：每天的午夜 00:00，执行你的备份脚本并带上 `check_auto_backup` 参数。脚本会根据你设定的间隔智能判断是否需要执行备份。
 
-    * 保存并退出 Cron 表 (`Ctrl + X`, `Y`, `Enter`)。
+   * 保存并退出 Cron 表 (`Ctrl + X`, `Y`, `Enter`)。
 
 ## 使用方法
 
@@ -181,7 +187,9 @@
 手动备份
 自定义备份路径 (当前路径: 未设置/已设置路径)
 压缩包格式 (当前支持: ZIP)
-云存储设定 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+云存储设定 (支持: S3/R2, WebDAV)
+消息通知设定 (Telegram)
+设置备份保留策略 (云端) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 退出脚本
 卸载脚本 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 请输入选项:
 <!-- end list -->
@@ -203,7 +211,7 @@
 
 * 脚本将按照你设定的备份路径进行压缩，并上传到已配置的云存储服务。
 
-* 过程和结果会实时显示在终端，并记录到日志文件 (`~/.personal_backup_log.txt`)。
+* 过程和结果会实时显示在终端，并记录到日志文件 (`~/.personal_backup_log.txt`)，同时通过 Telegram 发送通知。
 
 ### 3. 自定义备份路径
 
@@ -223,25 +231,49 @@
 
 * 进入此子菜单来配置你的云存储服务：
 
-    * **1. 配置 S3/R2 存储**：
+  * **1. 配置 S3/R2 存储**：
 
-        * 输入你的 S3/R2 Access Key ID, Secret Access Key, Endpoint URL 和 Bucket 名称。
+    * 输入你的 S3/R2 Access Key ID, Secret Access Key, Endpoint URL 和 Bucket 名称。
 
-        * **Cloudflare R2 Endpoint 示例**：通常格式为 `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`，请将 `<ACCOUNT_ID>` 替换为你真实的 Cloudflare 账户 ID。
+    * **Cloudflare R2 Endpoint 示例**：通常格式为 `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`，请将 `<ACCOUNT_ID>` 替换为你真实的 Cloudflare 账户 ID。
 
-        * **安全性提示**：出于安全考虑，这些敏感凭证**不会**被保存到脚本配置文件中。每次脚本启动时，你需要重新输入它们，或者更推荐的方式是使用 `awscli` 的标准配置机制（`aws configure`）或环境变量来管理。
+    * **安全性提示**：出于安全考虑，这些敏感凭证**不会**被保存到脚本配置文件中。每次脚本启动时，你需要重新输入它们，或者更推荐的方式是使用 `awscli` 的标准配置机制（`aws configure`）或环境变量来管理。
 
-    * **2. 配置 WebDAV 存储**：
+  * **2. 配置 WebDAV 存储**：
 
-        * 输入你的 WebDAV 服务器 URL, 用户名和密码。密码输入时会隐藏。
+    * 输入你的 WebDAV 服务器 URL, 用户名和密码。密码输入时会隐藏。
 
-        * **安全性提示**：WebDAV 凭证同样**不会**被保存到配置文件中，每次脚本启动需要重新输入。
+    * **安全性提示**：WebDAV 凭证同样**不会**被保存到配置文件中，每次脚本启动需要重新输入。
+
+### 6. 消息通知设定 (Telegram)
+
+* 选择此选项以配置 Telegram 机器人的 Token 和 Chat ID。
+
+* **重要提示**：Telegram Bot Token 和 Chat ID 同样**不会**被保存到配置文件中，每次脚本启动需要重新输入。
+
+* **获取 Bot Token**：通过 Telegram 搜索 `@BotFather`，并按照提示创建一个新的机器人，它会提供给你 Bot Token。
+
+* **获取 Chat ID**：向你的机器人发送一条消息，然后访问 `https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates`（将 `<YOUR_BOT_TOKEN>` 替换为你的 Bot Token）。在返回的 JSON 中查找 `chat` 对象里的 `id` 字段，这就是你的 Chat ID（通常以 `-` 开头）。
+
+### 7. 设置备份保留策略 (云端)
+
+* 选择此选项以配置云端备份文件的保留策略，帮助你管理存储空间并自动清理旧的备份。
+
+* 你可以选择以下两种策略之一：
+
+  * **按数量保留**：只保留最新的 N 个备份文件。例如，设置为 5，则在每次新备份完成后，如果总数超过 5 个，最旧的备份将被删除。
+
+  * **按天数保留**：只保留最近 N 天内的备份文件。例如，设置为 30，则任何创建时间超过 30 天的备份文件都将被删除。
+
+* 你也可以选择**关闭保留策略**，这意味着所有上传到云端的备份都将一直保留，直到你手动删除。
+
+* 此设置会保存到 `~/.personal_backup_config` 文件中。
 
 ### 0. 退出脚本
 
 * 安全退出脚本。
 
-### 999. 卸载脚本
+### 99. 卸载脚本
 
 * 此选项会提示你是否确认卸载脚本。
 
@@ -253,75 +285,93 @@
 
 这里列出了一些在开发和使用过程中可能遇到的常见问题及其解决方案：
 
-1.  **“`/root/personal_backup.sh: line X: command not found` 或 `syntax error`”**
+1. **“`/root/personal_backup.sh: line X: command not found` 或 `syntax error`”**
 
-    * **问题原因**：这通常是由于在复制粘贴脚本代码时，引入了不可见的特殊字符（如不间断空格 `\u00A0`），或者文件编码/换行符格式问题（例如在 Windows 系统下编辑后上传到 Linux）。Bash 无法识别这些隐藏字符。
+   * **问题原因**：这通常是由于在复制粘贴脚本代码时，引入了不可见的特殊字符（如不间断空格 `\u00A0`），或者文件编码/换行符格式问题（例如在 Windows 系统下编辑后上传到 Linux）。Bash 无法识别这些隐藏字符。
 
-    * **解决方案**：
+   * **解决方案**：
 
-        1.  **重新复制粘贴**：最彻底的方法是再次从 GitHub 仓库中复制 `personal_backup.sh` 的内容。
+     1. **重新复制粘贴**：最彻底的方法是再次从 GitHub 仓库中复制 `personal_backup.sh` 的内容。
 
-        2.  **使用 `nano` 编辑器**：在 Linux 终端中，用 `nano ~/personal_backup.sh` 打开文件。
+     2. **使用 `nano` 编辑器**：在 Linux 终端中，用 `nano ~/personal_backup.sh` 打开文件。
 
-        3.  **清空内容**：在 `nano` 中按住 `Ctrl + K` 连续删除所有旧代码。
+     3. **清空内容**：在 `nano` 中按住 `Ctrl + K` 连续删除所有旧代码。
 
-        4.  **粘贴新代码**：使用 `Ctrl + Shift + V`（Linux）或 `Cmd + V`（macOS）粘贴最新、干净的代码。
+     4. **粘贴新代码**：使用 `Ctrl + Shift + V`（Linux）或 `Cmd + V`（macOS）粘贴最新、干净的代码。
 
-        5.  **清除换行符 (可选)**：保存并退出后，可以尝试运行 `dos2unix ~/personal_backup.sh` 命令（如果系统没有，先安装 `sudo apt install dos2unix`）。
+     5. **清除换行符 (可选)**：保存并退出后，可以尝试运行 `dos2unix ~/personal_backup.sh` 命令（如果系统没有，先安装 `sudo apt install dos2unix`）。
 
-        6.  **避免跨系统编辑**：尽量避免在 Windows 系统上编辑此脚本，直接在 Linux 终端中操作。
+     6. **避免跨系统编辑**：尽量避免在 Windows 系统上编辑此脚本，直接在 Linux 终端中操作。
 
-2.  **“检测到以下依赖项缺失：zip awscli 或 s3cmd (用于S3/R2)”**
+2. **“检测到以下依赖项缺失：zip awscli 或 s3cmd (用于S3/R2)”**
 
-    * **问题原因**：你的系统缺少运行备份功能（如压缩、上传到云存储）所需的工具。
+   * **问题原因**：你的系统缺少运行备份功能（如压缩、上传到云存储）所需的工具。
 
-    * **解决方案**：按照脚本提示，根据你的操作系统类型，在终端中运行相应的安装命令。
+   * **解决方案**：按照脚本提示，根据你的操作系统类型，在终端中运行相应的安装命令。
 
-        * **Debian/Ubuntu**：`sudo apt update && sudo apt install zip awscli curl`
+     * **Debian/Ubuntu**：`sudo apt update && sudo apt install zip awscli curl`
 
-        * **CentOS/RHEL**：`sudo yum install zip awscli curl` (或 `sudo dnf install zip awscli curl`)
+     * **CentOS/RHEL**：`sudo yum install zip awscli curl` (或 `sudo dnf install zip awscli curl`)
 
-    * 确保所有必要的工具都被安装后，再次运行脚本。
+   * 确保所有必要的工具都被安装后，再次运行脚本。
 
-3.  **S3/R2 上传失败，提示“配置、凭证和网络连接”问题**
+3. **S3/R2 上传失败，提示“配置、凭证和网络连接”问题**
 
-    * **问题原因**：
+   * **问题原因**：
 
-        * S3/R2 Access Key ID 或 Secret Access Key 输入错误。
+     * S3/R2 Access Key ID 或 Secret Access Key 输入错误。
 
-        * S3/R2 Endpoint URL 不正确（尤其对于 Cloudflare R2，确保 `<ACCOUNT_ID>` 部分正确）。
+     * S3/R2 Endpoint URL 不正确（尤其对于 Cloudflare R2，确保 `<ACCOUNT_ID>` 部分正确）。
 
-        * S3/R2 Bucket 名称不正确。
+     * S3/R2 Bucket 名称不正确。
 
-        * 网络连接问题，无法访问 S3/R2 服务。
+     * 网络连接问题，无法访问 S3/R2 服务。
 
-        * AWS CLI 未正确配置或凭证已过期。
+     * AWS CLI 未正确配置或凭证已过期。
 
-    * **解决方案**：
+   * **解决方案**：
 
-        * 仔细检查你在“云存储设定”中输入的各项信息，确保它们与你的云服务提供商提供的信息完全一致。
+     * 仔细检查你在“云存储设定”中输入的各项信息，确保它们与你的云服务提供商提供的信息完全一致。
 
-        * 如果你使用 `awscli`，考虑通过 `aws configure` 命令配置持久性凭证，这样更稳定和安全。对于 R2，确保 `~/.aws/config` 中的 `endpoint_url` 配置正确。
+     * 如果你使用 `awscli`，考虑通过 `aws configure` 命令配置持久性凭证，这样更稳定和安全。对于 R2，确保 `~/.aws/config` 中的 `endpoint_url` 配置正确。
 
-4.  **WebDAV 上传失败**
+4. **WebDAV 上传失败**
 
-    * **问题原因**：
+   * **问题原因**：
 
-        * WebDAV URL 不正确，或路径不正确（例如，缺少末尾的 `/`）。
+     * WebDAV URL 不正确，或路径不正确（例如，缺少末尾的 `/`）。
 
-        * WebDAV 用户名或密码错误。
+     * WebDAV 用户名或密码错误。
 
-        * WebDAV 服务器未启动或无法访问。
+     * WebDAV 服务器未启动或无法访问。
 
-        * 服务器防火墙阻止了对外访问。
+     * 服务器防火墙阻止了对外访问。
 
-    * **解决方案**：
+   * **解决方案**：
 
-        * 检查 WebDAV URL 的格式和可访问性。
+     * 检查 WebDAV URL 的格式和可访问性。
 
-        * 验证用户名和密码是否正确。
+     * 验证用户名和密码是否正确。
 
-        * 确保你的 WebDAV 服务器正常运行，并且从你的备份服务器可以访问到它。
+     * 确保你的 WebDAV 服务器正常运行，并且从你的备份服务器可以访问到它。
+
+5. **Telegram 消息通知无法发送**
+
+   * **问题原因**：
+
+     * Telegram Bot Token 或 Chat ID 不正确。
+
+     * 网络连接问题，无法访问 Telegram API。
+
+     * Bot 被停止或权限不足。
+
+   * **解决方案**：
+
+     * 仔细核对你在“消息通知设定”中输入的 Bot Token 和 Chat ID。
+
+     * 确保你的服务器可以访问 `api.telegram.org`。
+
+     * 在 Telegram 中检查你的机器人是否正常运行，并确保它有向你发送消息的权限。
 
 ## 贡献
 
@@ -330,7 +380,5 @@
 ## 许可证
 
 本项目采用 [MIT 许可证](LICENSE)。
-
----
 
 感谢使用！希望这个脚本能帮助你轻松管理个人数据备份。
