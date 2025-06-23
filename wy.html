@@ -564,14 +564,14 @@
             // GitHub link update
             // 请将此处替换为您的实际 GitHub 仓库地址！
             const githubLink = document.getElementById('github-link');
-            const realGithubUrl = 'https://github.com/wk4796/123'; // <-- **重要：请替换为您的真实GitHub仓库链接**
+            const realGithubUrl = 'https://github.com/your-username/your-repo-name'; // <-- **重要：请替换为您的真实GitHub仓库链接**
             
             if (githubLink) {
                 githubLink.href = realGithubUrl;
                 // 移除之前的 alert 提示
                 githubLink.removeEventListener('click', function(e) {
                     e.preventDefault();
-                    alert('https://github.com/wk4796/123');
+                    alert('请将此处的链接替换为您真实的 GitHub 仓库地址！');
                 });
             }
         });
