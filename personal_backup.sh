@@ -14,7 +14,7 @@ LAST_AUTO_BACKUP_TIMESTAMP=0 # Unix timestamp of last automatic backup
 RETENTION_POLICY_TYPE="none" # "none", "count", "days"
 RETENTION_VALUE=0           # Number of backups to keep or days to keep
 
-# Cloud storage credentials variables (do NOT hardcode here, enter at runtime or via env/awscli config)
+# Cloud storage credentials variables (NOW loaded/saved from config file for convenience)
 S3_ACCESS_KEY=""
 S3_SECRET_KEY=""
 S3_ENDPOINT="" # Cloudflare R2 Endpoint, e.g., "https://<ACCOUNT_ID>.r2.cloudflarestorage.com"
@@ -24,7 +24,7 @@ WEBDAV_URL=""
 WEBDAV_USERNAME=""
 WEBDAV_PASSWORD=""
 
-# New: Telegram Notification Variables (do NOT hardcode here, enter at runtime)
+# New: Telegram Notification Variables (NOW loaded/saved from config file for convenience)
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
 
@@ -32,7 +32,6 @@ TELEGRAM_CHAT_ID=""
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
-# Removed explicit WHITE='\033[0;37m' as user prefers default terminal white
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color - Reset to default terminal color
 
@@ -72,22 +71,42 @@ press_enter_to_continue() {
     clear_screen
 }
 
-# --- Configuration save and load ---
+# --- Configuration save and load (Modified) ---
 
 # Save configuration to file
 save_config() {
     echo "BACKUP_SOURCE_PATH=\"$BACKUP_SOURCE_PATH\"" > "$CONFIG_FILE"
     echo "AUTO_BACKUP_INTERVAL_DAYS=$AUTO_BACKUP_INTERVAL_DAYS" >> "$CONFIG_FILE"
     echo "LAST_AUTO_BACKUP_TIMESTAMP=$LAST_AUTO_BACKUP_TIMESTAMP" >> "$CONFIG_FILE" # Save last backup timestamp
-    echo "RETENTION_POLICY_TYPE=\"$RETENTION_POLICY_TYPE\"" >> "$CONFIG_FILE" # Save retention policy type
-    echo "RETENTION_VALUE=$RETENTION_VALUE" >> "$CONFIG_FILE"             # Save retention value
-    # Do NOT save sensitive credentials to config file
+    echo "RETENTION_POLICY_TYPE=\"$RETENTION_POLICY_TYPE\"" >> "$CONFIG_FILE"     # Save retention policy type
+    echo "RETENTION_VALUE=$RETENTION_VALUE" >> "$CONFIG_FILE"                   # Save retention value
+
+    # NEW: Save sensitive credentials to config file for automated backups
+    echo "S3_ACCESS_KEY=\"$S3_ACCESS_KEY\"" >> "$CONFIG_FILE"
+    echo "S3_SECRET_KEY=\"$S3_SECRET_KEY\"" >> "$CONFIG_FILE"
+    echo "S3_ENDPOINT=\"$S3_ENDPOINT\"" >> "$CONFIG_FILE"
+    echo "S3_BUCKET_NAME=\"$S3_BUCKET_NAME\"" >> "$CONFIG_FILE"
+
+    echo "WEBDAV_URL=\"$WEBDAV_URL\"" >> "$CONFIG_FILE"
+    echo "WEBDAV_USERNAME=\"$WEBDAV_USERNAME\"" >> "$CONFIG_FILE"
+    echo "WEBDAV_PASSWORD=\"$WEBDAV_PASSWORD\"" >> "$CONFIG_FILE"
+
+    echo "TELEGRAM_BOT_TOKEN=\"$TELEGRAM_BOT_TOKEN\"" >> "$CONFIG_FILE"
+    echo "TELEGRAM_CHAT_ID=\"$TELEGRAM_CHAT_ID\"" >> "$CONFIG_FILE"
+
     log_and_display "配置已保存到 $CONFIG_FILE"
+    # IMPORTANT: Immediately set secure permissions for the config file
+    chmod 600 "$CONFIG_FILE" 2>/dev/null # Suppress error if chmod fails (e.g., on read-only fs)
+    log_and_display "${YELLOW}已将配置文件 $CONFIG_FILE 权限设置为 600 (只有所有者可读写)，请确保您的系统安全。${NC}"
 }
 
 # Load configuration from file
 load_config() {
     if [[ -f "$CONFIG_FILE" ]]; then
+        # Ensure config file has secure permissions before sourcing (warn if not 600)
+        if [[ "$(stat -c "%a" "$CONFIG_FILE" 2>/dev/null)" != "600" ]]; then
+            log_and_display "${YELLOW}警告：配置文件 $CONFIG_FILE 权限不安全 ($(stat -c "%a" "$CONFIG_FILE" 2>/dev/null))，建议设置为 600。${NC}"
+        fi
         source "$CONFIG_FILE"
         log_and_display "配置已从 $CONFIG_FILE 加载。" "${BLUE}"
     else
@@ -97,17 +116,23 @@ load_config() {
 
 # --- Core functions ---
 
-# Check required dependencies
+# Check required dependencies (Modified)
 check_dependencies() {
     local missing_deps=()
     command -v zip &> /dev/null || missing_deps+=("zip")
-    command -v aws &> /dev/null || command -v s3cmd &> /dev/null || missing_deps+=("awscli 或 s3cmd (用于S3/R2)")
-    command -v curl &> /dev/null || missing_deps+=("curl (用于WebDAV)")
-    # New: Check curl for Telegram notifications
+
+    # Check S3/R2 dependencies only if S3/R2 credentials are set in config
+    if [[ -n "$S3_ACCESS_KEY" && -n "$S3_SECRET_KEY" && -n "$S3_ENDPOINT" && -n "$S3_BUCKET_NAME" ]]; then
+        command -v aws &> /dev/null || command -v s3cmd &> /dev/null || missing_deps+=("awscli 或 s3cmd (用于S3/R2)")
+    fi
+    # Check WebDAV dependencies only if WebDAV credentials are set in config
+    if [[ -n "$WEBDAV_URL" && -n "$WEBDAV_USERNAME" && -n "$WEBDAV_PASSWORD" ]]; then
+        command -v curl &> /dev/null || missing_deps+=("curl (用于WebDAV)")
+    fi
+    # Check curl for Telegram notifications only if Telegram credentials are set in config
     if [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
         command -v curl &> /dev/null || missing_deps+=("curl (用于Telegram)")
     fi
-
 
     if [ ${#missing_deps[@]} -gt 0 ]; then
         log_and_display "${RED}检测到以下依赖项缺失，请安装后重试：${missing_deps[*]}${NC}"
@@ -130,15 +155,23 @@ send_telegram_message() {
 
     log_and_display "正在发送 Telegram 消息..." ""
     # Use -s for silent, -X POST for POST request, -d for data, --data-urlencode to encode message
+    # Ensure message content is URL-encoded for safety
+    local encoded_message=$(printf %s "$message_content" | jq -sRr @uri) # Requires jq for robust URL encoding
+    if [ $? -ne 0 ]; then
+        log_and_display "${RED}警告：无法进行 URL 编码，请安装 'jq' (sudo apt install jq) 或手动检查消息内容。尝试发送未编码消息。${NC}"
+        encoded_message=$(printf %s "$message_content" | sed 's/\([&/?= ]\)/%\1/g') # Fallback simple encoding
+    fi
+
     if curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
         -d "chat_id=${TELEGRAM_CHAT_ID}" \
-        -d "text=${message_content}" \
+        -d "text=${encoded_message}" \
         -d "parse_mode=Markdown" > /dev/null; then
         log_and_display "${GREEN}Telegram 消息发送成功。${NC}" ""
     else
         log_and_display "${RED}Telegram 消息发送失败，请检查 Bot Token 和 Chat ID。${NC}" ""
     fi
 }
+
 
 # 1. Set auto backup interval
 set_auto_backup_interval() {
@@ -178,6 +211,11 @@ set_backup_path() {
     echo ""
     read -rp "请输入要备份的文件或文件夹的绝对路径（例如 /home/user/mydata 或 /etc/nginx/nginx.conf）: " path_input
 
+    # Remove trailing slash for consistency when zipping directories, but only if it's a directory
+    if [[ -d "$path_input" ]]; then
+        path_input="${path_input%/}" # Remove trailing slash
+    fi
+
     if [[ -d "$path_input" || -f "$path_input" ]]; then
         BACKUP_SOURCE_PATH="$path_input"
         save_config
@@ -197,7 +235,7 @@ display_compression_info() {
     press_enter_to_continue
 }
 
-# 5. Cloud storage settings
+# 5. Cloud storage settings (Modified)
 set_cloud_storage() {
     while true; do
         display_header
@@ -211,23 +249,24 @@ set_cloud_storage() {
         case $sub_choice in
             1)
                 log_and_display "--- 配置 S3/R2 存储 ---"
-                log_and_display "${YELLOW}注意：S3/R2 凭证不会保存到配置文件，每次脚本启动需要重新输入或依赖 AWS CLI 配置。${NC}"
+                log_and_display "${YELLOW}凭证将保存到本地配置文件，请确保配置文件安全！${NC}"
                 read -rp "请输入 S3/R2 Access Key ID: " S3_ACCESS_KEY
                 read -rp "请输入 S3/R2 Secret Access Key: " S3_SECRET_KEY
                 read -rp "请输入 S3/R2 Endpoint URL (例如 Cloudflare R2 的 https://<ACCOUNT_ID>.r2.cloudflarestorage.com): " S3_ENDPOINT
                 read -rp "请输入 S3/R2 Bucket 名称: " S3_BUCKET_NAME
-                log_and_display "${GREEN}S3/R2 配置已更新 (仅本次运行生效，或通过 AWS CLI 持久化)。${NC}"
-                log_and_display "${YELLOW}建议您通过 'aws configure' 或设置环境变量来管理 AWS CLI 凭证，以增强安全性。${NC}"
+                save_config # Save credentials to config file
+                log_and_display "${GREEN}S3/R2 配置已更新并保存。${NC}"
                 press_enter_to_continue
                 ;;
             2)
                 log_and_display "--- 配置 WebDAV 存储 ---"
-                log_and_display "${YELLOW}注意：WebDAV 凭证不会保存到配置文件，每次脚本启动需要重新输入。${NC}"
+                log_and_display "${YELLOW}凭证将保存到本地配置文件，请确保配置文件安全！${NC}"
                 read -rp "请输入 WebDAV URL (例如 http://your.webdav.server/path/): " WEBDAV_URL
                 read -rp "请输入 WebDAV 用户名: " WEBDAV_USERNAME
                 read -rp "请输入 WebDAV 密码: " -s WEBDAV_PASSWORD # -s hides input
                 echo "" # New line
-                log_and_display "${GREEN}WebDAV 配置已更新 (仅本次运行生效)。${NC}"
+                save_config # Save credentials to config file
+                log_and_display "${GREEN}WebDAV 配置已更新并保存。${NC}"
                 press_enter_to_continue
                 ;;
             0)
@@ -242,14 +281,15 @@ set_cloud_storage() {
     done
 }
 
-# New: 6. Set Telegram Notification Settings
+# New: 6. Set Telegram Notification Settings (Modified)
 set_telegram_notification() {
     display_header
     echo -e "${BLUE}=== 6. 消息通知设定 (Telegram) ===${NC}"
-    log_and_display "${YELLOW}注意：Telegram Bot Token 和 Chat ID 不会保存到配置文件，每次脚本启动需要重新输入。${NC}"
+    log_and_display "${YELLOW}Telegram Bot Token 和 Chat ID 将保存到本地配置文件，请确保配置文件安全！${NC}"
     read -rp "请输入 Telegram Bot Token (例如 123456:ABC-DEF1234ghIkl-79f): " TELEGRAM_BOT_TOKEN
     read -rp "请输入 Telegram Chat ID (例如 -123456789 或 123456789): " TELEGRAM_CHAT_ID
-    log_and_display "${GREEN}Telegram 通知配置已更新 (仅本次运行生效)。${NC}"
+    save_config # Save credentials to config file
+    log_and_display "${GREEN}Telegram 通知配置已更新并保存。${NC}"
     log_and_display "${YELLOW}提示：您可以向 @BotFather 获取 Bot Token，然后向您的 Bot 发送消息，再访问 https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates 获取 Chat ID。${NC}"
     press_enter_to_continue
 }
@@ -318,7 +358,7 @@ set_retention_policy() {
 }
 
 
-# Function to apply retention policy
+# Function to apply retention policy (Modified)
 # This function will check S3/R2 and WebDAV for old backups and delete them
 apply_retention_policy() {
     log_and_display "${BLUE}--- 正在应用备份保留策略 ---${NC}"
@@ -335,15 +375,18 @@ apply_retention_policy() {
     local total_webdav_backups_found=0
 
     # --- S3/R2 Cleanup ---
+    # Only attempt S3/R2 cleanup if configuration is complete
     if [[ -n "$S3_ACCESS_KEY" && -n "$S3_SECRET_KEY" && -n "$S3_ENDPOINT" && -n "$S3_BUCKET_NAME" ]]; then
         log_and_display "正在检查 S3/R2 存储桶中的旧备份：${S3_BUCKET_NAME}..."
         local s3_backups=()
         if command -v aws &> /dev/null; then
-             # Temporarily set AWS credentials for this command
+            # Using globally loaded S3_ACCESS_KEY and S3_SECRET_KEY
             AWS_ACCESS_KEY_ID="$S3_ACCESS_KEY" \
             AWS_SECRET_ACCESS_KEY="$S3_SECRET_KEY" \
             s3_backups=($(aws s3 ls "s3://${S3_BUCKET_NAME}/" --endpoint-url "$S3_ENDPOINT" | awk '{print $4}' | grep '^backup_[0-9]\{14\}\.zip$'))
         elif command -v s3cmd &> /dev/null; then
+            # s3cmd typically reads from ~/.s3cfg, but direct key passing might also be possible depending on version
+            # For simplicity, relying on pre-configured s3cmd here
             s3_backups=($(s3cmd ls "s3://${S3_BUCKET_NAME}/" | awk '{print $4}' | sed 's/s3:\/\/'"${S3_BUCKET_NAME//./\\.}"'\///' | grep '^backup_[0-9]\{14\}\.zip$'))
         fi
         total_s3_backups_found=${#s3_backups[@]}
@@ -389,10 +432,10 @@ apply_retention_policy() {
                         if command -v aws &> /dev/null; then
                             AWS_ACCESS_KEY_ID="$S3_ACCESS_KEY" \
                             AWS_SECRET_ACCESS_KEY="$S3_SECRET_KEY" \
-                            aws s3 rm "s3://${S3_BUCKET_NAME}/${file_to_delete}" --endpoint-url "$S3_ENDPOINT" &> /dev/null
+                            aws s3 rm "s3://${S3_BUCKET_NAME}/${backup_file}" --endpoint-url "$S3_ENDPOINT" &> /dev/null
                             if [ $? -eq 0 ]; then deleted_s3_count=$((deleted_s3_count + 1)); fi
                         elif command -v s3cmd &> /dev/null; then
-                            s3cmd del "s3://${S3_BUCKET_NAME}/${file_to_delete}" &> /dev/null
+                            s3cmd del "s3://${S3_BUCKET_NAME}/${backup_file}" &> /dev/null
                             if [ $? -eq 0 ]; then deleted_s3_count=$((deleted_s3_count + 1)); fi
                         fi
                     fi
@@ -405,6 +448,7 @@ apply_retention_policy() {
     fi
 
     # --- WebDAV Cleanup ---
+    # Only attempt WebDAV cleanup if configuration is complete
     if [[ -n "$WEBDAV_URL" && -n "$WEBDAV_USERNAME" && -n "$WEBDAV_PASSWORD" ]]; then
         log_and_display "正在检查 WebDAV 服务器中的旧备份：${WEBDAV_URL}..."
         local webdav_backups=()
@@ -413,7 +457,8 @@ apply_retention_policy() {
             # Note: This is a basic listing, might need adjustment based on WebDAV server's 'ls' output
             # Assumes the URL ends with a slash to list contents of a directory.
             # Using -L to follow redirects, --list-only to get directory listing, --fail-with-body for better error details
-            local curl_output=$(curl -s -L -k --user "$WEBDAV_USERNAME:$WEBDAV_PASSWORD" --request PROPFIND --header "Depth: 1" "${WEBDAV_URL%/}/" | grep -oP '<D:href>\K[^<]*backup_[0-9]{14}\.zip(?=</D:href>)')
+            # Added pipe to tr -d '\r' to handle potential Windows-style line endings
+            local curl_output=$(curl -s -L -k --user "$WEBDAV_USERNAME:$WEBDAV_PASSWORD" --request PROPFIND --header "Depth: 1" "${WEBDAV_URL%/}/" | tr -d '\r' | grep -oP '<D:href>\K[^<]*backup_[0-9]{14}\.zip(?=</D:href>)')
             IFS=$'\n' read -r -d '' -a webdav_backups <<< "$curl_output"
             unset IFS
         fi
@@ -469,7 +514,7 @@ apply_retention_policy() {
 }
 
 
-# Core logic to perform backup upload
+# Core logic to perform backup upload (Modified)
 # Param 1: backup type (e.g., "手动备份", "自动备份")
 perform_backup() {
     local backup_type="$1"
@@ -499,7 +544,24 @@ perform_backup() {
 
     # --- Compress files ---
     log_and_display "正在压缩文件..."
-    if zip -r "$temp_archive_path" "$BACKUP_SOURCE_PATH" &> /dev/null; then
+    # If BACKUP_SOURCE_PATH is a directory, zip its content, not the directory itself
+    # Adjusted zip command to handle both files and directories more consistently
+    if [[ -d "$BACKUP_SOURCE_PATH" ]]; then
+        # For directories, zip the contents (e.g., /home/user/mydata -> mydata/*)
+        # Use a subshell to change directory, so it doesn't affect the main script's CWD
+        (cd "$(dirname "$BACKUP_SOURCE_PATH")" && zip -r "$temp_archive_path" "$(basename "$BACKUP_SOURCE_PATH")") &> /dev/null
+    elif [[ -f "$BACKUP_SOURCE_PATH" ]]; then
+        # For files, just zip the file
+        zip "$temp_archive_path" "$BACKUP_SOURCE_PATH" &> /dev/null
+    else
+        log_and_display "${RED}文件压缩失败！备份源路径 '$BACKUP_SOURCE_PATH' 无效或不存在。${NC}"
+        send_telegram_message "*个人自用数据备份：压缩失败*\n时间: ${readable_time}\n源路径: \`${BACKUP_SOURCE_PATH}\`\n原因: 备份源路径无效或不存在。"
+        rm -f "$temp_archive_path" 2>/dev/null
+        return 1
+    fi
+
+
+    if [ $? -eq 0 ]; then
         log_and_display "${GREEN}文件压缩成功！${NC}"
         backup_file_size=$(du -h "$temp_archive_path" | awk '{print $1}')
         local compress_message="*个人自用数据备份：压缩成功*\n文件: \`${archive_name}\`\n大小: ${backup_file_size}"
@@ -512,6 +574,7 @@ perform_backup() {
     fi
 
     # --- Upload to S3/R2 ---
+    # Now using globally loaded S3_ACCESS_KEY, S3_SECRET_KEY
     if [[ -n "$S3_ACCESS_KEY" && -n "$S3_SECRET_KEY" && -n "$S3_ENDPOINT" && -n "$S3_BUCKET_NAME" ]]; then
         log_and_display "正在尝试上传到 S3/R2 存储桶：${S3_BUCKET_NAME}..."
         backup_destinations+="S3/R2 (${S3_BUCKET_NAME})\n"
@@ -519,6 +582,8 @@ perform_backup() {
         local s3_success=0
 
         if command -v aws &> /dev/null; then
+            # Using globally loaded AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
+            # Temporarily set them for the command execution if not already in env
             AWS_ACCESS_KEY_ID="$S3_ACCESS_KEY" \
             AWS_SECRET_ACCESS_KEY="$S3_SECRET_KEY" \
             s3_command_output=$(aws s3 cp "$temp_archive_path" "s3://${S3_BUCKET_NAME}/${archive_name}" --endpoint-url "$S3_ENDPOINT" 2>&1)
@@ -545,6 +610,7 @@ perform_backup() {
     fi
 
     # --- Upload to WebDAV ---
+    # Now using globally loaded WEBDAV_URL, WEBDAV_USERNAME, WEBDAV_PASSWORD
     if [[ -n "$WEBDAV_URL" && -n "$WEBDAV_USERNAME" && -n "$WEBDAV_PASSWORD" ]]; then
         log_and_display "正在尝试上传到 WebDAV 服务器：${WEBDAV_URL}..."
         backup_destinations+="WebDAV (${WEBDAV_URL})\n"
@@ -594,7 +660,7 @@ perform_backup() {
     # Update last auto backup timestamp if this was an automatic backup
     if [[ "$backup_type" == "自动备份" || "$backup_type" == "自动备份 (Cron)" ]]; then
         LAST_AUTO_BACKUP_TIMESTAMP=$(date +%s) # Get current Unix timestamp
-        save_config # Save updated timestamp
+        save_config # Save updated timestamp (this will also save current credentials)
         log_and_display "已更新上次自动备份时间戳：$(date -d @$LAST_AUTO_BACKUP_TIMESTAMP '+%Y-%m-%d %H:%M:%S')" "${BLUE}"
     fi
 
@@ -606,10 +672,10 @@ perform_backup() {
     final_message+="文件大小: ${backup_file_size}\n"
     final_message+="--- 上传详情 ---\n"
     final_message+="S3/R2 上传: ${s3_upload_status}"
-    if [[ "$s3_upload_status" != "跳过" ]]; then final_message+=" (Bucket: \`${S3_BUCKET_NAME}\`)"; fi
+    if [[ -n "$S3_BUCKET_NAME" && "$s3_upload_status" != "跳过" ]]; then final_message+=" (Bucket: \`${S3_BUCKET_NAME}\`)"; fi # Check if S3_BUCKET_NAME is set
     final_message+="\n"
     final_message+="WebDAV 上传: ${webdav_upload_status}"
-    if [[ "$webdav_upload_status" != "跳过" ]]; then final_message+=" (URL: \`${WEBDAV_URL}\`)"; fi
+    if [[ -n "$WEBDAV_URL" && "$webdav_upload_status" != "跳过" ]]; then final_message+=" (URL: \`${WEBDAV_URL}\`)"; fi # Check if WEBDAV_URL is set
     final_message+="\n"
     final_message+="备份源路径: \`${BACKUP_SOURCE_PATH}\`"
 
@@ -658,17 +724,16 @@ uninstall_script() { # Function name remains the same
 show_main_menu() {
     display_header
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 功能选项 ━━━━━━━━━━━━━━━━━━${NC}"
-    # Modified lines to reset color to default before parentheses, then reset completely
     echo -e "  1. ${YELLOW}自动备份设定${NC} (当前间隔: ${AUTO_BACKUP_INTERVAL_DAYS} 天)${NC}"
     echo -e "  2. ${YELLOW}手动备份${NC}"
     echo -e "  3. ${YELLOW}自定义备份路径${NC} (当前路径: ${BACKUP_SOURCE_PATH:-未设置})${NC}"
     echo -e "  4. ${YELLOW}压缩包格式${NC} (当前支持: ZIP)${NC}"
-    echo -e "  5. ${YELLOW}云存储设定${NC} (支持: S3/R2, WebDAV)${NC}" # Added description here
+    echo -e "  5. ${YELLOW}云存储设定${NC} (支持: S3/R2, WebDAV)${NC}"
     echo -e "  6. ${YELLOW}消息通知设定${NC} (Telegram)${NC}"
     echo -e "  7. ${YELLOW}设置备份保留策略${NC} (云端)${NC}"
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "  0. ${RED}退出脚本${NC}"
-    echo -e "  99. ${RED}卸载脚本${NC}" # Changed to 99
+    echo -e "  99. ${RED}卸载脚本${NC}"
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 }
 
@@ -690,7 +755,7 @@ process_menu_choice() {
             log_and_display "${GREEN}感谢使用，再见！${NC}"
             exit 0
             ;;
-        99) uninstall_script ;; # Changed to 99
+        99) uninstall_script ;;
         *)
             log_and_display "${RED}无效的选项，请重新输入。${NC}"
             press_enter_to_continue
