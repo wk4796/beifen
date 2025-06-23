@@ -1,39 +1,39 @@
 #!/bin/bash
 
-# --- 脚本全局配置 ---
+# Script global configuration
 SCRIPT_NAME="个人自用数据备份"
-CONFIG_FILE="$HOME/.personal_backup_config" # 配置文件路径
-LOG_FILE="$HOME/.personal_backup_log.txt"   # 日志文件路径
+CONFIG_FILE="$HOME/.personal_backup_config"
+LOG_FILE="$HOME/.personal_backup_log.txt"
 
-# --- 默认值（如果配置文件不存在） ---
-BACKUP_SOURCE_PATH=""     # 默认备份源路径
-AUTO_BACKUP_INTERVAL_SEC=3600 # 默认自动备份间隔（秒），例如 3600 秒 = 1 小时
+# Default values (if config file not found)
+BACKUP_SOURCE_PATH=""
+AUTO_BACKUP_INTERVAL_SEC=3600 # Default auto backup interval in seconds (e.g., 3600s = 1 hour)
 
-# --- 云存储凭证变量（请勿在此处硬编码，运行时输入或通过环境变量/awscli配置） ---
+# Cloud storage credentials variables (do NOT hardcode here, enter at runtime or via env/awscli config)
 S3_ACCESS_KEY=""
 S3_SECRET_KEY=""
-S3_ENDPOINT="" # Cloudflare R2 的 Endpoint，例如 "https://<ACCOUNT_ID>.r2.cloudflarestorage.com"
+S3_ENDPOINT="" # Cloudflare R2 Endpoint, e.g., "https://<ACCOUNT_ID>.r2.cloudflarestorage.com"
 S3_BUCKET_NAME=""
 
 WEBDAV_URL=""
 WEBDAV_USERNAME=""
 WEBDAV_PASSWORD=""
 
-# --- 颜色定义 ---
+# Color definitions
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# --- 辅助函数 ---
+# --- Helper functions ---
 
-# 清屏
+# Clear screen
 clear_screen() {
     clear
 }
 
-# 显示脚本标题
+# Display script header
 display_header() {
     clear_screen
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -42,37 +42,37 @@ display_header() {
     echo ""
 }
 
-# 显示消息并记录日志
+# Display message and log it
 log_and_display() {
     local message="$1"
-    local color="$2" # 颜色参数，可选
-    echo -e "$(date '+%Y-%m-%d %H:%M:%S') - $message" | tee -a "$LOG_FILE" # 这行是日志输出
-    if [[ -n "$color" ]]; then # 这里修正了之前的语法错误，确保if语句独立
+    local color="$2"
+    echo -e "$(date '+%Y-%m-%d %H:%M:%S') - $message" | tee -a "$LOG_FILE"
+    if [[ -n "$color" ]]; then
         echo -e "$color$message$NC"
     else
         echo -e "$message"
     fi
 }
 
-# 等待用户按回车键继续
+# Wait for user to press Enter to continue
 press_enter_to_continue() {
     echo ""
-    log_and_display "${BLUE}按 Enter 键继续...${NC}" "" # 只显示，不记录日志颜色码
+    log_and_display "${BLUE}按 Enter 键继续...${NC}" ""
     read -r
     clear_screen
 }
 
-# --- 配置保存与加载 ---
+# --- Configuration save and load ---
 
-# 保存配置到文件
+# Save configuration to file
 save_config() {
     echo "BACKUP_SOURCE_PATH=\"$BACKUP_SOURCE_PATH\"" > "$CONFIG_FILE"
     echo "AUTO_BACKUP_INTERVAL_SEC=$AUTO_BACKUP_INTERVAL_SEC" >> "$CONFIG_FILE"
-    # 注意：不保存敏感凭证到配置文件
+    # Do NOT save sensitive credentials to config file
     log_and_display "配置已保存到 $CONFIG_FILE"
 }
 
-# 从文件加载配置
+# Load configuration from file
 load_config() {
     if [[ -f "$CONFIG_FILE" ]]; then
         source "$CONFIG_FILE"
@@ -82,9 +82,9 @@ load_config() {
     fi
 }
 
-# --- 核心功能函数 ---
+# --- Core functions ---
 
-# 检查所需依赖
+# Check required dependencies
 check_dependencies() {
     local missing_deps=()
     command -v zip &> /dev/null || missing_deps+=("zip")
@@ -101,7 +101,7 @@ check_dependencies() {
     return 0
 }
 
-# 1. 自动备份设定
+# 1. Set auto backup interval
 set_auto_backup_interval() {
     display_header
     echo -e "${BLUE}=== 1. 自动备份设定 ===${NC}"
@@ -122,7 +122,7 @@ set_auto_backup_interval() {
     press_enter_to_continue
 }
 
-# 2. 手动备份
+# 2. Manual backup
 manual_backup() {
     display_header
     echo -e "${BLUE}=== 2. 手动备份 ===${NC}"
@@ -131,7 +131,7 @@ manual_backup() {
     press_enter_to_continue
 }
 
-# 3. 自定义备份路径
+# 3. Custom backup path
 set_backup_path() {
     display_header
     echo -e "${BLUE}=== 3. 自定义备份路径 ===${NC}"
@@ -145,20 +145,20 @@ set_backup_path() {
         log_and_display "${GREEN}备份路径已成功设置为：${BACKUP_SOURCE_PATH}${NC}"
     else
         log_and_display "${RED}错误：输入的路径无效或不存在。${NC}"
-    F
+    fi # Corrected from 'F' to 'fi'
     press_enter_to_continue
 }
 
-# 4. 压缩包格式信息
+# 4. Compression format info
 display_compression_info() {
     display_header
     echo -e "${BLUE}=== 4. 压缩包格式 ===${NC}"
-    log_and_display "本脚本当前支持的压缩格式为：${GREEN}ZIP${NC}。" "" # 不记录颜色码
+    log_and_display "本脚本当前支持的压缩格式为：${GREEN}ZIP${NC}。" ""
     log_and_display "如果您需要其他格式（如 .tar.gz），请修改脚本中 'perform_backup' 函数的压缩命令。" "${YELLOW}"
     press_enter_to_continue
 }
 
-# 5. 云存储设定
+# 5. Cloud storage settings
 set_cloud_storage() {
     while true; do
         display_header
@@ -186,8 +186,8 @@ set_cloud_storage() {
                 log_and_display "${YELLOW}注意：WebDAV 凭证不会保存到配置文件，每次脚本启动需要重新输入。${NC}"
                 read -rp "请输入 WebDAV URL (例如 http://your.webdav.server/path/): " WEBDAV_URL
                 read -rp "请输入 WebDAV 用户名: " WEBDAV_USERNAME
-                read -rp "请输入 WebDAV 密码: " -s WEBDAV_PASSWORD # -s 隐藏输入
-                echo "" # 换行
+                read -rp "请输入 WebDAV 密码: " -s WEBDAV_PASSWORD # -s hides input
+                echo "" # New line
                 log_and_display "${GREEN}WebDAV 配置已更新 (仅本次运行生效)。${NC}"
                 press_enter_to_continue
                 ;;
@@ -203,13 +203,13 @@ set_cloud_storage() {
     done
 }
 
-# 执行备份上传的核心逻辑
-# 参数1: 备份类型 (例如 "手动备份", "自动备份")
+# Core logic to perform backup upload
+# Param 1: backup type (e.g., "手动备份", "自动备份")
 perform_backup() {
     local backup_type="$1"
     local timestamp=$(date +%Y%m%d%H%M%S)
     local archive_name="backup_${timestamp}.zip"
-    local temp_archive_path="/tmp/$archive_name" # 临时压缩文件路径
+    local temp_archive_path="/tmp/$archive_name"
 
     log_and_display "${BLUE}--- ${backup_type} 过程开始 ---${NC}"
 
@@ -221,7 +221,7 @@ perform_backup() {
     log_and_display "源路径: '$BACKUP_SOURCE_PATH'"
     log_and_display "目标压缩文件: '$temp_archive_path'"
 
-    # --- 压缩文件 ---
+    # --- Compress files ---
     log_and_display "正在压缩文件..."
     if zip -r "$temp_archive_path" "$BACKUP_SOURCE_PATH" &> /dev/null; then
         log_and_display "${GREEN}文件压缩成功！${NC}"
@@ -231,12 +231,12 @@ perform_backup() {
         return 1
     fi
 
-    # --- 上传到 S3/R2 ---
+    # --- Upload to S3/R2 ---
     if [[ -n "$S3_ACCESS_KEY" && -n "$S3_SECRET_KEY" && -n "$S3_ENDPOINT" && -n "$S3_BUCKET_NAME" ]]; then
         log_and_display "正在尝试上传到 S3/R2 存储桶：${S3_BUCKET_NAME}..."
-        # 优先使用 awscli
+        # Prefer awscli
         if command -v aws &> /dev/null; then
-            # 临时设置 AWS 凭证，不影响全局配置
+            # Temporarily set AWS credentials for this command, does not affect global config
             AWS_ACCESS_KEY_ID="$S3_ACCESS_KEY" \
             AWS_SECRET_ACCESS_KEY="$S3_SECRET_KEY" \
             aws s3 cp "$temp_archive_path" "s3://${S3_BUCKET_NAME}/${archive_name}" --endpoint-url "$S3_ENDPOINT" > >(tee -a "$LOG_FILE") 2> >(tee -a "$LOG_FILE" >&2)
@@ -260,16 +260,16 @@ perform_backup() {
         log_and_display "${YELLOW}S3/R2 配置不完整或未设置，跳过 S3/R2 上传。${NC}"
     fi
 
-    # --- 上传到 WebDAV ---
+    # --- Upload to WebDAV ---
     if [[ -n "$WEBDAV_URL" && -n "$WEBDAV_USERNAME" && -n "$WEBDAV_PASSWORD" ]]; then
         log_and_display "正在尝试上传到 WebDAV 服务器：${WEBDAV_URL}..."
         if command -v curl &> /dev/null; then
-            # curl PUT 方法上传文件
+            # curl PUT method to upload file
             if curl -k --user "$WEBDAV_USERNAME:$WEBDAV_PASSWORD" --upload-file "$temp_archive_path" "${WEBDAV_URL%/}/$archive_name" > >(tee -a "$LOG_FILE") 2> >(tee -a "$LOG_FILE" >&2); then
                 log_and_display "${GREEN}WebDAV 上传成功！${NC}"
             else
                 log_and_display "${RED}WebDAV 上传失败！请检查 WebDAV 配置、凭证和网络连接。${NC}"
-            F
+            fi # Corrected from 'F' to 'fi'
         else
             log_and_display "${RED}未找到 'curl' 命令，无法上传到 WebDAV。${NC}"
         fi
@@ -277,7 +277,7 @@ perform_backup() {
         log_and_display "${YELLOW}WebDAV 配置不完整或未设置，跳过 WebDAV 上传。${NC}"
     fi
 
-    # --- 清理临时文件 ---
+    # --- Clean up temporary file ---
     log_and_display "正在清理临时压缩文件：$temp_archive_path"
     rm -f "$temp_archive_path"
     if [ $? -eq 0 ]; then
@@ -289,7 +289,7 @@ perform_backup() {
     log_and_display "${BLUE}--- ${backup_type} 过程结束 ---${NC}"
 }
 
-# 999. 卸载脚本
+# 999. Uninstall script
 uninstall_script() {
     display_header
     echo -e "${RED}=== 999. 卸载脚本 ===${NC}"
@@ -298,7 +298,7 @@ uninstall_script() {
 
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         log_and_display "${RED}开始卸载脚本...${NC}"
-        local script_path="$(readlink -f "$0")" # 获取脚本的真实路径
+        local script_path="$(readlink -f "$0")" # Get the real path of the script
 
         log_and_display "删除脚本文件：$script_path"
         rm -f "$script_path" 2>/dev/null
@@ -313,7 +313,7 @@ uninstall_script() {
             rm -f "$LOG_FILE" 2>/dev/null
         fi
 
-        # 尝试删除可能的别名或PATH中的启动文件
+        # Attempt to remove possible aliases or startup files in PATH
         log_and_display "${YELLOW}提示：如果此脚本是通过别名或放置在 PATH 中的文件启动的，您可能需要手动删除它们。${NC}"
 
         log_and_display "${GREEN}脚本卸载完成。${NC}"
@@ -324,7 +324,7 @@ uninstall_script() {
     press_enter_to_continue
 }
 
-# --- 主菜单 ---
+# --- Main menu ---
 show_main_menu() {
     display_header
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 功能选项 ━━━━━━━━━━━━━━━━━━${NC}"
@@ -339,7 +339,7 @@ show_main_menu() {
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 }
 
-# 处理菜单选择
+# Process menu choice
 process_menu_choice() {
     local choice
     read -rp "请输入选项: " choice
@@ -363,18 +363,18 @@ process_menu_choice() {
     esac
 }
 
-# --- 脚本入口点 ---
+# --- Script entry point ---
 main() {
-    load_config # 启动时加载配置
+    load_config # Load configuration on startup
 
-    # 如果是从 cron 任务直接调用，则执行手动备份并退出
+    # If called directly from cron job, perform manual backup and exit
     if [[ "$1" == "manual_backup_from_cron" ]]; then
         log_and_display "由 Cron 任务触发自动备份。" "${BLUE}"
         perform_backup "自动备份 (Cron)"
         exit 0
     fi
 
-    # 检查依赖项
+    # Check dependencies
     if ! check_dependencies; then
         log_and_display "${RED}脚本无法运行，因为缺少必要的依赖项。请按照提示安装。${NC}"
         exit 1
@@ -386,5 +386,5 @@ main() {
     done
 }
 
-# 执行主函数
+# Execute main function
 main "$@"
