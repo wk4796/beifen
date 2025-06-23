@@ -1,405 +1,336 @@
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>个人自用数据备份脚本 - 交互式指南</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Chosen Palette: Soothing Sage (Background: #f0fdf4, Text: #14532d, Accent: #22c55e) -->
-    <!-- Application Structure Plan: A single-page application with a fixed top navigation bar (主页, 安装指南, 使用说明, 常见问题) to switch between content sections. This task-oriented structure is more user-friendly than a linear README, allowing users to jump directly to installation steps, usage guides, or troubleshooting. Interactions include 'copy to clipboard' buttons for commands and accordions for FAQs and usage details, enhancing usability for novice users. -->
-    <!-- Visualization & Content Choices: Goal: Present instructional text interactively. Method: No charts are needed. Feature cards (HTML/CSS) for the homepage to inform. A step-by-step layout for the installation guide (Goal: Organize) with copy-to-clipboard buttons (Interaction). Custom accordions for the Usage Guide and FAQ sections (Goal: Organize & Inform) to reduce cognitive load. All visuals are built with Tailwind CSS, confirming NO SVG/Mermaid. -->
-    <!-- CONFIRMATION: NO SVG graphics used. NO Mermaid JS used. -->
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&display=swap');
-        body {
-            font-family: 'Noto Sans SC', sans-serif;
-            background-color: #f0fdf4;
-            color: #14532d;
-        }
-        .nav-link {
-            transition: all 0.3s ease;
-            position: relative;
-        }
-        .nav-link:after {
-            content: '';
-            position: absolute;
-            width: 0;
-            height: 2px;
-            bottom: -4px;
-            left: 50%;
-            transform: translateX(-50%);
-            background-color: #22c55e;
-            transition: width 0.3s ease;
-        }
-        .nav-link.active, .nav-link:hover {
-            color: #22c55e;
-        }
-        .nav-link.active:after, .nav-link:hover:after {
-            width: 100%;
-        }
-        .content-section {
-            display: none;
-        }
-        .content-section.active {
-            display: block;
-        }
-        .accordion-content {
-            max-height: 0;
-            overflow: hidden;
-            transition: max-height 0.5s ease-in-out, padding 0.5s ease-in-out;
-        }
-        .accordion-button.open + .accordion-content {
-            padding-top: 1rem;
-            padding-bottom: 1rem;
-        }
-        .code-block {
-            position: relative;
-        }
-        .copy-button {
-            position: absolute;
-            top: 0.5rem;
-            right: 0.5rem;
-            background-color: #166534;
-            color: #dcfce7;
-            padding: 0.25rem 0.5rem;
-            border-radius: 0.375rem;
-            font-size: 0.75rem;
-            cursor: pointer;
-            transition: background-color 0.2s ease;
-        }
-        .copy-button:hover {
-            background-color: #15803d;
-        }
-        .copy-button.copied {
-            background-color: #22c55e;
-            color: white;
-        }
-    </style>
-</head>
-<body class="antialiased">
+# 个人自用数据备份脚本
 
-    <header class="bg-white/80 backdrop-blur-md shadow-sm sticky top-0 z-50">
-        <nav class="container mx-auto px-6 py-4">
-            <ul class="flex justify-center space-x-6 md:space-x-10 text-base md:text-lg font-medium text-green-800">
-                <li><a href="#home" class="nav-link active">主页</a></li>
-                <li><a href="#install" class="nav-link">安装指南</a></li>
-                <li><a href="#usage" class="nav-link">使用说明</a></li>
-                <li><a href="#faq" class="nav-link">常见问题</a></li>
-            </ul>
-        </nav>
-    </header>
+这是一个为个人用户设计的 Bash 脚本，用于实现数据文件的自动化和手动备份到云存储（支持 S3 兼容服务如 Cloudflare R2 和 WebDAV）。脚本提供了友好的命令行菜单界面，方便用户进行配置和操作。
 
-    <main class="container mx-auto px-6 py-8 md:py-16">
-        
-        <!-- 主页 Section -->
-        <section id="home" class="content-section active">
-            <div class="text-center mb-12">
-                <h1 class="text-4xl md:text-5xl font-bold text-green-900 mb-4">个人自用数据备份脚本</h1>
-                <p class="text-lg md:text-xl text-green-700 max-w-3xl mx-auto">一个强大的 Bash 脚本，用于自动化和手动备份数据到云存储，提供友好的命令行菜单，让数据备份变得简单可靠。</p>
-            </div>
+## 目录
 
-            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-                <div class="bg-white p-6 rounded-xl shadow-lg border border-green-200/50">
-                    <div class="flex items-center mb-4">
-                        <span class="text-3xl mr-4">⏱️</span>
-                        <h3 class="text-xl font-bold text-green-900">智能自动备份</h3>
-                    </div>
-                    <p class="text-green-800">只需设置一次备份间隔天数，配合 Cron Job，脚本即可智能判断并自动执行备份，无需手动干预。</p>
-                </div>
-                <div class="bg-white p-6 rounded-xl shadow-lg border border-green-200/50">
-                    <div class="flex items-center mb-4">
-                        <span class="text-3xl mr-4">🚀</span>
-                        <h3 class="text-xl font-bold text-green-900">一键手动备份</h3>
-                    </div>
-                    <p class="text-green-800">需要立即备份？通过菜单选择“手动备份”，即可随时触发一次完整的备份上传流程。</p>
-                </div>
-                <div class="bg-white p-6 rounded-xl shadow-lg border border-green-200/50">
-                    <div class="flex items-center mb-4">
-                        <span class="text-3xl mr-4">☁️</span>
-                        <h3 class="text-xl font-bold text-green-900">多云存储支持</h3>
-                    </div>
-                    <p class="text-green-800">全面支持 S3 兼容存储（如 Cloudflare R2）和通用的 WebDAV 协议，让您的数据备份更灵活。</p>
-                </div>
-                <div class="bg-white p-6 rounded-xl shadow-lg border border-green-200/50">
-                    <div class="flex items-center mb-4">
-                        <span class="text-3xl mr-4">⚙️</span>
-                        <h3 class="text-xl font-bold text-green-900">高度可配置</h3>
-                    </div>
-                    <p class="text-green-800">无论是备份路径、备份频率还是云存储目标，一切尽在掌握。通过简单的菜单交互即可完成所有配置。</p>
-                </div>
-                <div class="bg-white p-6 rounded-xl shadow-lg border border-green-200/50">
-                    <div class="flex items-center mb-4">
-                        <span class="text-3xl mr-4">🖥️</span>
-                        <h3 class="text-xl font-bold text-green-900">友好的命令行界面</h3>
-                    </div>
-                    <p class="text-green-800">清晰的菜单结构和详细的提示信息，即使是命令行新手也能轻松上手，告别复杂命令。</p>
-                </div>
-                <div class="bg-white p-6 rounded-xl shadow-lg border border-green-200/50">
-                    <div class="flex items-center mb-4">
-                        <span class="text-3xl mr-4">📝</span>
-                        <h3 class="text-xl font-bold text-green-900">详细的日志记录</h3>
-                    </div>
-                    <p class="text-green-800">每一次备份操作，无论是成功还是失败，都会被详细记录到日志文件中，方便追溯和排查问题。</p>
-                </div>
-            </div>
-        </section>
+* [功能特性](#功能特性)
 
-        <!-- 安装指南 Section -->
-        <section id="install" class="content-section">
-            <div class="text-center mb-12">
-                <h2 class="text-3xl md:text-4xl font-bold text-green-900 mb-3">安装指南</h2>
-                <p class="text-lg text-green-700">按照以下五个步骤，轻松完成脚本的安装与设置。</p>
-            </div>
-            <div class="max-w-4xl mx-auto space-y-6">
-                <!-- Step 1 -->
-                <div class="bg-white p-6 rounded-xl shadow-lg border border-green-200/50">
-                    <h3 class="text-xl font-bold text-green-900 mb-3">第一步：保存脚本文件</h3>
-                    <p class="text-green-800 mb-4">使用 `nano` 编辑器创建一个名为 `personal_backup.sh` 的文件，并将脚本代码粘贴进去。</p>
-                    <div class="code-block bg-green-900 text-green-100 rounded-lg p-4 font-mono text-sm">
-                        <button class="copy-button" data-clipboard-text="nano ~/personal_backup.sh">复制</button>
-                        <p>nano ~/personal_backup.sh</p>
-                    </div>
-                </div>
-                <!-- Step 2 -->
-                <div class="bg-white p-6 rounded-xl shadow-lg border border-green-200/50">
-                    <h3 class="text-xl font-bold text-green-900 mb-3">第二步：给予脚本执行权限</h3>
-                    <p class="text-green-800 mb-4">执行以下命令，使脚本文件变为可执行状态。</p>
-                    <div class="code-block bg-green-900 text-green-100 rounded-lg p-4 font-mono text-sm">
-                        <button class="copy-button" data-clipboard-text="chmod +x ~/personal_backup.sh">复制</button>
-                        <p>chmod +x ~/personal_backup.sh</p>
-                    </div>
-                </div>
-                <!-- Step 3 -->
-                <div class="bg-white p-6 rounded-xl shadow-lg border border-green-200/50">
-                    <h3 class="text-xl font-bold text-green-900 mb-3">第三步：设置快捷启动 (可选)</h3>
-                    <p class="text-green-800 mb-4">为了方便使用，可以为脚本创建一个别名 `bf`。编辑您的 `~/.bashrc` 或 `~/.zshrc` 文件，在末尾添加以下行。</p>
-                    <div class="code-block bg-green-900 text-green-100 rounded-lg p-4 font-mono text-sm">
-                        <button class="copy-button" data-clipboard-text="alias bf='bash ~/personal_backup.sh'">复制</button>
-                        <p>alias bf='bash ~/personal_backup.sh'</p>
-                    </div>
-                     <p class="text-green-800 mt-4">别忘了执行 `source ~/.bashrc` 或 `source ~/.zshrc` 使其生效。</p>
-                </div>
-                <!-- Step 4 -->
-                <div class="bg-white p-6 rounded-xl shadow-lg border border-green-200/50">
-                    <h3 class="text-xl font-bold text-green-900 mb-3">第四步：安装脚本依赖</h3>
-                    <p class="text-green-800 mb-4">脚本需要 `zip`, `awscli`, `curl` 等工具。根据您的操作系统运行相应命令进行安装。</p>
-                    <p class="font-semibold text-green-800 mb-2">Debian/Ubuntu 系统:</p>
-                    <div class="code-block bg-green-900 text-green-100 rounded-lg p-4 font-mono text-sm mb-4">
-                        <button class="copy-button" data-clipboard-text="sudo apt update && sudo apt install zip awscli curl -y">复制</button>
-                        <p>sudo apt update && sudo apt install zip awscli curl -y</p>
-                    </div>
-                    <p class="font-semibold text-green-800 mb-2">CentOS/RHEL 系统:</p>
-                    <div class="code-block bg-green-900 text-green-100 rounded-lg p-4 font-mono text-sm">
-                        <button class="copy-button" data-clipboard-text="sudo yum install zip awscli curl -y">复制</button>
-                        <p>sudo yum install zip awscli curl -y</p>
-                    </div>
-                </div>
-                <!-- Step 5 -->
-                <div class="bg-white p-6 rounded-xl shadow-lg border border-green-200/50">
-                    <h3 class="text-xl font-bold text-green-900 mb-3">第五步：设置 Cron Job (实现自动备份)</h3>
-                    <p class="text-green-800 mb-4">执行 `crontab -e`，添加以下任务，让脚本每天自动检查是否需要备份。**请务必将路径修改为您的实际路径。**</p>
-                    <div class="code-block bg-green-900 text-green-100 rounded-lg p-4 font-mono text-sm">
-                        <button class="copy-button" data-clipboard-text="0 0 * * * bash /root/personal_backup.sh check_auto_backup > /dev/null 2>&1">复制</button>
-                        <p>0 0 * * * bash /root/personal_backup.sh check_auto_backup > /dev/null 2>&1</p>
-                    </div>
-                </div>
-            </div>
-        </section>
+* [系统要求](#系统要求)
 
-        <!-- 使用说明 Section -->
-        <section id="usage" class="content-section">
-            <div class="text-center mb-12">
-                <h2 class="text-3xl md:text-4xl font-bold text-green-900 mb-3">使用说明</h2>
-                <p class="text-lg text-green-700">了解脚本菜单中每一个选项的功能和用法。</p>
-            </div>
-            <div class="max-w-4xl mx-auto space-y-4">
-                <div class="bg-white rounded-xl shadow-lg border border-green-200/50 overflow-hidden">
-                    <button class="accordion-button w-full text-left p-6 flex justify-between items-center hover:bg-green-50/50 transition-colors">
-                        <span class="text-lg font-semibold text-green-900">1. 自动备份设定</span>
-                        <span class="text-2xl text-green-500 transform transition-transform duration-500">&#x2795;</span>
-                    </button>
-                    <div class="accordion-content px-6 text-green-800">
-                        <p>设置自动备份的间隔天数。脚本会配合 Cron Job，根据此间隔智能判断是否执行备份，无需频繁修改 Cron 任务。</p>
-                    </div>
-                </div>
-                <div class="bg-white rounded-xl shadow-lg border border-green-200/50 overflow-hidden">
-                    <button class="accordion-button w-full text-left p-6 flex justify-between items-center hover:bg-green-50/50 transition-colors">
-                        <span class="text-lg font-semibold text-green-900">2. 手动备份</span>
-                        <span class="text-2xl text-green-500 transform transition-transform duration-500">&#x2795;</span>
-                    </button>
-                    <div class="accordion-content px-6 text-green-800">
-                        <p>随时触发一次立即备份上传操作，并将备份过程和结果实时展示在终端。</p>
-                    </div>
-                </div>
-                 <div class="bg-white rounded-xl shadow-lg border border-green-200/50 overflow-hidden">
-                    <button class="accordion-button w-full text-left p-6 flex justify-between items-center hover:bg-green-50/50 transition-colors">
-                        <span class="text-lg font-semibold text-green-900">3. 自定义备份路径</span>
-                        <span class="text-2xl text-green-500 transform transition-transform duration-500">&#x2795;</span>
-                    </button>
-                    <div class="accordion-content px-6 text-green-800">
-                        <p>指定要备份的文件或文件夹的绝对路径。例如：`/home/user/my_documents`。</p>
-                    </div>
-                </div>
-                <div class="bg-white rounded-xl shadow-lg border border-green-200/50 overflow-hidden">
-                    <button class="accordion-button w-full text-left p-6 flex justify-between items-center hover:bg-green-50/50 transition-colors">
-                        <span class="text-lg font-semibold text-green-900">5. 云存储设定</span>
-                        <span class="text-2xl text-green-500 transform transition-transform duration-500">&#x2795;</span>
-                    </button>
-                    <div class="accordion-content px-6 text-green-800 space-y-2">
-                        <p>进入子菜单配置 S3/R2 和 WebDAV 存储。出于安全考虑，这些凭证不会被保存，每次启动脚本时需要重新输入，或通过 `aws configure` 等标准方式进行配置。</p>
-                        <p><strong>Cloudflare R2 Endpoint 示例:</strong> `https://&lt;ACCOUNT_ID&gt;.r2.cloudflarestorage.com`</p>
-                    </div>
-                </div>
-                <div class="bg-white rounded-xl shadow-lg border border-green-200/50 overflow-hidden">
-                    <button class="accordion-button w-full text-left p-6 flex justify-between items-center hover:bg-green-50/50 transition-colors">
-                        <span class="text-lg font-semibold text-green-900">999. 卸载脚本</span>
-                        <span class="text-2xl text-green-500 transform transition-transform duration-500">&#x2795;</span>
-                    </button>
-                    <div class="accordion-content px-6 text-green-800">
-                        <p>此选项会删除脚本自身、配置文件(`~/.personal_backup_config`)和日志文件(`~/.personal_backup_log.txt`)。请注意，手动设置的别名 `bf` 需要您自行删除。</p>
-                    </div>
-                </div>
-            </div>
-        </section>
+* [安装与设置](#安装与设置)
 
-        <!-- 常见问题 Section -->
-        <section id="faq" class="content-section">
-            <div class="text-center mb-12">
-                <h2 class="text-3xl md:text-4xl font-bold text-green-900 mb-3">常见问题与故障排除</h2>
-                <p class="text-lg text-green-700">遇到问题了？在这里查找解决方案。</p>
-            </div>
-             <div class="max-w-4xl mx-auto space-y-4">
-                <div class="bg-white rounded-xl shadow-lg border border-green-200/50 overflow-hidden">
-                    <button class="accordion-button w-full text-left p-6 flex justify-between items-center hover:bg-green-50/50 transition-colors">
-                        <span class="text-lg font-semibold text-green-900">问题：运行脚本时提示 `command not found` 或 `syntax error`</span>
-                        <span class="text-2xl text-green-500 transform transition-transform duration-500">&#x2795;</span>
-                    </button>
-                    <div class="accordion-content px-6 text-green-800">
-                        <p><strong>原因:</strong> 这通常是由于复制粘贴代码时引入了不可见的特殊字符，或者文件编码/换行符格式不正确（例如在 Windows 编辑后上传到 Linux）。</p>
-                        <p class="mt-2"><strong>解决方案:</strong></p>
-                        <ul class="list-disc list-inside mt-1 space-y-1">
-                            <li>最彻底的方法是重新从 GitHub 仓库复制最新的脚本代码。</li>
-                            <li>使用 `nano` 等 Linux 内置编辑器进行操作，避免跨系统编辑。</li>
-                            <li>可以尝试运行 `dos2unix ~/personal_backup.sh` 命令来修复换行符问题。</li>
-                        </ul>
-                    </div>
-                </div>
-                <div class="bg-white rounded-xl shadow-lg border border-green-200/50 overflow-hidden">
-                    <button class="accordion-button w-full text-left p-6 flex justify-between items-center hover:bg-green-50/50 transition-colors">
-                        <span class="text-lg font-semibold text-green-900">问题：提示 “检测到以下依赖项缺失...”</span>
-                        <span class="text-2xl text-green-500 transform transition-transform duration-500">&#x2795;</span>
-                    </button>
-                    <div class="accordion-content px-6 text-green-800">
-                        <p><strong>原因:</strong> 您的系统缺少脚本运行所需的工具，如 `zip`, `awscli`, `curl`。</p>
-                        <p class="mt-2"><strong>解决方案:</strong> 请参照“安装指南”第四步，根据您的操作系统运行相应的命令来安装这些缺失的依赖项。</p>
-                    </div>
-                </div>
-                 <div class="bg-white rounded-xl shadow-lg border border-green-200/50 overflow-hidden">
-                    <button class="accordion-button w-full text-left p-6 flex justify-between items-center hover:bg-green-50/50 transition-colors">
-                        <span class="text-lg font-semibold text-green-900">问题：S3/R2 或 WebDAV 上传失败</span>
-                        <span class="text-2xl text-green-500 transform transition-transform duration-500">&#x2795;</span>
-                    </button>
-                    <div class="accordion-content px-6 text-green-800">
-                        <p><strong>原因:</strong> 大部分情况是凭证或配置信息错误。</p>
-                         <p class="mt-2"><strong>解决方案:</strong></p>
-                        <ul class="list-disc list-inside mt-1 space-y-1">
-                            <li>仔细检查您在“云存储设定”中输入的 Access Key, Secret Key, Endpoint URL, Bucket Name 等信息是否完全正确。</li>
-                            <li>对于 R2，请确保 Endpoint URL 中的 `&lt;ACCOUNT_ID&gt;` 已被正确替换。</li>
-                            <li>检查您的网络连接是否正常，以及服务器防火墙是否允许访问云存储服务。</li>
-                            <li>对于 S3/R2，推荐使用 `aws configure` 命令配置持久性凭证，这更稳定且安全。</li>
-                        </ul>
-                    </div>
-                </div>
-            </div>
-        </section>
+* [使用方法](#使用方法)
 
-    </main>
-    
-    <footer class="text-center py-8 mt-12 border-t border-green-200">
-        <p class="text-green-700">由个人自用数据备份脚本提供支持 | <a href="#" id="github-link" class="text-green-600 hover:text-green-800 font-semibold">查看 GitHub 仓库</a></p>
-    </footer>
+  * [主菜单导航](#主菜单导航)
 
-    <script>
-        document.addEventListener('DOMContentLoaded', function () {
-            const navLinks = document.querySelectorAll('.nav-link');
-            const sections = document.querySelectorAll('.content-section');
+  * [1. 自动备份设定](#1-自动备份设定)
 
-            // Navigation handler
-            function setActiveSection(hash) {
-                const targetHash = hash || '#home';
-                
-                navLinks.forEach(link => {
-                    link.classList.toggle('active', link.hash === targetHash);
-                });
+  * [2. 手动备份](#2. 手动备份)
 
-                sections.forEach(section => {
-                    section.classList.toggle('active', '#' + section.id === targetHash);
-                });
-            }
+  * [3. 自定义备份路径](#3. 自定义备份路径)
 
-            navLinks.forEach(link => {
-                link.addEventListener('click', function (e) {
-                    e.preventDefault();
-                    const targetHash = this.hash;
-                    window.history.pushState(null, null, targetHash);
-                    setActiveSection(targetHash);
-                    window.scrollTo(0, 0);
-                });
-            });
-            
-            // Set initial section based on URL hash
-            setActiveSection(window.location.hash);
+  * [4. 压缩包格式](#4. 压缩包格式)
+
+  * [5. 云存储设定](#5. 云存储设定)
+
+  * [0. 退出脚本](#0. 退出脚本)
+
+  * [999. 卸载脚本](#999. 卸载脚本)
+
+* [常见问题与故障排除](#常见问题与故障排除)
+
+* [贡献](#贡献)
+
+* [许可证](#许可证)
+
+---
+
+## 功能特性
+
+本脚本提供以下核心功能：
+
+1.  **自动备份设定**：允许用户设置自动备份的间隔天数。一旦设定，配合 Cron Job，脚本将根据此间隔智能判断是否执行备份，无需频繁修改 Cron 任务。
+
+2.  **手动备份**：随时触发一次立即备份上传操作，并将备份过程和结果实时展示在终端。
+
+3.  **自定义备份路径**：用户可以根据需求指定要备份的文件或文件夹的绝对路径。
+
+4.  **压缩包格式**：支持将备份数据压缩成 `.zip` 格式。
+
+5.  **云存储支持**：
+
+    * **S3 兼容存储**：完全兼容 Amazon S3 API 的服务，包括 **Cloudflare R2 存储桶**。
+
+    * **WebDAV 存储**：支持上传到任何 WebDAV 服务器。
+
+## 系统要求
+
+* **操作系统**：Linux 或 macOS (推荐在 Linux 服务器环境使用)。
+
+* **Shell**：Bash (脚本使用 Bash 语法编写)。
+
+* **必要工具 (依赖项)**：
+
+    * `zip`: 用于文件压缩。
+
+    * `awscli` 或 `s3cmd`: 用于 S3/R2 存储上传。（推荐使用 `awscli`，对 R2 有良好支持）
+
+    * `curl`: 用于 WebDAV 存储上传。
+
+* **Cron 服务**：用于设置自动备份的定时任务 (Linux/macOS 系统自带)。
+
+## 安装与设置
+
+请按照以下步骤将脚本安装到你的系统并进行初步设置：
+
+1.  **保存脚本文件**
+
+    * 在你的终端中，创建一个名为 `personal_backup.sh` 的文件。例如，将其保存在你的主目录 (`~`) 下：
+
+        ```bash
+        nano ~/personal_backup.sh
+        ```
+
+    * 将本 `README.md` 文件中提供的最新脚本代码（在 GitHub 仓库中将是 `personal_backup.sh` 的文件内容）完整复制并粘贴到 `nano` 编辑器中。
+
+    * 保存并退出 `nano`：按下 `Ctrl + X`，输入 `Y`，然后按 `Enter`。
+
+2.  **给予脚本执行权限**
+
+    * 在终端中执行以下命令，使脚本可运行：
+
+        ```bash
+        chmod +x ~/personal_backup.sh
+        ```
+
+3.  **设置快捷启动 (可选，但推荐)**
+
+    * 为了方便每次输入 `bf` 即可运行脚本，请在你常用的 Shell 配置文件（如 `~/.bashrc` 或 `~/.zshrc`）中添加一个别名：
+
+        ```bash
+        nano ~/.bashrc  # 或 nano ~/.zshrc
+        ```
+
+    * 滚动到文件底部，添加以下行：
+
+        ```bash
+        alias bf='bash ~/personal_backup.sh'
+        ```
+
+        **注意**：如果 `personal_backup.sh` 文件不在你的主目录，请替换为其实际的完整路径。
+
+    * 保存并退出 (`Ctrl + X`, `Y`, `Enter`)。
+
+    * 使配置立即生效：
+
+        ```bash
+        source ~/.bashrc  # 或 source ~/.zshrc
+        ```
+
+        或者，直接关闭并重新打开终端。
+
+4.  **安装脚本依赖**
+
+    * 首次运行脚本时，它会检测并提示你安装缺失的依赖项。请根据你的操作系统选择相应的命令进行安装。
+
+        * **Debian/Ubuntu 系统**：
+
+            ```bash
+            sudo apt update
+            sudo apt install zip awscli curl
+            ```
+
+        * **CentOS/RHEL 系统**：
+
+            ```bash
+            sudo yum install zip awscli curl
+            # 或 sudo dnf install zip awscli curl
+            ```
+
+    * 在执行安装命令时，系统可能会要求输入 `root` 密码。
+
+5.  **设置 Cron Job (实现自动备份)**
+
+    * 为了让自动备份功能生效，你需要设置一个 Cron Job，让它每天定期运行你的脚本来检查是否到了备份时间。
+
+    * 在终端中打开 Cron 表编辑器：
+
+        ```bash
+        crontab -e
+        ```
+
+    * 如果之前有设置过旧的备份 Cron 任务，请务必将其删除。
+
+    * 在文件底部添加以下一行新的 Cron Job 条目：
+
+        ```cron
+        0 0 * * * bash /root/personal_backup.sh check_auto_backup > /dev/null 2>&1
+        ```
+
+        **重要**：请务必将 `/root/personal_backup.sh` 替换为你脚本的**实际完整路径**。
+        这行 Cron Job 的含义是：每天的午夜 00:00，执行你的备份脚本并带上 `check_auto_backup` 参数。脚本会根据你设定的间隔智能判断是否需要执行备份。
+
+    * 保存并退出 Cron 表 (`Ctrl + X`, `Y`, `Enter`)。
+
+## 使用方法
+
+安装完成后，你可以在终端中输入 `bf` 来启动脚本。
+
+### 主菜单导航
+
+脚本启动后，你将看到一个清晰的主菜单：
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+个人自用数据备份
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+━━━━━━━━━━━━━━━━━━ 功能选项 ━━━━━━━━━━━━━━━━━━
+
+自动备份设定 (当前间隔: X 天)
+手动备份
+自定义备份路径 (当前路径: 未设置/已设置路径)
+压缩包格式 (当前支持: ZIP)
+云存储设定 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+退出脚本
+卸载脚本 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 请输入选项:
+<!-- end list -->
 
 
-            // Accordion handler
-            document.querySelectorAll('.accordion-button').forEach(button => {
-                button.addEventListener('click', () => {
-                    const content = button.nextElementSibling;
-                    const icon = button.querySelector('span:last-child');
+你可以通过输入对应的数字选项来执行功能。
 
-                    button.classList.toggle('open');
-                    
-                    if (button.classList.contains('open')) {
-                        content.style.maxHeight = content.scrollHeight + "px";
-                        icon.style.transform = 'rotate(45deg)';
-                    } else {
-                        content.style.maxHeight = '0';
-                        icon.style.transform = 'rotate(0deg)';
-                    }
-                });
-            });
+### 1. 自动备份设定
 
-            // Copy to clipboard handler
-            document.querySelectorAll('.copy-button').forEach(button => {
-                button.addEventListener('click', () => {
-                    const textToCopy = button.dataset.clipboardText;
-                    
-                    // A fallback for navigator.clipboard for cross-origin iframes
-                    const textArea = document.createElement('textarea');
-                    textArea.value = textToCopy;
-                    document.body.appendChild(textArea);
-                    textArea.select();
-                    try {
-                        document.execCommand('copy');
-                        button.textContent = '已复制!';
-                        button.classList.add('copied');
-                        setTimeout(() => {
-                            button.textContent = '复制';
-                            button.classList.remove('copied');
-                        }, 2000);
-                    } catch (err) {
-                        console.error('Fallback: Oops, unable to copy', err);
-                    }
-                    document.body.removeChild(textArea);
-                });
-            });
-            
-            // Dummy Github link
-             document.getElementById('github-link').addEventListener('click', function(e) {
-                e.preventDefault();
-                alert('请将此处的链接替换为您真实的 GitHub 仓库地址！');
-            });
-        });
-    </script>
-</body>
-</html>
+* 选择此选项以设置自动备份的间隔天数。
+
+* 脚本会将此设置保存到 `~/.personal_backup_config` 文件中。
+
+* **工作原理**：配合之前设置的每天运行的 Cron Job，脚本会在每次被 Cron 触发时检查距离上次自动备份的时间。如果达到了你在此处设定的天数间隔，脚本就会执行备份；否则，它将跳过备份并记录一条日志。
+
+### 2. 手动备份
+
+* 选择此选项会立即触发一次备份操作。
+
+* 脚本将按照你设定的备份路径进行压缩，并上传到已配置的云存储服务。
+
+* 过程和结果会实时显示在终端，并记录到日志文件 (`~/.personal_backup_log.txt`)。
+
+### 3. 自定义备份路径
+
+* 选择此选项可以设置你希望备份的源文件或文件夹的绝对路径。
+
+* 例如：`/home/user/my_documents` 或 `/etc/nginx/nginx.conf`。
+
+* 设置的路径会保存到配置文件中。
+
+### 4. 压缩包格式
+
+* 此选项仅显示当前支持的压缩格式（目前为 `ZIP`）。
+
+* 如果需要支持其他格式（如 `.tar.gz`），你需要手动修改脚本中的 `perform_backup` 函数来更改压缩命令。
+
+### 5. 云存储设定
+
+* 进入此子菜单来配置你的云存储服务：
+
+    * **1. 配置 S3/R2 存储**：
+
+        * 输入你的 S3/R2 Access Key ID, Secret Access Key, Endpoint URL 和 Bucket 名称。
+
+        * **Cloudflare R2 Endpoint 示例**：通常格式为 `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`，请将 `<ACCOUNT_ID>` 替换为你真实的 Cloudflare 账户 ID。
+
+        * **安全性提示**：出于安全考虑，这些敏感凭证**不会**被保存到脚本配置文件中。每次脚本启动时，你需要重新输入它们，或者更推荐的方式是使用 `awscli` 的标准配置机制（`aws configure`）或环境变量来管理。
+
+    * **2. 配置 WebDAV 存储**：
+
+        * 输入你的 WebDAV 服务器 URL, 用户名和密码。密码输入时会隐藏。
+
+        * **安全性提示**：WebDAV 凭证同样**不会**被保存到配置文件中，每次脚本启动需要重新输入。
+
+### 0. 退出脚本
+
+* 安全退出脚本。
+
+### 999. 卸载脚本
+
+* 此选项会提示你是否确认卸载脚本。
+
+* 如果确认，脚本将删除自身文件、配置文件 (`~/.personal_backup_config`) 和日志文件 (`~/.personal_backup_log.txt`)。
+
+* **注意**：如果你通过别名 (`alias bf=...`) 或将脚本移动到 `PATH` 目录来启动它，你需要手动删除这些别名或文件。
+
+## 常见问题与故障排除
+
+这里列出了一些在开发和使用过程中可能遇到的常见问题及其解决方案：
+
+1.  **“`/root/personal_backup.sh: line X: command not found` 或 `syntax error`”**
+
+    * **问题原因**：这通常是由于在复制粘贴脚本代码时，引入了不可见的特殊字符（如不间断空格 `\u00A0`），或者文件编码/换行符格式问题（例如在 Windows 系统下编辑后上传到 Linux）。Bash 无法识别这些隐藏字符。
+
+    * **解决方案**：
+
+        1.  **重新复制粘贴**：最彻底的方法是再次从 GitHub 仓库中复制 `personal_backup.sh` 的内容。
+
+        2.  **使用 `nano` 编辑器**：在 Linux 终端中，用 `nano ~/personal_backup.sh` 打开文件。
+
+        3.  **清空内容**：在 `nano` 中按住 `Ctrl + K` 连续删除所有旧代码。
+
+        4.  **粘贴新代码**：使用 `Ctrl + Shift + V`（Linux）或 `Cmd + V`（macOS）粘贴最新、干净的代码。
+
+        5.  **清除换行符 (可选)**：保存并退出后，可以尝试运行 `dos2unix ~/personal_backup.sh` 命令（如果系统没有，先安装 `sudo apt install dos2unix`）。
+
+        6.  **避免跨系统编辑**：尽量避免在 Windows 系统上编辑此脚本，直接在 Linux 终端中操作。
+
+2.  **“检测到以下依赖项缺失：zip awscli 或 s3cmd (用于S3/R2)”**
+
+    * **问题原因**：你的系统缺少运行备份功能（如压缩、上传到云存储）所需的工具。
+
+    * **解决方案**：按照脚本提示，根据你的操作系统类型，在终端中运行相应的安装命令。
+
+        * **Debian/Ubuntu**：`sudo apt update && sudo apt install zip awscli curl`
+
+        * **CentOS/RHEL**：`sudo yum install zip awscli curl` (或 `sudo dnf install zip awscli curl`)
+
+    * 确保所有必要的工具都被安装后，再次运行脚本。
+
+3.  **S3/R2 上传失败，提示“配置、凭证和网络连接”问题**
+
+    * **问题原因**：
+
+        * S3/R2 Access Key ID 或 Secret Access Key 输入错误。
+
+        * S3/R2 Endpoint URL 不正确（尤其对于 Cloudflare R2，确保 `<ACCOUNT_ID>` 部分正确）。
+
+        * S3/R2 Bucket 名称不正确。
+
+        * 网络连接问题，无法访问 S3/R2 服务。
+
+        * AWS CLI 未正确配置或凭证已过期。
+
+    * **解决方案**：
+
+        * 仔细检查你在“云存储设定”中输入的各项信息，确保它们与你的云服务提供商提供的信息完全一致。
+
+        * 如果你使用 `awscli`，考虑通过 `aws configure` 命令配置持久性凭证，这样更稳定和安全。对于 R2，确保 `~/.aws/config` 中的 `endpoint_url` 配置正确。
+
+4.  **WebDAV 上传失败**
+
+    * **问题原因**：
+
+        * WebDAV URL 不正确，或路径不正确（例如，缺少末尾的 `/`）。
+
+        * WebDAV 用户名或密码错误。
+
+        * WebDAV 服务器未启动或无法访问。
+
+        * 服务器防火墙阻止了对外访问。
+
+    * **解决方案**：
+
+        * 检查 WebDAV URL 的格式和可访问性。
+
+        * 验证用户名和密码是否正确。
+
+        * 确保你的 WebDAV 服务器正常运行，并且从你的备份服务器可以访问到它。
+
+## 贡献
+
+欢迎对本脚本进行改进和贡献！如果你有任何建议、Bug 报告或功能请求，请在 GitHub 仓库中提交 Issue 或 Pull Request。
+
+## 许可证
+
+本项目采用 [MIT 许可证](LICENSE)。
+
+---
+
+感谢使用！希望这个脚本能帮助你轻松管理个人数据备份。
