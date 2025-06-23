@@ -11,9 +11,8 @@ CONFIG_FILE="$CONFIG_DIR/config"
 LOG_FILE="$LOG_DIR/log.txt"
 
 # 默认值 (如果配置文件未找到)
-# BACKUP_SOURCE_PATH="" # 已被 BACKUP_SOURCE_PATHS_ARRAY 取代
-declare -a BACKUP_SOURCE_PATHS_ARRAY=() # 新增：要备份的源路径数组
-BACKUP_SOURCE_PATHS_STRING="" # 新增：用于配置文件保存的路径字符串，使用特殊分隔符连接
+declare -a BACKUP_SOURCE_PATHS_ARRAY=() # 要备份的源路径数组
+BACKUP_SOURCE_PATHS_STRING="" # 用于配置文件保存的路径字符串，使用特殊分隔符连接
 
 AUTO_BACKUP_INTERVAL_DAYS=7 # 默认自动备份间隔天数 (例如，7 天 = 1 周)
 LAST_AUTO_BACKUP_TIMESTAMP=0 # 上次自动备份的 Unix 时间戳
@@ -97,7 +96,7 @@ clear_screen() {
 display_header() {
     clear_screen
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}      $SCRIPT_NAME        ${NC}"
+    echo -e "${GREEN}      $SCRIPT_NAME      ${NC}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 }
@@ -519,7 +518,7 @@ display_compression_info() {
     press_enter_to_continue
 }
 
-# --- 云存储连接测试和文件夹列表 ---
+# --- 云存储连接测试和内容列表 ---
 
 # 测试 S3/R2 连接
 test_s3_r2_connection() {
@@ -567,83 +566,136 @@ test_s3_r2_connection() {
     fi
 }
 
-# Helper function to list direct sub-folders for S3/R2 under a given prefix
-# Parameter 1: The parent prefix to list sub-folders from (e.g., "", "myfolder/")
-# Returns: List of sub-folders to stdout on success, empty list and non-zero exit on failure.
-get_s3_r2_direct_sub_folders() {
+# Helper function to list direct sub-folders AND files for S3/R2 under a given prefix
+# Parameter 1: The parent prefix to list from (e.g., "", "myfolder/")
+# Returns: List of content names (e.g., "myfolder (文件夹)", "myfile.txt (文件)") to stdout on success, empty list and non-zero exit on failure.
+get_s3_r2_direct_contents() {
     local parent_prefix="$1"
     # Ensure parent_prefix doesn't start with / for S3 API calls, but does end with / for consistent prefix matching
-    parent_prefix="${parent_prefix#/}"
+    parent_prefix="${parent_prefix#/}" # Remove leading slash
     if [[ -n "$parent_prefix" && "${parent_prefix: -1}" != "/" ]]; then
         parent_prefix="${parent_prefix}/"
+    fi
+    # If parent_prefix is empty, it means root, and we don't want an extra slash in API calls
+    if [[ -z "$parent_prefix" ]]; then
+        parent_prefix=""
     fi
 
     export AWS_ACCESS_KEY_ID="$S3_ACCESS_KEY"
     export AWS_SECRET_ACCESS_KEY="$S3_SECRET_KEY"
-    local sub_folders=()
+    local contents=() # To store both folders and files, with type indicator
     local result_status=1 # Assume failure
 
-    log_and_display "正在尝试获取 S3/R2 中 '${parent_prefix:-根目录}' 的直接子文件夹..." "${BLUE}" "/dev/stderr"
+    log_and_display "正在尝试获取 S3/R2 中 '${parent_prefix:-根目录}' 的直接子文件夹和文件..." "${BLUE}" "/dev/stderr"
 
     local cmd_output=""
     local cmd_status=1
 
     if command -v aws &> /dev/null; then
         if command -v jq &> /dev/null; then
-            # 使用 aws s3api list-objects-v2 来获取 CommonPrefixes, 并用 jq 格式化输出
+            # Use aws s3api list-objects-v2 to get CommonPrefixes (folders) and Contents (files)
             if { cmd_output=$(aws s3api list-objects-v2 \
                 --bucket "$S3_BUCKET_NAME" \
                 --prefix "$parent_prefix" \
                 --delimiter '/' \
-                --query "CommonPrefixes[].Prefix" \
-                --output json \
-                --endpoint-url "$S3_ENDPOINT" 2>&1 | jq -r '.[] | select(. != null) | .'); } then # Use jq -r to output raw strings, select(. != null) to filter nulls
+                --endpoint-url "$S3_ENDPOINT" \
+                --query '{CommonPrefixes: CommonPrefixes[].Prefix, Contents: Contents[].Key}' \
+                --output json 2>&1); } then
                 cmd_status=0
             else
                 cmd_status=$?
-            fi
-            if [ "$cmd_status" -eq 0 ]; then
-                mapfile -t sub_folders <<< "$(echo "$cmd_output" | sed "s|^${parent_prefix}||" | sed 's|/$||')"
-                result_status=0 # Success
-            else
                 log_and_display "${RED}S3/R2 列表失败 (awscli + jq)！请检查桶名、路径、端点、权限或 jq 安装。错误: ${cmd_output}${NC}" "" "/dev/stderr"
+                unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+                return 1
             fi
-        else
+
+            if [ "$cmd_status" -eq 0 ]; then
+                local folders_json=$(echo "$cmd_output" | jq -r '.CommonPrefixes[] | select(. != null)' 2>/dev/null)
+                local files_json=$(echo "$cmd_output" | jq -r '.Contents[] | select(. != null)' 2>/dev/null)
+
+                # Add folders, stripping parent_prefix and adding type suffix
+                if [[ -n "$folders_json" ]]; then
+                    # We expect 'CommonPrefixes' to already end with '/', so remove parent_prefix and then remove trailing slash for clean name.
+                    mapfile -t -O "${#contents[@]}" contents <<< "$(echo "$folders_json" | sed "s|^${parent_prefix}||" | sed 's|/$||' | grep -E '\S' | awk '{print $1" (文件夹)"}')"
+                fi
+                
+                # Add files, stripping parent_prefix and filtering out directory entries themselves
+                if [[ -n "$files_json" ]]; then
+                    mapfile -t -O "${#contents[@]}" contents <<< "$(echo "$files_json" | sed "s|^${parent_prefix}||" | grep -E '\S' | awk '{print $1" (文件)"}' | grep -v '^$' | grep -v '^\.\.?$')"
+                fi
+
+                # Sort the combined list alphabetically
+                IFS=$'\n' contents=($(sort <<<"${contents[*]}"))
+                unset IFS
+                
+                result_status=0 # Success
+            fi
+        else # Fallback without jq (less robust)
             log_and_display "${YELLOW}未找到 'jq' 命令，尝试使用不那么健壮的 'aws s3 ls'。${NC}" "" "/dev/stderr"
-            if { cmd_output=$(aws s3 ls "s3://${S3_BUCKET_NAME}/${parent_prefix}" --endpoint-url "$S3_ENDPOINT" --delimiter '/' --query "CommonPrefixes[].Prefix" --output text 2>&1); } then
+            if { cmd_output=$(aws s3 ls "s3://${S3_BUCKET_NAME}/${parent_prefix}" --endpoint-url "$S3_ENDPOINT" 2>&1); } then
                 cmd_status=0
             else
                 cmd_status=$?
-            fi
-            if [ "$cmd_status" -eq 0 ]; then
-                # 对于 text 输出，可能需要更复杂的解析，但为了兼容性先保留原样
-                # 假设每行一个目录或多个目录以空格分隔
-                mapfile -t sub_folders <<< "$(echo "$cmd_output" | sed "s|^${parent_prefix}||" | sed 's|/$||' | xargs -n1 )" # Use xargs -n1 to split by whitespace into separate lines
-                result_status=0 # Success
-            else
                 log_and_display "${RED}S3/R2 列表失败 (awscli without jq)！请检查桶名、路径、端点或权限。错误: ${cmd_output}${NC}" "" "/dev/stderr"
+                unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+                return 1
+            fi
+
+            if [ "$cmd_status" -eq 0 ]; then
+                # Parse lines: 'PRE folder_name/' for directories, size date time file_name for files
+                while IFS= read -r line; do
+                    if [[ "$line" =~ ^PRE\ (.*)/$ ]]; then
+                        local folder_name="${BASH_REMATCH[1]}"
+                        contents+=("${folder_name} (文件夹)")
+                    elif [[ "$line" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}\ +[0-9]+\ +(.+)$ ]]; then
+                        local file_name="${BASH_REMATCH[1]}"
+                        contents+=("${file_name} (文件)")
+                    fi
+                done <<< "$(echo "$cmd_output" | sed "s|^${parent_prefix}||" | grep -v '^\.$' | grep -v '^\.\.$')"
+                
+                # Sort the combined list
+                IFS=$'\n' contents=($(sort <<<"${contents[*]}"))
+                unset IFS
+                
+                result_status=0 # Success
             fi
         fi
     elif command -v s3cmd &> /dev/null; then
-        log_and_display "${YELLOW}正在使用 s3cmd 尝试列出 S3/R2 子文件夹。此方法可能不如awscli全面。${NC}" "" "/dev/stderr"
-        if { cmd_output=$(s3cmd ls "s3://${S3_BUCKET_NAME}/${parent_prefix}" 2>&1 | grep -E '\/$'); } then
+        log_and_display "${YELLOW}正在使用 s3cmd 尝试列出 S3/R2 子文件夹和文件。此方法可能不如awscli全面。${NC}" "" "/dev/stderr"
+        if { cmd_output=$(s3cmd ls "s3://${S3_BUCKET_NAME}/${parent_prefix}" 2>&1); } then
             cmd_status=0
         else
             cmd_status=$?
+            log_and_display "${RED}S3/R2 列表失败 (s3cmd)！请检查桶名、路径、端点或权限。错误: ${cmd_output}${NC}" "" "/dev/stderr"
+            unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+            return 1
         fi
         if [ "$cmd_status" -eq 0 ]; then
-            mapfile -t sub_folders <<< "$(echo "$cmd_output" | awk '{print $NF}' | sed 's|s3://'"${S3_BUCKET_NAME//./\\.}"'/'"${parent_prefix//./\\.}"'|\?||' | sed 's|/$||')"
+            while IFS= read -r line; do
+                local item_path_full=$(echo "$line" | awk '{print $NF}')
+                local item_path_relative=$(echo "$item_path_full" | sed 's|s3://'"${S3_BUCKET_NAME//./\\.}"'/'"${parent_prefix//./\\.}"'|\?||' | sed 's|/$||' | grep -v '^$' | grep -v '^\.\.?$')
+                if [[ -n "$item_path_relative" ]]; then
+                    if [[ "$line" =~ \ /$ ]]; then # Directories end with '/' in s3cmd ls output (before sed)
+                        contents+=("${item_path_relative} (文件夹)")
+                    else
+                        contents+=("${item_path_relative} (文件)")
+                    fi
+                fi
+            done <<< "$cmd_output"
+            
+            # Sort the combined list
+            IFS=$'\n' contents=($(sort <<<"${contents[*]}"))
+            unset IFS
+
             result_status=0 # Success
-        else
-            log_and_display "${RED}S3/R2 列表失败 (s3cmd)！请检查桶名、路径、端点或权限。错误: ${cmd_output}${NC}" "" "/dev/stderr"
         fi
     else
-        log_and_display "${RED}未找到 'awscli' 或 's3cmd' 命令，无法列出 S3/R2 文件夹。${NC}" "" "/dev/stderr"
+        log_and_display "${RED}未找到 'awscli' 或 's3cmd' 命令，无法列出 S3/R2 文件夹和文件。${NC}" "" "/dev/stderr"
     fi
     unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
 
-    # Output found folders
-    printf '%s\n' "${sub_folders[@]}"
+    # Output found contents
+    printf '%s\n' "${contents[@]}"
     return "$result_status" # Return 0 for success, 1 for failure
 }
 
@@ -671,21 +723,23 @@ test_webdav_connection() {
     fi
 }
 
-# Helper function to list direct sub-folders for WebDAV under a given URL
+# Helper function to list direct sub-folders AND files for WebDAV under a given URL
 # Parameter 1: The current full URL of the parent directory to list (e.g., "http://your.webdav.server/path/to/parent/")
-get_webdav_direct_sub_folders() {
+# Returns: List of content names (e.g., "myfolder (文件夹)", "myfile.txt (文件)") to stdout on success, empty list and non-zero exit on failure.
+get_webdav_direct_contents() {
     local current_full_url="${1%/}/" # Ensure trailing slash for PROPFIND
     
     if ! test_webdav_connection; then # Re-test connection for safety
-        log_and_display "${RED}WebDAV 连接失败，无法获取子文件夹列表。${NC}" "" "/dev/stderr"
+        log_and_display "${RED}WebDAV 连接失败，无法获取子文件夹或文件列表。${NC}" "" "/dev/stderr"
         return 1
     fi
     
-    log_and_display "正在获取 WebDAV 服务器中 '${current_full_url}' 的子文件夹列表..." "${BLUE}" "/dev/stderr"
-    local folders=()
+    log_and_display "正在获取 WebDAV 服务器中 '${current_full_url}' 的子文件夹和文件列表..." "${BLUE}" "/dev/stderr"
+    local contents=() # To store both folders and files
     local curl_output=""
     local result_status=1
 
+    # Using Depth: 1 to list direct children
     if { curl_output=$(curl -s -L -k --user "$WEBDAV_USERNAME:$WEBDAV_PASSWORD" --request PROPFIND --header "Depth: 1" "$current_full_url" 2>&1); } then
         result_status=0
     else
@@ -695,22 +749,42 @@ get_webdav_direct_sub_folders() {
 
     if [ "$result_status" -eq 0 ] && [[ -n "$curl_output" ]]; then
         # Escape the current_full_url for sed pattern matching
-        local current_full_url_escaped=$(echo "$current_full_url" | sed 's|/|\\/|g; s|\.|\\.|g')
-        # Extract hrefs, filter out current directory and files, then get relative path.
-        # This regex looks for hrefs that end with a slash, and then strips the parent_url.
-        mapfile -t folders <<< "$(echo "$curl_output" | grep -oP '<D:href>\K([^<]*?\/)(?=</D:href>)' | sed "s|^${current_full_url_escaped}||" | grep -E '\S' | sed 's|/$||')"
+        local current_full_url_escaped=$(echo "$current_full_url" | sed 's|/|\\/|g; s|\.|\\.|g; s|&|\\&|g')
+
+        # Extract hrefs. Filter out the parent directory itself and then classify.
+        # hrefs ending with '/' are directories. Others are files.
+        while IFS= read -r href; do
+            # Remove the base URL and current path prefix
+            local item_name=$(echo "$href" | sed "s|^${current_full_url_escaped}||")
+            # Remove any trailing slash from item_name for proper display
+            local display_name="${item_name%/}"
+            
+            # Skip empty entries, and special "." ".." directories which are implicitly handled by navigation logic
+            if [[ -z "$display_name" || "$display_name" == "." || "$display_name" == ".." ]]; then
+                continue
+            fi
+
+            if [[ "$href" =~ /$ ]]; then # It's a directory
+                contents+=("${display_name} (文件夹)")
+            else # It's a file
+                contents+=("${display_name} (文件)")
+            fi
+        done <<< "$(echo "$curl_output" | grep -oP '<D:href>\K([^<]+)(?=</D:href>)')"
     else
-        log_and_display "${YELLOW}WebDAV 路径 '${current_full_url}' 下没有检测到子文件夹。${NC}" "" "/dev/stderr"
-        return 1 # If curl failed or output was empty/invalid
+        log_and_display "${YELLOW}WebDAV 路径 '${current_full_url}' 下没有检测到子文件夹或文件。${NC}" "" "/dev/stderr"
     fi
-    printf '%s\n' "${folders[@]}"
+    
+    # Sort the combined list
+    IFS=$'\n' contents=($(sort <<<"${contents[*]}"))
+    unset IFS
+    printf '%s\n' "${contents[@]}"
     return 0
 }
 
 
-# --- 新增 FTP/FTPS/SFTP 连接测试和文件夹列表函数 ---
+# --- [OPTIMIZED] FTP/FTPS/SFTP functions ---
 
-# Test FTP connection
+# [OPTIMIZED] Test FTP connection
 test_ftp_connection() {
     if [[ -z "$FTP_HOST" || -z "$FTP_USERNAME" || -z "$FTP_PASSWORD" ]]; then
         log_and_display "${RED}FTP 配置不完整，无法测试连接。请先填写主机、用户名和密码。${NC}" "" "/dev/stderr"
@@ -719,10 +793,19 @@ test_ftp_connection() {
 
     log_and_display "正在测试 FTP 连接到：${FTP_HOST}:${FTP_PORT}..." "${BLUE}" "/dev/stderr"
 
-    # Use lftp for connection test
     local lftp_output=""
     local lftp_status=1
-    if { lftp_output=$(lftp -u "$FTP_USERNAME","$FTP_PASSWORD" -p "$FTP_PORT" "$FTP_HOST" -e 'ls /; quit;' 2>&1); } then
+
+    # 使用 here-document 传递命令，更清晰
+    # 增加超时时间，使用 cls 代替 ls
+    if { lftp_output=$(lftp -p "$FTP_PORT" -u "$FTP_USERNAME,$FTP_PASSWORD" "$FTP_HOST" <<EOF
+set cmd:long-timeout 15
+set cmd:timeout 15
+set ftp:use-passive-mode true
+cls -F /
+quit
+EOF
+    2>&1); }; then
         lftp_status=0
     else
         lftp_status=$?
@@ -737,40 +820,59 @@ test_ftp_connection() {
     fi
 }
 
-# Helper function to list direct sub-folders for FTP
-# Parameters: host, port, user, pass, parent_path (e.g., "/", "/myfolder/")
-get_ftp_direct_sub_folders() {
+# [OPTIMIZED] Helper function to list direct sub-folders AND files for FTP
+get_ftp_direct_contents() {
     local host="$1" user="$2" pass="$3" port="$4" parent_path="$5"
-    # Ensure parent_path ends with a slash for lftp cd command if not root
     if [[ "$parent_path" != "/" && "${parent_path: -1}" != "/" ]]; then
         parent_path="${parent_path}/"
     fi
 
-    log_and_display "正在获取 FTP 服务器中 '${parent_path}' 的子文件夹列表..." "${BLUE}" "/dev/stderr"
-    local folders=()
+    log_and_display "正在获取 FTP 服务器中 '${parent_path}' 的子文件夹和文件列表..." "${BLUE}" "/dev/stderr"
+    local contents=()
     local lftp_output=""
     local result_status=1
 
-    # Test connection and path validity first
-    if { lftp_output=$(lftp -u "$user","$pass" -p "$port" "$host" -e "cd $parent_path &>/dev/null || exit 1; ls -d */; quit;" 2>&1); } then
+    # 使用统一的优化参数
+    if { lftp_output=$(lftp -p "$port" -u "$user,$pass" "$host" <<EOF
+set cmd:long-timeout 15
+set cmd:timeout 15
+set ftp:use-passive-mode true
+cls -F "$parent_path"
+quit
+EOF
+    2>&1); }; then
         result_status=0
     else
         result_status=$?
-        log_and_display "${RED}FTP 连接失败或路径 '${parent_path}' 无效，无法获取子文件夹列表。错误: ${lftp_output}${NC}" "" "/dev/stderr"
+        log_and_display "${RED}FTP 连接失败或路径 '${parent_path}' 无效，无法获取子文件夹或文件列表。错误: ${lftp_output}${NC}" "" "/dev/stderr"
         return 1
     fi
 
+    # 后续的解析逻辑
     if [ "$result_status" -eq 0 ] && [[ -n "$lftp_output" ]]; then
-        # Clean up lftp output, keep only folder names and remove trailing slash
-        mapfile -t folders <<< "$(echo "$lftp_output" | sed 's|/$||')"
+        while IFS= read -r line; do
+            # lftp 的 cls -F 输出中，目录以 / 结尾
+            local cleaned_name=$(echo "$line" | sed 's|/$||')
+            if [[ "$cleaned_name" == "." || "$cleaned_name" == ".." || -z "$cleaned_name" ]]; then
+                continue
+            fi
+            if [[ "$line" =~ /$ ]]; then
+                contents+=("${cleaned_name} (文件夹)")
+            else
+                contents+=("${cleaned_name} (文件)")
+            fi
+        done <<< "$lftp_output"
     else
-        log_and_display "${YELLOW}FTP 路径 '${parent_path}' 下没有检测到子文件夹。${NC}" "" "/dev/stderr"
+        log_and_display "${YELLOW}FTP 路径 '${parent_path}' 下没有检测到子文件夹或文件。${NC}" "" "/dev/stderr"
     fi
-    printf '%s\n' "${folders[@]}"
+
+    IFS=$'\n' contents=($(sort <<<"${contents[*]}"))
+    unset IFS
+    printf '%s\n' "${contents[@]}"
     return 0
 }
 
-# Test FTPS connection
+# [OPTIMIZED] Test FTPS connection
 test_ftps_connection() {
     if [[ -z "$FTPS_HOST" || -z "$FTPS_USERNAME" || -z "$FTPS_PASSWORD" ]]; then
         log_and_display "${RED}FTPS 配置不完整，无法测试连接。请先填写主机、用户名和密码。${NC}" "" "/dev/stderr"
@@ -779,10 +881,23 @@ test_ftps_connection() {
 
     log_and_display "正在测试 FTPS 连接到：${FTPS_HOST}:${FTPS_PORT}..." "${BLUE}" "/dev/stderr"
 
-    # Use lftp with ftps:// protocol for connection test
     local lftp_output=""
     local lftp_status=1
-    if { lftp_output=$(lftp -u "$FTPS_USERNAME","$FTPS_PASSWORD" -p "$FTPS_PORT" ftps://"$FTPS_HOST" -e 'ls /; quit;' 2>&1); } then
+
+    # 增加了 SSL/TLS 相关设置以提高兼容性
+    if { lftp_output=$(lftp -p "$FTPS_PORT" -u "$FTPS_USERNAME,$FTPS_PASSWORD" "ftps://$FTPS_HOST" <<EOF
+set cmd:long-timeout 15
+set cmd:timeout 15
+set ftp:use-passive-mode true
+# 强制使用 SSL/TLS，并加密数据通道，增强可靠性
+set ftp:ssl-force true
+set ftp:ssl-protect-data true
+# [重要] 如果服务器使用自签名证书，此项必须设置为 no，否则会因证书验证失败而卡住
+set ssl:verify-certificate no
+cls -F /
+quit
+EOF
+    2>&1); }; then
         lftp_status=0
     else
         lftp_status=$?
@@ -797,33 +912,58 @@ test_ftps_connection() {
     fi
 }
 
-# Helper function to list direct sub-folders for FTPS
-# Parameters: host, port, user, pass, parent_path
-get_ftps_direct_sub_folders() {
+
+# [OPTIMIZED] Helper function to list direct sub-folders AND files for FTPS
+get_ftps_direct_contents() {
     local host="$1" user="$2" pass="$3" port="$4" parent_path="$5"
     if [[ "$parent_path" != "/" && "${parent_path: -1}" != "/" ]]; then
         parent_path="${parent_path}/"
     fi
 
-    log_and_display "正在获取 FTPS 服务器中 '${parent_path}' 的子文件夹列表..." "${BLUE}" "/dev/stderr"
-    local folders=()
+    log_and_display "正在获取 FTPS 服务器中 '${parent_path}' 的子文件夹和文件列表..." "${BLUE}" "/dev/stderr"
+    local contents=()
     local lftp_output=""
     local result_status=1
 
-    if { lftp_output=$(lftp -u "$user","$pass" -p "$port" ftps://"$host" -e "cd $parent_path &>/dev/null || exit 1; ls -d */; quit;" 2>&1); } then
+    # 使用统一的优化参数
+    if { lftp_output=$(lftp -p "$port" -u "$user,$pass" "ftps://$host" <<EOF
+set cmd:long-timeout 15
+set cmd:timeout 15
+set ftp:use-passive-mode true
+set ftp:ssl-force true
+set ftp:ssl-protect-data true
+set ssl:verify-certificate no
+cls -F "$parent_path"
+quit
+EOF
+    2>&1); }; then
         result_status=0
     else
         result_status=$?
-        log_and_display "${RED}FTPS 连接失败或路径 '${parent_path}' 无效，无法获取子文件夹列表。错误: ${lftp_output}${NC}" "" "/dev/stderr"
+        log_and_display "${RED}FTPS 连接失败或路径 '${parent_path}' 无效，无法获取子文件夹或文件列表。错误: ${lftp_output}${NC}" "" "/dev/stderr"
         return 1
     fi
 
+    # 后续的解析逻辑
     if [ "$result_status" -eq 0 ] && [[ -n "$lftp_output" ]]; then
-        mapfile -t folders <<< "$(echo "$lftp_output" | sed 's|/$||')"
+        while IFS= read -r line; do
+            local cleaned_name=$(echo "$line" | sed 's|/$||')
+            if [[ "$cleaned_name" == "." || "$cleaned_name" == ".." || -z "$cleaned_name" ]]; then
+                continue
+            fi
+            if [[ "$line" =~ /$ ]]; then
+                contents+=("${cleaned_name} (文件夹)")
+            else
+                contents+=("${cleaned_name} (文件)")
+            fi
+        done <<< "$lftp_output"
     else
-        log_and_display "${YELLOW}FTPS 路径 '${parent_path}' 下没有检测到子文件夹。${NC}" "" "/dev/stderr"
+        log_and_display "${YELLOW}FTPS 路径 '${parent_path}' 下没有检测到子文件夹或文件。${NC}" "" "/dev/stderr"
     fi
-    printf '%s\n' "${folders[@]}"
+
+    IFS=$'\n' contents=($(sort <<<"${contents[*]}"))
+    unset IFS
+    printf '%s\n' "${contents[@]}"
     return 0
 }
 
@@ -842,7 +982,8 @@ test_sftp_connection() {
     local sftp_status=1
 
     if command -v sshpass &> /dev/null; then
-        if { sftp_output=$(sshpass -p "$SFTP_PASSWORD" sftp -oBatchMode=no -b - -P "$SFTP_PORT" "$SFTP_USERNAME@$SFTP_HOST" <<< "ls /; quit;" 2>&1); } then
+        # Add timeout for sftp
+        if { sftp_output=$(sshpass -p "$SFTP_PASSWORD" sftp -oBatchMode=no -oConnectTimeout=10 -oStrictHostKeyChecking=no -b - -P "$SFTP_PORT" "$SFTP_USERNAME@$SFTP_HOST" <<< "ls /; quit;" 2>&1); } then
             sftp_status=0
         else
             sftp_status=$?
@@ -862,31 +1003,27 @@ test_sftp_connection() {
     fi
 }
 
-# Helper function to list direct sub-folders for SFTP
+# Helper function to list direct sub-folders AND files for SFTP
 # Parameters: host, port, user, pass, parent_path
-get_sftp_direct_sub_folders() {
+# Returns: List of content names (e.g., "myfolder (文件夹)", "myfile.txt (文件)") to stdout on success, empty list and non-zero exit on failure.
+get_sftp_direct_contents() {
     local host="$1" user="$2" pass="$3" port="$4" parent_path="$5"
     if [[ "$parent_path" != "/" && "${parent_path: -1}" != "/" ]]; then
         parent_path="${parent_path}/"
     fi
 
-    log_and_display "正在获取 SFTP 服务器中 '${parent_path}' 的子文件夹列表..." "${BLUE}" "/dev/stderr"
-    local folders=()
+    log_and_display "正在获取 SFTP 服务器中 '${parent_path}' 的子文件夹和文件列表..." "${BLUE}" "/dev/stderr"
+    local contents=()
     local sftp_output=""
     local result_status=1
 
     if ! command -v sshpass &> /dev/null; then
-        log_and_display "${RED}SFTP 无法获取子文件夹列表：未找到 sshpass 命令。${NC}" "" "/dev/stderr"
-        return 1
-    fi
-    # Test path validity first using 'ls -d' command.
-    if ! { sftp_output=$(sshpass -p "$pass" sftp -oBatchMode=no -b - -P "$port" "$user@$host" <<< "ls -d ${parent_path} &>/dev/null || exit 1; quit;" 2>&1); } then
-        log_and_display "${RED}SFTP 连接失败或路径 '${parent_path}' 无效，无法获取子文件夹列表。错误: ${sftp_output}${NC}" "" "/dev/stderr"
+        log_and_display "${RED}SFTP 无法获取子文件夹或文件列表：未找到 sshpass 命令。${NC}" "" "/dev/stderr"
         return 1
     fi
 
-    # Use sftp 'ls -F' which marks directories with a slash.
-    if { sftp_output=$(sshpass -p "$pass" sftp -oBatchMode=no -b - -P "$port" "$user@$host" <<< "ls -F ${parent_path}; quit;" 2>&1); } then
+    # Use sftp 'ls -F' which marks directories with a slash. Add timeout settings.
+    if { sftp_output=$(sshpass -p "$pass" sftp -oBatchMode=no -oConnectTimeout=10 -oStrictHostKeyChecking=no -b - -P "$port" "$user@$host" <<< "ls -F ${parent_path}; quit;" 2>&1); } then
         result_status=0
     else
         result_status=$?
@@ -894,19 +1031,32 @@ get_sftp_direct_sub_folders() {
     fi
 
     if [ "$result_status" -eq 0 ] && [[ -n "$sftp_output" ]]; then
-        # Filter out lines that end with '/' (directories) and remove the trailing slash
-        # Also filter out the ".." and "." special directory entries if they appear
-        mapfile -t folders <<< "$(echo "$sftp_output" | grep -E '/$' | grep -v '^\.$' | grep -v '^\.\.$' | sed 's|/$||')"
+        # Filter out ".." and "." special directory entries if they appear
+        while IFS= read -r line; do
+            if [[ "$line" == "." || "$line" == ".." || -z "$line" ]]; then
+                continue # Skip current and parent directory, and empty lines
+            fi
+            if [[ "$line" =~ /$ ]]; then # Directory (ends with / in sftp ls -F output)
+                local cleaned_name="${line%/}" # Remove trailing / for a pure directory name
+                contents+=("${cleaned_name} (文件夹)")
+            else # File
+                contents+=("${line} (文件)")
+            fi
+        done <<< "$sftp_output"
     else
-        log_and_display "${YELLOW}SFTP 路径 '${parent_path}' 下没有检测到子文件夹。${NC}" "" "/dev/stderr"
+        log_and_display "${YELLOW}SFTP 路径 '${parent_path}' 下没有检测到子文件夹或文件。${NC}" "" "/dev/stderr"
     fi
-    printf '%s\n' "${folders[@]}"
+    
+    # Sort the combined list
+    IFS=$'\n' contents=($(sort <<<"${contents[*]}"))
+    unset IFS
+    printf '%s\n' "${contents[@]}"
     return 0
 }
 
 
 # ================================================================
-# ===           增强型路径选择函数 (交互式浏览)              ===
+# ===         增强型路径选择函数 (交互式浏览)           ===
 # ================================================================
 
 choose_s3_r2_path() {
@@ -928,28 +1078,27 @@ choose_s3_r2_path() {
         echo -e "当前浏览路径: ${YELLOW}${current_remote_path:-/}${NC}\n"
 
         # S3 prefixes don't usually start with /
-        local s3_display_path="${current_remote_path#/}" 
-        local sub_folders_str=$(get_s3_r2_direct_sub_folders "$s3_display_path")
-        local get_folders_status=$? # Capture the exit status
-        local sub_folders_array=()
+        local s3_display_path="${current_remote_path#/}"
+        local remote_contents_str=$(get_s3_r2_direct_contents "$s3_display_path") # 调用新的函数
+        local get_contents_status=$?
+        local remote_contents_array=()
 
-        if [ "$get_folders_status" -ne 0 ]; then
-            log_and_display "${RED}获取 S3/R2 文件夹列表失败，请检查配置或重试。${NC}"
+        if [ "$get_contents_status" -ne 0 ]; then
+            log_and_display "${RED}获取 S3/R2 文件夹和文件列表失败，请检查配置或重试。${NC}"
             press_enter_to_continue
             continue # Continue the while loop to re-display options
-        elif [[ -n "$sub_folders_str" ]]; then
-            mapfile -t sub_folders_array <<< "$sub_folders_str"
+        elif [[ -n "$remote_contents_str" ]]; then
+            mapfile -t remote_contents_array <<< "$remote_contents_str"
         fi
 
-
-        if [ ${#sub_folders_array[@]} -gt 0 ]; then
-            echo "子文件夹列表:"
-            for i in "${!sub_folders_array[@]}"; do
-                echo "  $((i+1)). ${sub_folders_array[$i]}"
+        if [ ${#remote_contents_array[@]} -gt 0 ]; then
+            echo "当前目录内容 (文件夹和文件):"
+            for i in "${!remote_contents_array[@]}"; do
+                echo "  $((i+1)). ${remote_contents_array[$i]}"
             done
             echo ""
         else
-            echo "当前路径下没有检测到子文件夹。"
+            echo "当前路径下没有检测到子文件夹或文件。"
         fi
 
         echo -e "${BLUE}------------------------------------------------${NC}"
@@ -967,13 +1116,12 @@ choose_s3_r2_path() {
         case "$choice" in
             ".." )
                 if [[ "$current_remote_path" != "/" ]]; then
-                    # Remove trailing slash if present, then remove last path component
                     current_remote_path="${current_remote_path%/}"
                     current_remote_path="$(dirname "$current_remote_path")"
-                    if [[ "$current_remote_path" == "." ]]; then # If it becomes ".", it means we're at root
+                    if [[ "$current_remote_path" == "." ]]; then
                         current_remote_path="/"
                     else
-                        current_remote_path="${current_remote_path}/" # Add back slash for directory representation
+                        current_remote_path="${current_remote_path}/"
                     fi
                     log_and_display "已返回上一级目录: ${current_remote_path:-/}" "${BLUE}"
                 else
@@ -981,11 +1129,17 @@ choose_s3_r2_path() {
                 fi
                 press_enter_to_continue
                 ;;
-            [0-9]* ) # If it's a number, try to navigate into it
-                if [ "$choice" -ge 1 ] && [ "$choice" -le ${#sub_folders_array[@]} ]; then
-                    local chosen_folder="${sub_folders_array[$((choice-1))]}"
-                    current_remote_path="${current_remote_path}${chosen_folder}/" # Append, ensure slash
-                    log_and_display "已进入目录: ${current_remote_path}" "${GREEN}"
+            [0-9]* ) # If it's a number, try to navigate into it if it's a folder
+                if [ "$choice" -ge 1 ] && [ "$choice" -le ${#remote_contents_array[@]} ]; then
+                    local chosen_item_with_type="${remote_contents_array[$((choice-1))]}"
+                    # Check if the chosen item is a directory by looking for the " (文件夹)" suffix
+                    if echo "$chosen_item_with_type" | grep -q " (文件夹)$"; then
+                        local chosen_folder="$(echo "$chosen_item_with_type" | sed 's/\ (文件夹)$//')"
+                        current_remote_path="${current_remote_path}${chosen_folder}/" # Append the clean folder name and ensure slash
+                        log_and_display "已进入目录: ${current_remote_path}" "${GREEN}"
+                    else
+                        log_and_display "${YELLOW}您选择的是一个文件，不能进入。请选择一个文件夹或按 'k' 键确认当前目录。${NC}"
+                    fi
                 else
                     log_and_display "${RED}无效的数字序号，请重新输入。${NC}"
                 fi
@@ -997,11 +1151,9 @@ choose_s3_r2_path() {
                 ;;
             [aA] )
                 read -rp "请输入新的 S3/R2 目标路径（绝对路径或相对于 '${current_remote_path:-/}'）：" new_path_input
-                # Normalize and resolve new_path_input
                 if [[ "$new_path_input" =~ ^/ ]]; then # Absolute path
                     final_selected_path="$new_path_input"
                 else # Relative path
-                    # Ensure current_remote_path is clean before appending
                     local base_for_relative="${current_remote_path%/}"
                     final_selected_path="${base_for_relative}/${new_path_input}"
                 fi
@@ -1027,7 +1179,7 @@ choose_s3_r2_path() {
     read -rp "最终确认您选择的 S3/R2 目标路径是 '${display_path_confirm}'。确认吗？(y/N): " confirm_path
     if [[ "$confirm_path" =~ ^[Yy]$ ]]; then
         # S3_BACKUP_PATH should not start with a leading slash for awscli compatibility
-        S3_BACKUP_PATH="${final_selected_path#/}" 
+        S3_BACKUP_PATH="${final_selected_path#/}"
         log_and_display "${GREEN}S3/R2 备份路径已设置为：${display_path_confirm}${NC}"
         return 0 # Success
     else
@@ -1059,27 +1211,27 @@ choose_webdav_path() {
         local base_webdav_url="${WEBDAV_URL%/}" # Ensure no trailing slash on base URL
         local current_full_webdav_url="${base_webdav_url}${current_remote_path}"
 
-        local sub_folders_str=$(get_webdav_direct_sub_folders "$current_full_webdav_url")
-        local get_folders_status=$?
-        local sub_folders_array=()
+        local remote_contents_str=$(get_webdav_direct_contents "$current_full_webdav_url")
+        local get_contents_status=$?
+        local remote_contents_array=()
 
-        if [ "$get_folders_status" -ne 0 ]; then
-            log_and_display "${RED}获取 WebDAV 文件夹列表失败，请检查配置或重试。${NC}"
+        if [ "$get_contents_status" -ne 0 ]; then
+            log_and_display "${RED}获取 WebDAV 文件夹和文件列表失败，请检查配置或重试。${NC}"
             press_enter_to_continue
             continue
-        elif [[ -n "$sub_folders_str" ]]; then
-            mapfile -t sub_folders_array <<< "$sub_folders_str"
+        elif [[ -n "$remote_contents_str" ]]; then
+            mapfile -t remote_contents_array <<< "$remote_contents_str"
         fi
 
 
-        if [ ${#sub_folders_array[@]} -gt 0 ]; then
-            echo "子文件夹列表:"
-            for i in "${!sub_folders_array[@]}"; do
-                echo "  $((i+1)). ${sub_folders_array[$i]}"
+        if [ ${#remote_contents_array[@]} -gt 0 ]; then
+            echo "当前目录内容 (文件夹和文件):"
+            for i in "${!remote_contents_array[@]}"; do
+                echo "  $((i+1)). ${remote_contents_array[$i]}"
             done
             echo ""
         else
-            echo "当前路径下没有检测到子文件夹。"
+            echo "当前路径下没有检测到子文件夹或文件。"
         fi
 
         echo -e "${BLUE}------------------------------------------------${NC}"
@@ -1111,10 +1263,15 @@ choose_webdav_path() {
                 press_enter_to_continue
                 ;;
             [0-9]* )
-                if [ "$choice" -ge 1 ] && [ "$choice" -le ${#sub_folders_array[@]} ]; then
-                    local chosen_folder="${sub_folders_array[$((choice-1))]}"
-                    current_remote_path="${current_remote_path}${chosen_folder}/"
-                    log_and_display "已进入目录: ${current_remote_path}" "${GREEN}"
+                if [ "$choice" -ge 1 ] && [ "$choice" -le ${#remote_contents_array[@]} ]; then
+                    local chosen_item_with_type="${remote_contents_array[$((choice-1))]}"
+                    if echo "$chosen_item_with_type" | grep -q " (文件夹)$"; then
+                        local chosen_folder="$(echo "$chosen_item_with_type" | sed 's/\ (文件夹)$//')"
+                        current_remote_path="${current_remote_path}${chosen_folder}/"
+                        log_and_display "已进入目录: ${current_remote_path}" "${GREEN}"
+                    else
+                        log_and_display "${YELLOW}您选择的是一个文件，不能进入。请选择一个文件夹或按 'k' 键确认当前目录。${NC}"
+                    fi
                 else
                     log_and_display "${RED}无效的数字序号，请重新输入。${NC}"
                 fi
@@ -1178,26 +1335,26 @@ choose_ftp_path() {
         echo -e "${BLUE}=== 设置 FTP 备份目标路径 ===${NC}"
         echo -e "当前浏览路径: ${YELLOW}${current_remote_path:-/}${NC}\n"
 
-        local sub_folders_str=$(get_ftp_direct_sub_folders "$FTP_HOST" "$FTP_USERNAME" "$FTP_PASSWORD" "$FTP_PORT" "$current_remote_path")
-        local get_folders_status=$?
-        local sub_folders_array=()
+        local remote_contents_str=$(get_ftp_direct_contents "$FTP_HOST" "$FTP_USERNAME" "$FTP_PASSWORD" "$FTP_PORT" "$current_remote_path")
+        local get_contents_status=$?
+        local remote_contents_array=()
 
-        if [ "$get_folders_status" -ne 0 ]; then
-            log_and_display "${RED}获取 FTP 文件夹列表失败，请检查配置或重试。${NC}"
+        if [ "$get_contents_status" -ne 0 ]; then
+            log_and_display "${RED}获取 FTP 文件夹和文件列表失败，请检查配置或重试。${NC}"
             press_enter_to_continue
             continue
-        elif [[ -n "$sub_folders_str" ]]; then
-            mapfile -t sub_folders_array <<< "$sub_folders_str"
+        elif [[ -n "$remote_contents_str" ]]; then
+            mapfile -t remote_contents_array <<< "$remote_contents_str"
         fi
 
-        if [ ${#sub_folders_array[@]} -gt 0 ]; then
-            echo "子文件夹列表:"
-            for i in "${!sub_folders_array[@]}"; do
-                echo "  $((i+1)). ${sub_folders_array[$i]}"
+        if [ ${#remote_contents_array[@]} -gt 0 ]; then
+            echo "当前目录内容 (文件夹和文件):"
+            for i in "${!remote_contents_array[@]}"; do
+                echo "  $((i+1)). ${remote_contents_array[$i]}"
             done
             echo ""
         else
-            echo "当前路径下没有检测到子文件夹。"
+            echo "当前路径下没有检测到子文件夹或文件。"
         fi
 
         echo -e "${BLUE}------------------------------------------------${NC}"
@@ -1229,10 +1386,15 @@ choose_ftp_path() {
                 press_enter_to_continue
                 ;;
             [0-9]* )
-                if [ "$choice" -ge 1 ] && [ "$choice" -le ${#sub_folders_array[@]} ]; then
-                    local chosen_folder="${sub_folders_array[$((choice-1))]}"
-                    current_remote_path="${current_remote_path}${chosen_folder}/"
-                    log_and_display "已进入目录: ${current_remote_path}" "${GREEN}"
+                if [ "$choice" -ge 1 ] && [ "$choice" -le ${#remote_contents_array[@]} ]; then
+                    local chosen_item_with_type="${remote_contents_array[$((choice-1))]}"
+                    if echo "$chosen_item_with_type" | grep -q " (文件夹)$"; then
+                        local chosen_folder="$(echo "$chosen_item_with_type" | sed 's/\ (文件夹)$//')"
+                        current_remote_path="${current_remote_path}${chosen_folder}/"
+                        log_and_display "已进入目录: ${current_remote_path}" "${GREEN}"
+                    else
+                        log_and_display "${YELLOW}您选择的是一个文件，不能进入。请选择一个文件夹或按 'k' 键确认当前目录。${NC}"
+                    fi
                 else
                     log_and_display "${RED}无效的数字序号，请重新输入。${NC}"
                 fi
@@ -1296,27 +1458,27 @@ choose_ftps_path() {
         echo -e "${BLUE}=== 设置 FTPS 备份目标路径 ===${NC}"
         echo -e "当前浏览路径: ${YELLOW}${current_remote_path:-/}${NC}\n"
 
-        local sub_folders_str=$(get_ftps_direct_sub_folders "$FTPS_HOST" "$FTPS_USERNAME" "$FTPS_PASSWORD" "$FTPS_PORT" "$current_remote_path")
-        local get_folders_status=$?
-        local sub_folders_array=()
+        local remote_contents_str=$(get_ftps_direct_contents "$FTPS_HOST" "$FTPS_USERNAME" "$FTPS_PASSWORD" "$FTPS_PORT" "$current_remote_path")
+        local get_contents_status=$?
+        local remote_contents_array=()
 
-        if [ "$get_folders_status" -ne 0 ]; then
-            log_and_display "${RED}获取 FTPS 文件夹列表失败，请检查配置或重试。${NC}"
+        if [ "$get_contents_status" -ne 0 ]; then
+            log_and_display "${RED}获取 FTPS 文件夹和文件列表失败，请检查配置或重试。${NC}"
             press_enter_to_continue
             continue
-        elif [[ -n "$sub_folders_str" ]]; then
-            mapfile -t sub_folders_array <<< "$sub_folders_str"
+        elif [[ -n "$remote_contents_str" ]]; then
+            mapfile -t remote_contents_array <<< "$remote_contents_str"
         fi
 
 
-        if [ ${#sub_folders_array[@]} -gt 0 ]; then
-            echo "子文件夹列表:"
-            for i in "${!sub_folders_array[@]}"; do
-                echo "  $((i+1)). ${sub_folders_array[$i]}"
+        if [ ${#remote_contents_array[@]} -gt 0 ]; then
+            echo "当前目录内容 (文件夹和文件):"
+            for i in "${!remote_contents_array[@]}"; do
+                echo "  $((i+1)). ${remote_contents_array[$i]}"
             done
             echo ""
         else
-            echo "当前路径下没有检测到子文件夹。"
+            echo "当前路径下没有检测到子文件夹或文件。"
         fi
 
         echo -e "${BLUE}------------------------------------------------${NC}"
@@ -1348,10 +1510,15 @@ choose_ftps_path() {
                 press_enter_to_continue
                 ;;
             [0-9]* )
-                if [ "$choice" -ge 1 ] && [ "$choice" -le ${#sub_folders_array[@]} ]; then
-                    local chosen_folder="${sub_folders_array[$((choice-1))]}"
-                    current_remote_path="${current_remote_path}${chosen_folder}/"
-                    log_and_display "已进入目录: ${current_remote_path}" "${GREEN}"
+                if [ "$choice" -ge 1 ] && [ "$choice" -le ${#remote_contents_array[@]} ]; then
+                    local chosen_item_with_type="${remote_contents_array[$((choice-1))]}"
+                    if echo "$chosen_item_with_type" | grep -q " (文件夹)$"; then
+                        local chosen_folder="$(echo "$chosen_item_with_type" | sed 's/\ (文件夹)$//')"
+                        current_remote_path="${current_remote_path}${chosen_folder}/"
+                        log_and_display "已进入目录: ${current_remote_path}" "${GREEN}"
+                    else
+                        log_and_display "${YELLOW}您选择的是一个文件，不能进入。请选择一个文件夹或按 'k' 键确认当前目录。${NC}"
+                    fi
                 else
                     log_and_display "${RED}无效的数字序号，请重新输入。${NC}"
                 fi
@@ -1415,27 +1582,27 @@ choose_sftp_path() {
         echo -e "${BLUE}=== 设置 SFTP 备份目标路径 ===${NC}"
         echo -e "当前浏览路径: ${YELLOW}${current_remote_path:-/}${NC}\n"
 
-        local sub_folders_str=$(get_sftp_direct_sub_folders "$SFTP_HOST" "$SFTP_USERNAME" "$SFTP_PASSWORD" "$SFTP_PORT" "$current_remote_path")
-        local get_folders_status=$?
-        local sub_folders_array=()
+        local remote_contents_str=$(get_sftp_direct_contents "$SFTP_HOST" "$SFTP_USERNAME" "$SFTP_PASSWORD" "$SFTP_PORT" "$current_remote_path")
+        local get_contents_status=$?
+        local remote_contents_array=()
 
-        if [ "$get_folders_status" -ne 0 ]; then
-            log_and_display "${RED}获取 SFTP 文件夹列表失败，请检查配置或重试。${NC}"
+        if [ "$get_contents_status" -ne 0 ]; then
+            log_and_display "${RED}获取 SFTP 文件夹和文件列表失败，请检查配置或重试。${NC}"
             press_enter_to_continue
             continue
-        elif [[ -n "$sub_folders_str" ]]; then
-            mapfile -t sub_folders_array <<< "$sub_folders_str"
+        elif [[ -n "$remote_contents_str" ]]; then
+            mapfile -t remote_contents_array <<< "$remote_contents_str"
         fi
 
 
-        if [ ${#sub_folders_array[@]} -gt 0 ]; then
-            echo "子文件夹列表:"
-            for i in "${!sub_folders_array[@]}"; do
-                echo "  $((i+1)). ${sub_folders_array[$i]}"
+        if [ ${#remote_contents_array[@]} -gt 0 ]; then
+            echo "当前目录内容 (文件夹和文件):"
+            for i in "${!remote_contents_array[@]}"; do
+                echo "  $((i+1)). ${remote_contents_array[$i]}"
             done
             echo ""
         else
-            echo "当前路径下没有检测到子文件夹。"
+            echo "当前路径下没有检测到子文件夹或文件。"
         fi
 
         echo -e "${BLUE}------------------------------------------------${NC}"
@@ -1467,10 +1634,15 @@ choose_sftp_path() {
                 press_enter_to_continue
                 ;;
             [0-9]* )
-                if [ "$choice" -ge 1 ] && [ "$choice" -le ${#sub_folders_array[@]} ]; then
-                    local chosen_folder="${sub_folders_array[$((choice-1))]}"
-                    current_remote_path="${current_remote_path}${chosen_folder}/"
-                    log_and_display "已进入目录: ${current_remote_path}" "${GREEN}"
+                if [ "$choice" -ge 1 ] && [ "$choice" -le ${#remote_contents_array[@]} ]; then
+                    local chosen_item_with_type="${remote_contents_array[$((choice-1))]}"
+                    if echo "$chosen_item_with_type" | grep -q " (文件夹)$"; then
+                        local chosen_folder="$(echo "$chosen_item_with_type" | sed 's/\ (文件夹)$//')"
+                        current_remote_path="${current_remote_path}${chosen_folder}/"
+                        log_and_display "已进入目录: ${current_remote_path}" "${GREEN}"
+                    else
+                        log_and_display "${YELLOW}您选择的是一个文件，不能进入。请选择一个文件夹或按 'k' 键确认当前目录。${NC}"
+                    fi
                 else
                     log_and_display "${RED}无效的数字序号，请重新输入。${NC}"
                 fi
@@ -1518,7 +1690,7 @@ choose_sftp_path() {
 
 
 # ================================================================
-# ===           云存储账号管理菜单 (保持不变)                 ===
+# ===         云存储账号管理菜单 (保持不变)             ===
 # ================================================================
 
 # 管理 S3/R2 账号设置
@@ -1629,7 +1801,7 @@ manage_webdav_account() {
         if [[ -n "$WEBDAV_URL" && -n "$WEBDAV_USERNAME" && -n "$WEBDAV_PASSWORD" ]]; then
             # 隐藏密码显示
             local display_url="${WEBDAV_URL}"
-            display_url="${display_url/:\/\/www./:\/\/\*\*\*./}" # 简单替换，避免直接显示敏感部分
+            display_url="${display_url/:\/\/www./:\/\/\*\*\*./}"
             webdav_status="${GREEN}已配置${NC} (URL: ${display_url} 用户名: ${WEBDAV_USERNAME})"
             if [[ -n "$WEBDAV_BACKUP_PATH" ]]; then
                 webdav_path_status="${GREEN}已设置目标路径: ${WEBDAV_BACKUP_PATH}${NC}"
@@ -2010,7 +2182,7 @@ select_backup_targets() {
             echo -n "1. S3/R2 存储 (当前: "
             if [[ "$BACKUP_TARGET_S3" == "true" ]]; then echo -e "${GREEN}启用${NC})"
             else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "    (已配置账号并设置路径: ${S3_BACKUP_PATH})"
+            echo "     (已配置账号并设置路径: ${S3_BACKUP_PATH})"
         else
             echo -e "1. S3/R2 存储 (${RED}未完全配置，无法启用${NC})"
         fi
@@ -2021,7 +2193,7 @@ select_backup_targets() {
             echo -n "2. WebDAV 存储 (当前: "
             if [[ "$BACKUP_TARGET_WEBDAV" == "true" ]]; then echo -e "${GREEN}启用${NC})"
             else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "    (已配置账号并设置路径: ${WEBDAV_BACKUP_PATH})"
+            echo "     (已配置账号并设置路径: ${WEBDAV_BACKUP_PATH})"
         else
             echo -e "2. WebDAV 存储 (${RED}未完全配置，无法启用${NC})"
         fi
@@ -2032,7 +2204,7 @@ select_backup_targets() {
             echo -n "3. FTP 存储 (当前: "
             if [[ "$BACKUP_TARGET_FTP" == "true" ]]; then echo -e "${GREEN}启用${NC})"
             else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "    (已配置账号并设置路径: ${FTP_BACKUP_PATH})"
+            echo "     (已配置账号并设置路径: ${FTP_BACKUP_PATH})"
         else
             echo -e "3. FTP 存储 (${RED}未完全配置，无法启用${NC})"
         fi
@@ -2042,7 +2214,7 @@ select_backup_targets() {
             echo -n "4. FTPS 存储 (当前: "
             if [[ "$BACKUP_TARGET_FTPS" == "true" ]]; then echo -e "${GREEN}启用${NC})"
             else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "    (已配置账号并设置路径: ${FTPS_BACKUP_PATH})"
+            echo "     (已配置账号并设置路径: ${FTPS_BACKUP_PATH})"
         else
             echo -e "4. FTPS 存储 (${RED}未完全配置，无法启用${NC})"
         fi
@@ -2052,7 +2224,7 @@ select_backup_targets() {
             echo -n "5. SFTP 存储 (当前: "
             if [[ "$BACKUP_TARGET_SFTP" == "true" ]]; then echo -e "${GREEN}启用${NC})"
             else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "    (已配置账号并设置路径: ${SFTP_BACKUP_PATH})"
+            echo "     (已配置账号并设置路径: ${SFTP_BACKUP_PATH})"
         else
             echo -e "5. SFTP 存储 (${RED}未完全配置，无法启用${NC})"
         fi
@@ -2211,11 +2383,11 @@ set_cloud_storage() {
         fi
 
         echo "1. 选择云备份目标 (S3/R2: ${BACKUP_TARGET_S3}, WebDAV: ${BACKUP_TARGET_WEBDAV}, FTP: ${BACKUP_TARGET_FTP}, FTPS: ${BACKUP_TARGET_FTPS}, SFTP: ${BACKUP_TARGET_SFTP})"
-        echo "    当前S3/R2账号: $s3_info"
-        echo "    当前WebDAV账号: $webdav_info"
-        echo "    当前FTP账号: $ftp_info"
-        echo "    当前FTPS账号: $ftps_info"
-        echo "    当前SFTP账号: $sftp_info"
+        echo "   当前S3/R2账号: $s3_info"
+        echo "   当前WebDAV账号: $webdav_info"
+        echo "   当前FTP账号: $ftp_info"
+        echo "   当前FTPS账号: $ftps_info"
+        echo "   当前SFTP账号: $sftp_info"
         echo "2. 管理 S3/R2 账号设置"
         echo "3. 管理 WebDAV 账号设置"
         echo "4. 管理 FTP 账号设置"
@@ -2299,7 +2471,7 @@ set_retention_policy() {
                     log_and_display "${GREEN}已设置保留最近 ${RETENTION_VALUE} 天内的备份策略。${NC}"
                 else
                     log_and_display "${RED}输入无效，请输入一个大于等于 1 的整数。${NC}"
-                fi
+                fi # Corrected from F
                 press_enter_to_continue
                 ;;
             3)
@@ -2366,16 +2538,32 @@ apply_retention_policy() {
                 delete_status=$?
                 ;;
             "ftp")
-                lftp -u "$FTP_USERNAME","$FTP_PASSWORD" -p "$FTP_PORT" "$FTP_HOST" -e "rm ${FTP_BACKUP_PATH}${file_to_delete}; quit;" &> /dev/null
+                lftp -p "$FTP_PORT" -u "$FTP_USERNAME,$FTP_PASSWORD" "$FTP_HOST" <<EOF &>/dev/null
+set cmd:long-timeout 15
+set cmd:timeout 15
+set ftp:use-passive-mode true
+rm "$FTP_BACKUP_PATH$file_to_delete"
+quit
+EOF
                 delete_status=$?
                 ;;
             "ftps")
-                lftp -u "$FTPS_USERNAME","$FTPS_PASSWORD" -p "$FTPS_PORT" ftps://"$FTPS_HOST" -e "rm ${FTPS_BACKUP_PATH}${file_to_delete}; quit;" &> /dev/null
+                lftp -p "$FTPS_PORT" -u "$FTPS_USERNAME,$FTPS_PASSWORD" "ftps://$FTPS_HOST" <<EOF &>/dev/null
+set cmd:long-timeout 15
+set cmd:timeout 15
+set ftp:use-passive-mode true
+set ftp:ssl-force true
+set ftp:ssl-protect-data true
+set ssl:verify-certificate no
+rm "$FTPS_BACKUP_PATH$file_to_delete"
+quit
+EOF
                 delete_status=$?
                 ;;
             "sftp")
                 if command -v sshpass &> /dev/null; then
-                    sshpass -p "$SFTP_PASSWORD" sftp -oBatchMode=no -b - -P "$SFTP_PORT" "$SFTP_USERNAME@$SFTP_HOST" <<< "rm ${SFTP_BACKUP_PATH}${file_to_delete}" &> /dev/null
+                    # Add timeout for sftp
+                    sshpass -p "$SFTP_PASSWORD" sftp -oBatchMode=no -oConnectTimeout=10 -oStrictHostKeyChecking=no -b - -P "$SFTP_PORT" "$SFTP_USERNAME@$SFTP_HOST" <<< "rm ${SFTP_BACKUP_PATH}${file_to_delete}" &> /dev/null
                     delete_status=$?
                 else
                     log_and_display "${RED}SFTP 删除失败：未找到 sshpass 命令。${NC}" "" "/dev/stderr"
@@ -2465,9 +2653,11 @@ apply_retention_policy() {
                 get_list_status=$?
                 log_and_display "${RED}WebDAV 列出文件失败！错误: ${curl_output}${NC}" "" "/dev/stderr"
             fi
+            # We specifically look for zip files that match the backup naming convention
             raw_backups_list=$(echo "$curl_output" | grep -oP '<D:href>\K([^<]*[a-zA-Z0-9_-]+_[0-9]{14}\.zip)(?=</D:href>)' | sed "s|^${base_webdav_url_for_retention//./\\.}${target_path//./\\.}\|/||" | sed "s|/${target_path//./\\.}\|/||")
         elif [[ "$service_type" == "ftp" ]]; then
-            if { raw_backups_list=$(lftp -u "$FTP_USERNAME","$FTP_PASSWORD" -p "$FTP_PORT" "$FTP_HOST" -e "find ${target_path} -name '*_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].zip'; quit;" 2>&1); } then
+            # Add timeout and passive mode settings
+            if { raw_backups_list=$(lftp -u "$FTP_USERNAME","$FTP_PASSWORD" -p "$FTP_PORT" "$FTP_HOST" -e "set cmd:long-timeout 10; set cmd:timeout 10; set ftp:use-passive-mode yes; find ${target_path} -name '*_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].zip'; quit;" 2>&1); } then
                 get_list_status=0
             else
                 get_list_status=$?
@@ -2475,7 +2665,8 @@ apply_retention_policy() {
             fi
             raw_backups_list=$(echo "$raw_backups_list" | sed "s|^${target_path}||")
         elif [[ "$service_type" == "ftps" ]]; then
-            if { raw_backups_list=$(lftp -u "$FTPS_USERNAME","$FTPS_PASSWORD" -p "$FTPS_PORT" ftps://"$FTPS_HOST" -e "find ${target_path} -name '*_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].zip'; quit;" 2>&1); } then
+            # Add timeout and passive mode settings
+            if { raw_backups_list=$(lftp -u "$FTPS_USERNAME","$FTPS_PASSWORD" -p "$FTPS_PORT" ftps://"$FTPS_HOST" -e "set cmd:long-timeout 10; set cmd:timeout 10; set ftp:use-passive-mode yes; set ftp:ssl-force true; set ftp:ssl-protect-data true; set ssl:verify-certificate no; find ${target_path} -name '*_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].zip'; quit;" 2>&1); } then
                 get_list_status=0
             else
                 get_list_status=$?
@@ -2484,19 +2675,21 @@ apply_retention_policy() {
             raw_backups_list=$(echo "$raw_backups_list" | sed "s|^${target_path}||")
         elif [[ "$service_type" == "sftp" ]]; then
             if command -v sshpass &> /dev/null; then
-                if { raw_backups_list=$(sshpass -p "$SFTP_PASSWORD" sftp -oBatchMode=no -b - -P "$SFTP_PORT" "$SFTP_USERNAME@$SFTP_HOST" <<< "ls -R ${target_path}/" 2>&1); } then
+                # Add timeout for sftp
+                if { raw_backups_list=$(sshpass -p "$SFTP_PASSWORD" sftp -oBatchMode=no -oConnectTimeout=10 -oStrictHostKeyChecking=no -b - -P "$SFTP_PORT" "$SFTP_USERNAME@$SFTP_HOST" <<< "ls -R ${target_path}/" 2>&1); } then
                     get_list_status=0
                 else
                     get_list_status=$?
                     log_and_display "${RED}SFTP 列出文件失败！错误: ${raw_backups_list}${NC}" "" "/dev/stderr"
                 fi
+                # Filter for lines that are zip files matching the pattern
                 raw_backups_list=$(echo "$raw_backups_list" | grep -E '/[a-zA-Z0-9_-]+_[0-9]{14}\.zip$' | sed 's|.*/||') # Gets only filename from full path
             fi
         fi
 
         if [ "$get_list_status" -ne 0 ]; then
-             log_and_display "${YELLOW}${service_display_name} 列表操作失败，跳过清理。${NC}"
-             return
+            log_and_display "${YELLOW}${service_display_name} 列表操作失败，跳过清理。${NC}"
+            return
         fi
 
         # Filter for the specific backup file pattern (e.g., my_file_YYYYMMDDHHMMSS.zip)
@@ -2776,14 +2969,24 @@ perform_backup() {
             webdav_this_upload_status="禁用"
         fi
 
-        # --- 新增 FTP 上传 ---
+        # --- [OPTIMIZED] FTP 上传 ---
         if [[ "$BACKUP_TARGET_FTP" == "true" ]]; then
             if [[ -n "$FTP_HOST" && -n "$FTP_USERNAME" && -n "$FTP_PASSWORD" && -n "$FTP_BACKUP_PATH" ]]; then
-                log_and_display "正在尝试上传到 FTP 服务器：${FTP_HOST}:${FTP_PORT}/${FTP_BACKUP_PATH}${archive_name}..."
+                log_and_display "正在尝试上传到 FTP 服务器：${FTP_HOST}:${FTP_PORT}${FTP_BACKUP_PATH}${archive_name}..."
                 local ftp_upload_output=""
                 local ftp_upload_status_code=1
-                # lftp put命令，远程路径如果是目录，会自动使用同名文件
-                if { ftp_upload_output=$(lftp -u "$FTP_USERNAME","$FTP_PASSWORD" -p "$FTP_PORT" "$FTP_HOST" -e "put '$temp_archive_path' -o ${FTP_BACKUP_PATH}${archive_name}; quit;" 2>&1); } then
+                
+                if { ftp_upload_output=$(lftp -p "$FTP_PORT" -u "$FTP_USERNAME,$FTP_PASSWORD" "$FTP_HOST" <<EOF
+set cmd:long-timeout 3600
+set cmd:timeout 300
+set ftp:use-passive-mode true
+# 创建远端目录 (如果不存在)，-p 选项可以递归创建
+mkdir -p "$FTP_BACKUP_PATH"
+# 上传文件
+put -O "$FTP_BACKUP_PATH" "$temp_archive_path"
+quit
+EOF
+                2>&1); }; then
                     ftp_upload_status_code=0
                 else
                     ftp_upload_status_code=$?
@@ -2806,13 +3009,25 @@ perform_backup() {
             ftp_this_upload_status="禁用"
         fi
 
-        # --- 新增 FTPS 上传 ---
+        # --- [OPTIMIZED] FTPS 上传 ---
         if [[ "$BACKUP_TARGET_FTPS" == "true" ]]; then
             if [[ -n "$FTPS_HOST" && -n "$FTPS_USERNAME" && -n "$FTPS_PASSWORD" && -n "$FTPS_BACKUP_PATH" ]]; then
-                log_and_display "正在尝试上传到 FTPS 服务器：${FTPS_HOST}:${FTPS_PORT}/${FTPS_BACKUP_PATH}${archive_name}..."
+                log_and_display "正在尝试上传到 FTPS 服务器：${FTPS_HOST}:${FTPS_PORT}${FTPS_BACKUP_PATH}${archive_name}..."
                 local ftps_upload_output=""
                 local ftps_upload_status_code=1
-                if { ftps_upload_output=$(lftp -u "$FTPS_USERNAME","$FTPS_PASSWORD" -p "$FTPS_PORT" ftps://"$FTPS_HOST" -e "put '$temp_archive_path' -o ${FTPS_BACKUP_PATH}${archive_name}; quit;" 2>&1); } then
+                
+                if { ftps_upload_output=$(lftp -p "$FTPS_PORT" -u "$FTPS_USERNAME,$FTPS_PASSWORD" "ftps://$FTPS_HOST" <<EOF
+set cmd:long-timeout 3600
+set cmd:timeout 300
+set ftp:use-passive-mode true
+set ftp:ssl-force true
+set ftp:ssl-protect-data true
+set ssl:verify-certificate no
+mkdir -p "$FTPS_BACKUP_PATH"
+put -O "$FTPS_BACKUP_PATH" "$temp_archive_path"
+quit
+EOF
+                2>&1); }; then
                     ftps_upload_status_code=0
                 else
                     ftps_upload_status_code=$?
@@ -2838,11 +3053,12 @@ perform_backup() {
         # --- 新增 SFTP 上传 ---
         if [[ "$BACKUP_TARGET_SFTP" == "true" ]]; then
             if [[ -n "$SFTP_HOST" && -n "$SFTP_USERNAME" && -n "$SFTP_PASSWORD" && -n "$SFTP_BACKUP_PATH" ]]; then
-                log_and_display "正在尝试上传到 SFTP 服务器：${SFTP_USERNAME}@${SFTP_HOST}:${SFTP_PORT}/${SFTP_BACKUP_PATH}${archive_name}..."
+                log_and_display "正在尝试上传到 SFTP 服务器：${SFTP_USERNAME}@${SFTP_HOST}:${SFTP_PORT}${SFTP_BACKUP_PATH}${archive_name}..."
                 local sftp_upload_output=""
                 local sftp_upload_status_code=1
                 if command -v sshpass &> /dev/null; then
-                    if { sftp_upload_output=$(sshpass -p "$SFTP_PASSWORD" sftp -oBatchMode=no -b - -P "$SFTP_PORT" "$SFTP_USERNAME@$SFTP_HOST" <<< "put '$temp_archive_path' ${SFTP_BACKUP_PATH}${archive_name}" 2>&1); } then
+                    # Add timeout for sftp
+                    if { sftp_upload_output=$(sshpass -p "$SFTP_PASSWORD" sftp -oBatchMode=no -oConnectTimeout=10 -oStrictHostKeyChecking=no -b - -P "$SFTP_PORT" "$SFTP_USERNAME@$SFTP_HOST" <<< "put '$temp_archive_path' ${SFTP_BACKUP_PATH}${archive_name}" 2>&1); } then
                         sftp_upload_status_code=0
                     else
                         sftp_upload_status_code=$?
@@ -2880,13 +3096,13 @@ perform_backup() {
         if [[ -n "$WEBDAV_URL" && "$webdav_this_upload_status" != "禁用" ]]; then path_summary_message+=" (目标: \`${WEBDAV_URL%/}/${WEBDAV_BACKUP_PATH}\`)"; fi
         path_summary_message+="\n"
         path_summary_message+="FTP 上传: ${ftp_this_upload_status}"
-        if [[ -n "$FTP_HOST" && "$ftp_this_upload_status" != "禁用" ]]; then path_summary_message+=" (目标: \`${FTP_HOST}:${FTP_PORT}/${FTP_BACKUP_PATH}\`)"; fi
+        if [[ -n "$FTP_HOST" && "$ftp_this_upload_status" != "禁用" ]]; then path_summary_message+=" (目标: \`${FTP_HOST}:${FTP_PORT}${FTP_BACKUP_PATH}\`)"; fi
         path_summary_message+="\n"
         path_summary_message+="FTPS 上传: ${ftps_this_upload_status}"
-        if [[ -n "$FTPS_HOST" && "$ftps_this_upload_status" != "禁用" ]]; then path_summary_message+=" (目标: \`${FTPS_HOST}:${FTPS_PORT}/${FTPS_BACKUP_PATH}\`)"; fi
+        if [[ -n "$FTPS_HOST" && "$ftps_this_upload_status" != "禁用" ]]; then path_summary_message+=" (目标: \`${FTPS_HOST}:${FTPS_PORT}${FTPS_BACKUP_PATH}\`)"; fi
         path_summary_message+="\n"
         path_summary_message+="SFTP 上传: ${sftp_this_upload_status}"
-        if [[ -n "$SFTP_HOST" && "$sftp_this_upload_status" != "禁用" ]]; then path_summary_message+=" (目标: \`${SFTP_HOST}:${SFTP_PORT}/${SFTP_BACKUP_PATH}\`)"; fi
+        if [[ -n "$SFTP_HOST" && "$sftp_this_upload_status" != "禁用" ]]; then path_summary_message+=" (目标: \`${SFTP_HOST}:${SFTP_PORT}${SFTP_BACKUP_PATH}\`)"; fi
         send_telegram_message "${path_summary_message}"
 
         # 清理当前路径的临时压缩文件
