@@ -8,6 +8,7 @@ LOG_FILE="$HOME/.personal_backup_log.txt"
 # Default values (if config file not found)
 BACKUP_SOURCE_PATH=""
 AUTO_BACKUP_INTERVAL_DAYS=7 # Default auto backup interval in days (e.g., 7 days = 1 week)
+LAST_AUTO_BACKUP_TIMESTAMP=0 # Unix timestamp of last automatic backup
 
 # Cloud storage credentials variables (do NOT hardcode here, enter at runtime or via env/awscli config)
 S3_ACCESS_KEY=""
@@ -67,7 +68,8 @@ press_enter_to_continue() {
 # Save configuration to file
 save_config() {
     echo "BACKUP_SOURCE_PATH=\"$BACKUP_SOURCE_PATH\"" > "$CONFIG_FILE"
-    echo "AUTO_BACKUP_INTERVAL_DAYS=$AUTO_BACKUP_INTERVAL_DAYS" >> "$CONFIG_FILE" # Updated variable name
+    echo "AUTO_BACKUP_INTERVAL_DAYS=$AUTO_BACKUP_INTERVAL_DAYS" >> "$CONFIG_FILE"
+    echo "LAST_AUTO_BACKUP_TIMESTAMP=$LAST_AUTO_BACKUP_TIMESTAMP" >> "$CONFIG_FILE" # Save last backup timestamp
     # Do NOT save sensitive credentials to config file
     log_and_display "配置已保存到 $CONFIG_FILE"
 }
@@ -105,18 +107,17 @@ check_dependencies() {
 set_auto_backup_interval() {
     display_header
     echo -e "${BLUE}=== 1. 自动备份设定 ===${NC}"
-    echo "当前自动备份间隔: ${AUTO_BACKUP_INTERVAL_DAYS} 天" # Display in days
+    echo "当前自动备份间隔: ${AUTO_BACKUP_INTERVAL_DAYS} 天"
     echo ""
     read -rp "请输入新的自动备份间隔时间（天数，最小1天，例如 7 为 1 周）: " interval_input
 
-    if [[ "$interval_input" =~ ^[0-9]+$ ]] && [ "$interval_input" -ge 1 ]; then # Minimum 1 day
-        AUTO_BACKUP_INTERVAL_DAYS="$interval_input" # Store in days
+    if [[ "$interval_input" =~ ^[0-9]+$ ]] && [ "$interval_input" -ge 1 ]; then
+        AUTO_BACKUP_INTERVAL_DAYS="$interval_input"
         save_config
         log_and_display "${GREEN}自动备份间隔已成功设置为：${AUTO_BACKUP_INTERVAL_DAYS} 天。${NC}"
-        log_and_display "${YELLOW}提示：要使自动备份真正生效，您需要配置 Cron Job 或 Systemd Service 来定期调用此脚本的备份功能。${NC}"
-        # Update cron example to use days if desired, or keep it flexible
-        log_and_display "${YELLOW}例如，每周执行一次备份的 Cron Job 条目 (请将 /path/to/your_script.sh 替换为实际路径):${NC}"
-        log_and_display "${YELLOW}0 0 * * 0 bash /path/to/your_script.sh manual_backup_from_cron > /dev/null 2>&1${NC}" # Example for Sunday midnight
+        log_and_display "${YELLOW}提示：现在您只需确保 Cron Job 每天运行此脚本一次。脚本会根据您设置的间隔自动判断是否执行备份。${NC}"
+        log_and_display "${YELLOW}Cron Job 条目示例 (请将 /path/to/your_script.sh 替换为实际路径):${NC}"
+        log_and_display "${YELLOW}0 0 * * * bash /path/to/your_script.sh check_auto_backup > /dev/null 2>&1${NC}" # Run daily at midnight
     else
         log_and_display "${RED}输入无效，请输入一个大于等于 1 的整数。${NC}"
     fi
@@ -288,6 +289,13 @@ perform_backup() {
     fi
 
     log_and_display "${BLUE}--- ${backup_type} 过程结束 ---${NC}"
+
+    # Update last auto backup timestamp if this was an automatic backup
+    if [[ "$backup_type" == "自动备份" || "$backup_type" == "自动备份 (Cron)" ]]; then
+        LAST_AUTO_BACKUP_TIMESTAMP=$(date +%s) # Get current Unix timestamp
+        save_config # Save updated timestamp
+        log_and_display "已更新上次自动备份时间戳：$(date -d @$LAST_AUTO_BACKUP_TIMESTAMP '+%Y-%m-%d %H:%M:%S')" "${BLUE}"
+    fi
 }
 
 # 999. Uninstall script
@@ -329,7 +337,7 @@ uninstall_script() {
 show_main_menu() {
     display_header
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 功能选项 ━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  1. ${YELLOW}自动备份设定${NC} (当前间隔: ${AUTO_BACKUP_INTERVAL_DAYS} 天)" # Display in days
+    echo -e "  1. ${YELLOW}自动备份设定${NC} (当前间隔: ${AUTO_BACKUP_INTERVAL_DAYS} 天)"
     echo -e "  2. ${YELLOW}手动备份${NC}"
     echo -e "  3. ${YELLOW}自定义备份路径${NC} (当前路径: ${BACKUP_SOURCE_PATH:-未设置})"
     echo -e "  4. ${YELLOW}压缩包格式${NC} (当前支持: ZIP)"
@@ -364,18 +372,39 @@ process_menu_choice() {
     esac
 }
 
+# Check if automatic backup should run based on interval
+check_auto_backup() {
+    load_config # Ensure latest config is loaded
+
+    local current_timestamp=$(date +%s)
+    local interval_seconds=$(( AUTO_BACKUP_INTERVAL_DAYS * 24 * 3600 )) # Convert days to seconds
+
+    if [[ "$LAST_AUTO_BACKUP_TIMESTAMP" -eq 0 ]]; then
+        log_and_display "首次自动备份，或上次自动备份时间未记录，立即执行。" "${YELLOW}"
+        perform_backup "自动备份 (Cron)"
+    elif (( current_timestamp - LAST_AUTO_BACKUP_TIMESTAMP >= interval_seconds )); then
+        log_and_display "距离上次自动备份已超过 ${AUTO_BACKUP_INTERVAL_DAYS} 天，执行自动备份。" "${BLUE}"
+        perform_backup "自动备份 (Cron)"
+    else
+        local next_backup_time=$(( LAST_AUTO_BACKUP_TIMESTAMP + interval_seconds ))
+        local remaining_seconds=$(( next_backup_time - current_timestamp ))
+        local remaining_days=$(( remaining_seconds / 86400 ))
+        log_and_display "未到自动备份时间。距离下次备份还有约 ${remaining_days} 天。" "${YELLOW}"
+    fi
+}
+
 # --- Script entry point ---
 main() {
     load_config # Load configuration on startup
 
-    # If called directly from cron job, perform manual backup and exit
-    if [[ "$1" == "manual_backup_from_cron" ]]; then
-        log_and_display "由 Cron 任务触发自动备份。" "${BLUE}"
-        perform_backup "自动备份 (Cron)"
+    # If called directly from cron job with specific argument
+    if [[ "$1" == "check_auto_backup" ]]; then # New argument for cron triggered check
+        log_and_display "由 Cron 任务触发自动备份检查。" "${BLUE}"
+        check_auto_backup
         exit 0
     fi
 
-    # Check dependencies
+    # Check dependencies for interactive mode
     if ! check_dependencies; then
         log_and_display "${RED}脚本无法运行，因为缺少必要的依赖项。请按照提示安装。${NC}"
         exit 1
