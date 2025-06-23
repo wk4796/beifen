@@ -215,7 +215,7 @@
                         <button class="copy-button" data-clipboard-text="0 0 * * * bash /root/personal_backup.sh check_auto_backup > /dev/null 2>&1">复制</button>
                         <p>0 0 * * * bash /root/personal_backup.sh check_auto_backup > /dev/null 2>&1</p>
                     </div>
-                    <p class="text-green-800 mt-4">**重要**：请务必将 `/root/personal_backup.sh` 替换为您脚本的**实际完整路径**。这行 Cron Job 的含义是：每天的午夜 00:00，执行您的备份脚本并带上 `check_auto_backup` 参数。脚本会根据您设定的间隔智能判断是否需要执行备份。保存并退出 Cron 表 (`Ctrl + X`, `Y`, `Enter`)。</p>
+                    <p class="text-green-800 mt-4">**重要**：请务必将 `/root/personal_backup.sh` 替换为您脚本的**实际完整路径**。这行 Cron Job 的含义是：每天的午夜 00:00，执行您的备份脚本并带上 `check_auto_backup` 参数。脚本会根据您设定的间隔智能判断是否需要备份。保存并退出 Cron 表 (`Ctrl + X`, `Y`, `Enter`)。</p>
                 </div>
             </div>
         </section>
@@ -468,7 +468,7 @@
     </main>
     
     <footer class="text-center py-8 mt-12 border-t border-green-200">
-        <p class="text-green-700">由个人自用数据备份脚本提供支持 | <a href="https://github.com/your-github-repo" id="github-link" class="text-green-600 hover:text-green-800 font-semibold" target="_blank" rel="noopener noreferrer">查看 GitHub 仓库</a></p>
+        <p class="text-green-700">由个人自用数据备份脚本提供支持 | <a href="https://github.com/wk4796/123" id="github-link" class="text-green-600 hover:text-green-800 font-semibold" target="_blank" rel="noopener noreferrer">查看 GitHub 仓库</a></p>
     </footer>
 
     <script defer>
@@ -562,16 +562,16 @@
             });
             
             // GitHub link update
-            // 请将此处替换为您的实际 GitHub 仓库地址！
             const githubLink = document.getElementById('github-link');
-            const realGithubUrl = 'https://github.com/wk4796/123'; // <-- **重要：请替换为您的真实GitHub仓库链接**
+            // 更新为用户提供的实际GitHub仓库链接
+            const realGithubUrl = 'https://github.com/wk4796/123'; 
             
             if (githubLink) {
                 githubLink.href = realGithubUrl;
-                // 移除之前的 alert 提示
+                // 移除原有的 alert 提示，因为现在链接是真实的
                 githubLink.removeEventListener('click', function(e) {
                     e.preventDefault();
-                    alert('https://github.com/wk4796/123');
+                    alert('请将此处的链接替换为您真实的 GitHub 仓库地址！');
                 });
             }
         });
