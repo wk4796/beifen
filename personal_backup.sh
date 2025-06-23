@@ -58,7 +58,7 @@ cleanup_temp_dir() {
     if [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]]; then
         rm -rf "$TEMP_DIR"
         # 不使用 log_and_display，避免在退出时产生过多日志
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - 清理临时目录: $TEMP_DIR" >> "$LOG_FILE"
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - 清理临时目录: $TEMP_FILE" >> "$LOG_FILE"
     fi
 }
 
@@ -74,7 +74,7 @@ clear_screen() {
 display_header() {
     clear_screen
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}          $SCRIPT_NAME          ${NC}"
+    echo -e "${GREEN}           $SCRIPT_NAME           ${NC}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 }
@@ -197,6 +197,8 @@ check_dependencies() {
     command -v zip &> /dev/null || missing_deps+=("zip")
     # 检查 realpath 命令是否存在，用于规范化路径
     command -v realpath &> /dev/null || missing_deps+=("realpath")
+    # 检查 xmllint 命令是否存在 (用于更稳健地解析WebDAV PROPFIND响应)
+    command -v xmllint &> /dev/null || missing_deps+=("libxml2-utils 或 xmlstarlet (推荐用于WebDAV)")
 
 
     # 仅当 S3/R2 凭证在配置中设置时才检查 S3/R2 依赖项
@@ -218,8 +220,9 @@ check_dependencies() {
 
     if [ ${#missing_deps[@]} -gt 0 ]; then
         log_and_display "${RED}检测到以下依赖项缺失，请安装后重试：${missing_deps[*]}${NC}"
-        log_and_display "例如 (Debian/Ubuntu): sudo apt update && sudo apt install zip awscli curl jq realpath" "${YELLOW}"
-        log_and_display "例如 (CentOS/RHEL): sudo yum install zip awscli curl jq realpath" "${YELLOW}"
+        log_and_display "例如 (Debian/Ubuntu): sudo apt update && sudo apt install zip awscli curl jq realpath libxml2-utils" "${YELLOW}"
+        log_and_display "例如 (CentOS/RHEL): sudo yum install zip awscli curl jq realpath libxml2" "${YELLOW}"
+        log_and_display "对于 xmlstarlet (可选，如果 xmllint 不可用): sudo apt install xmlstarlet" "${YELLOW}"
         press_enter_to_continue
         return 1
     fi
@@ -447,7 +450,129 @@ display_compression_info() {
     press_enter_to_continue
 }
 
-# --- 云存储连接测试和文件夹列表 (保持不变) ---
+# --- 新增的通用目录浏览函数 ---
+# 参数1: service_type ("s3" 或 "webdav")
+# 参数2: client_object (对于S3是桶名，对于WebDAV是URL)
+# 参数3: current_remote_path (当前浏览的远程路径)
+browse_remote_folders() {
+    local service_type="$1"
+    local client_obj="$2" # For S3, this is the bucket name. For WebDAV, this is the base URL.
+    local current_remote_path="$3" # The current path being browsed, e.g., "my_folder/" or "/path/to/folder/"
+    
+    local path_to_return="" # Variable to store the final selected path
+
+    while true; do
+        clear_screen
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${BLUE}        浏览 ${service_type^^} 远程路径        ${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+
+        local display_path=""
+        if [[ "$service_type" == "s3" ]]; then
+            display_path="${client_obj}/${current_remote_path}"
+        else # webdav
+            display_path="${client_obj%/}${current_remote_path}"
+        fi
+        log_and_display "当前目录: ${display_path}" "${YELLOW}"
+        echo ""
+
+        local folders_str=""
+        if [[ "$service_type" == "s3" ]]; then
+            folders_str=$(get_s3_r2_folders "$client_obj" "$current_remote_path")
+        else # webdav
+            folders_str=$(get_webdav_folders "$client_obj" "$current_remote_path")
+        fi
+
+        local folders_array=()
+        if [[ -n "$folders_str" ]]; then
+            IFS=$'\n' read -r -a folders_array <<< "$folders_str"
+            unset IFS
+        fi
+
+        if [ ${#folders_array[@]} -eq 0 ]; then
+            echo "当前目录下没有子文件夹。"
+        else
+            echo "请选择一个文件夹（输入数字）或操作："
+            for i in "${!folders_array[@]}"; do
+                echo "  $((i+1)). ${folders_array[$i]}/"
+            done
+        fi
+        echo ""
+        echo "  [b] 返回上一级目录"
+        echo "  [s] 选择当前路径作为备份目标"
+        echo "  [q] 取消并返回"
+        echo "  [m] 手动输入路径" # 新增手动输入选项
+        echo -e "${BLUE}------------------------------------------------${NC}"
+        read -rp "您的选择: " browse_choice
+
+        if [[ "$browse_choice" =~ ^[0-9]+$ ]]; then
+            local idx=$((browse_choice - 1))
+            if (( idx >= 0 && idx < ${#folders_array[@]} )); then
+                local selected_folder="${folders_array[$idx]}"
+                if [[ "$service_type" == "s3" ]]; then
+                    current_remote_path="${current_remote_path}${selected_folder}/"
+                else # webdav
+                    current_remote_path="${current_remote_path}${selected_folder}/"
+                fi
+            else
+                log_and_display "${RED}无效的数字选择，请重试。${NC}"
+                press_enter_to_continue
+            fi
+        elif [[ "$browse_choice" == "b" || "$browse_choice" == "B" ]]; then
+            if [[ "$service_type" == "s3" ]]; then
+                if [[ "$current_remote_path" == "" || "$current_remote_path" == "/" ]]; then
+                    log_and_display "${YELLOW}已在 S3/R2 桶的根目录。${NC}"
+                    press_enter_to_continue
+                else
+                    # 移除最后一个路径段
+                    local parent_path=$(dirname "${current_remote_path%/}")
+                    if [[ "$parent_path" == "." ]]; then # 如果是顶层子目录的父目录
+                        current_remote_path="" # 回到桶根目录
+                    else
+                        current_remote_path="${parent_path}/"
+                    fi
+                fi
+            else # webdav
+                if [[ "$current_remote_path" == "/" ]]; then
+                    log_and_display "${YELLOW}已在 WebDAV 根目录。${NC}"
+                    press_enter_to_continue
+                else
+                    # 获取父目录，确保以 '/' 结尾
+                    local parent_path=$(dirname "${current_remote_path%/}")
+                    if [[ "$parent_path" == "/" ]]; then
+                        current_remote_path="/"
+                    else
+                        current_remote_path="${parent_path}/"
+                    fi
+                fi
+            fi
+        elif [[ "$browse_choice" == "s" || "$browse_choice" == "S" ]]; then
+            # 选择当前路径作为备份目标
+            path_to_return="$current_remote_path"
+            log_and_display "${GREEN}已选择当前路径: ${display_path} 作为备份目标。${NC}"
+            break
+        elif [[ "$browse_choice" == "q" || "$browse_choice" == "Q" ]]; then
+            log_and_display "${YELLOW}取消路径选择。${NC}"
+            return 1 # 返回非零值表示取消
+        elif [[ "$browse_choice" == "m" || "$browse_choice" == "M" ]]; then
+            read -rp "请输入完整的目标路径（例如: my_backups/daily/ 或 /files/my_data/）: " manual_path
+            # 确保手动输入的路径以斜杠结尾，如果非空
+            if [[ -n "$manual_path" && "${manual_path: -1}" != "/" ]]; then
+                manual_path="${manual_path}/"
+            fi
+            path_to_return="$manual_path"
+            log_and_display "${GREEN}已手动输入路径: ${path_to_return} 作为备份目标。${NC}"
+            break
+        else
+            log_and_display "${RED}无效的输入，请重试。${NC}"
+            press_enter_to_continue
+        fi
+    done
+    
+    echo "$path_to_return" # 将最终选择的路径输出，供调用者捕获
+    return 0 # 返回零值表示成功选择
+}
 
 # 测试 S3/R2 连接
 test_s3_r2_connection() {
@@ -492,35 +617,54 @@ test_s3_r2_connection() {
     fi
 }
 
-# 获取 S3/R2 桶中的文件夹列表
+# 获取 S3/R2 指定桶和前缀下的文件夹列表
+# 参数1: bucket_name
+# 参数2: prefix (例如 "my_folder/" 或 "")
 get_s3_r2_folders() {
-    if test_s3_r2_connection; then
-        log_and_display "正在获取 S3/R2 存储桶中的文件夹列表 (最多显示50个)：" "${BLUE}"
-        export AWS_ACCESS_KEY_ID="$S3_ACCESS_KEY"
-        export AWS_SECRET_ACCESS_KEY="$S3_SECRET_KEY"
-        local folders=()
-
-        if command -v aws &> /dev/null; then
-            # 使用 --delimiter '/' 和 --query "CommonPrefixes[].Prefix" 来获取顶层文件夹
-            folders=($(aws s3 ls "s3://${S3_BUCKET_NAME}/" --endpoint-url "$S3_ENDPOINT" --delimiter '/' --query "CommonPrefixes[].Prefix" --output text 2>/dev/null))
-        elif command -v s3cmd &> /dev/null; then
-            # s3cmd 的输出需要进一步处理以提取文件夹名称
-            folders=($(s3cmd ls "s3://${S3_BUCKET_NAME}/" | grep -E '\/$' | awk '{print $NF}' | sed 's|s3://'"${S3_BUCKET_NAME//./\\.}"'\///' | head -n 50)) # 仅显示前50个
-        fi
-        unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
-
-        if [ ${#folders[@]} -eq 0 ]; then
-            log_and_display "${YELLOW}S3/R2 存储桶中没有检测到文件夹。${NC}"
-        else
-            for i in "${!folders[@]}"; do
-                echo "  $((i+1)). ${folders[$i]}"
-            done
-        fi
-        echo "${folders[@]}" # 返回一个空格分隔的字符串，方便调用者解析
-    else
-        log_and_display "${RED}S3/R2 连接失败，无法获取文件夹列表。${NC}"
+    local bucket_name="$1"
+    local prefix="$2" # 可以是空字符串，表示根目录
+    
+    if ! test_s3_r2_connection; then # 确保连接可用
         return 1
     fi
+
+    export AWS_ACCESS_KEY_ID="$S3_ACCESS_KEY"
+    export AWS_SECRET_ACCESS_KEY="$S3_SECRET_KEY"
+
+    local folders=()
+    local temp_folders_output=""
+
+    if command -v aws &> /dev/null; then
+        temp_folders_output=$(aws s3 ls "s3://${bucket_name}/${prefix}" --endpoint-url "$S3_ENDPOINT" --delimiter '/' --query "CommonPrefixes[].Prefix" --output text 2>/dev/null)
+        if [ $? -eq 0 ]; then
+            # 从返回的前缀中提取文件夹名
+            while IFS= read -r line; do
+                # 移除前缀本身和尾部斜杠
+                local folder_name="${line#"$prefix"}"
+                folder_name="${folder_name%/}"
+                if [[ -n "$folder_name" ]]; then
+                    folders+=("$folder_name")
+                fi
+            done <<< "$temp_folders_output"
+        fi
+    elif command -v s3cmd &> /dev/null; then
+        log_and_display "${YELLOW}正在使用 s3cmd 获取 S3/R2 文件夹列表。${NC}"
+        temp_folders_output=$(s3cmd ls "s3://${bucket_name}/${prefix}" 2>/dev/null | grep -E ' DIR ' | awk '{print $NF}' | sed 's|s3://'"${bucket_name//./\\.}"'/'"${prefix//./\\.}"'/\?||' | sed 's|/$||')
+        if [ $? -eq 0 ]; then
+            while IFS= read -r line; do
+                if [[ -n "$line" ]]; then
+                    folders+=("$line")
+                fi
+            done <<< "$temp_folders_output"
+        fi
+    fi
+    unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+
+    # 排序并输出，每个文件夹一行
+    for folder in "${folders[@]}"; do
+        echo "$folder"
+    done
+    return 0
 }
 
 # 测试 WebDAV 连接
@@ -533,7 +677,7 @@ test_webdav_connection() {
     log_and_display "正在测试 WebDAV 连接到：${WEBDAV_URL}..." "${BLUE}"
 
     # 使用 PROPFIND 方法测试连接，并检查 HTTP 状态码
-    local http_code=$(curl -s -o /dev/null -w "%{http_code}" -L -k --user "$WEBDAV_USERNAME:$WEBDAV_PASSWORD" --request PROPFIND --header "Depth: 1" "${WEBDAV_URL%/}/" 2>/dev/null)
+    local http_code=$(curl -s -o /dev/null -w "%{http_code}" -L -k --user "$WEBDAV_USERNAME:$WEBDAV_PASSWORD" --request PROPFIND --header "Depth: 0" "${WEBDAV_URL%/}/" 2>/dev/null) # Depth: 0 只检查自身
     local curl_status=$? # 获取 curl 的退出状态码
 
     if [ "$curl_status" -eq 0 ] && [[ "$http_code" -ge 200 && "$http_code" -lt 300 ]]; then
@@ -546,75 +690,102 @@ test_webdav_connection() {
     fi
 }
 
-# 获取 WebDAV 服务器中的文件夹列表
+# 获取 WebDAV 服务器中指定路径下的文件夹列表
+# 参数1: base_url (WebDAV的根URL)
+# 参数2: current_path (当前浏览的路径，例如 "/path/to/folder/")
 get_webdav_folders() {
-    if test_webdav_connection; then
-        log_and_display "正在获取 WebDAV 服务器中的文件夹列表 (最多显示50个)：" "${BLUE}"
-        local folders=()
-        local curl_output=""
-
-        # 使用 PROPFIND 获取目录列表，解析 XML 响应
-        # 确保 WEBDAV_URL 以 / 结尾以便 PROPFIND 正确列出子项
-        curl_output=$(curl -s -L -k --user "$WEBDAV_USERNAME:$WEBDAV_PASSWORD" --request PROPFIND --header "Depth: 1" "${WEBDAV_URL%/}/" 2>/dev/null)
-
-        if [ $? -eq 0 ]; then
-            # 从 XML 响应中提取 href 标签的内容
-            # 筛选出以 '/' 结尾的目录，并去除 WebDAV URL 前缀以获得相对路径
-            local base_url_escaped=$(echo "${WEBDAV_URL%/}/" | sed 's|/|\\/|g; s|\.|\\.|g')
-            # 优化正则，更准确地匹配目录，并去除最后的斜杠方便显示
-            folders=($(echo "$curl_output" | grep -oP '<D:href>\K([^<]*?\/)(?=</D:href>)' | sed 's|^\(http\|https\):\/\/[^/]*||' | grep -E '\/$' | grep -v "$base_url_escaped" | sed 's|/$||' | head -n 50))
-        fi
-
-        if [ ${#folders[@]} -eq 0 ]; then
-            log_and_display "${YELLOW}WebDAV 服务器中没有检测到文件夹。${NC}"
-        else
-            for i in "${!folders[@]}"; do
-                echo "  $((i+1)). ${folders[$i]}"
-            done
-        fi
-        echo "${folders[@]}" # 返回一个空格分隔的字符串
-    else
-        log_and_display "${RED}WebDAV 连接失败，无法获取文件夹列表。${NC}"
+    local base_url="$1"
+    local current_path="$2"
+    local full_path="${base_url%/}${current_path}" # 确保 base_url 没有尾部斜杠，current_path有
+    
+    if ! test_webdav_connection; then # 确保连接可用
         return 1
     fi
+
+    local folders=()
+    local curl_output=""
+
+    log_and_display "正在获取 WebDAV 服务器 ${full_path} 下的文件夹列表..." ""
+
+    # 使用 PROPFIND 获取目录列表
+    curl_output=$(curl -s -L -k --user "$WEBDAV_USERNAME:$WEBDAV_PASSWORD" --request PROPFIND --header "Depth: 1" "$full_path" 2>/dev/null)
+    
+    if [ $? -eq 0 ]; then
+        if command -v xmllint &> /dev/null; then
+            # 使用 xmllint 解析 XML，更精确地提取 href 标签
+            # 过滤掉当前目录自身 (href 刚好等于 full_path 或 full_path/)
+            # 过滤掉以 / 结尾的 href (表示目录)
+            # 移除 base_url 和 current_path 前缀，并去除尾部斜杠
+            while IFS= read -r href; do
+                # 确保 href 不是当前路径本身，并且以斜杠结尾（表示目录）
+                if [[ "$href" != "${full_path%/}" && "$href" != "${full_path}" && "$href" != "${full_path}/" ]] && [[ "$href" =~ .*/$ ]]; then
+                    # 移除 full_path 前缀，并去除尾部斜杠
+                    local folder_name="${href#${full_path}}"
+                    folder_name="${folder_name%/}" 
+                    if [[ -n "$folder_name" ]]; then
+                        folders+=("$folder_name")
+                    fi
+                fi
+            done < <(echo "$curl_output" | xmllint --xpath '//D:response/D:href/text()' - 2>/dev/null | sort -u) # 提取所有href文本
+        else
+            log_and_display "${YELLOW}警告：未找到 'xmllint'，将使用 grep/sed 尝试解析 WebDAV 响应，可能不完全准确。请安装 libxml2-utils 或 xmlstarlet。${NC}"
+            # 备用方法：使用 grep 和 sed 提取 href
+            local base_url_escaped=$(echo "${base_url%/}${current_path}" | sed 's|/|\\/|g; s|\.|\\.|g')
+            temp_folders_output=$(echo "$curl_output" | grep -oP '<D:href>\K([^<]*?)(?=</D:href>)' | grep -E '\/$' | grep -v "$base_url_escaped" | sed 's|/$||' | sed "s|${base_url_escaped}||")
+            while IFS= read -r line; do
+                if [[ -n "$line" ]]; then
+                    folders+=("$line")
+                fi
+            done <<< "$temp_folders_output"
+        fi
+    fi
+
+    # 排序并输出，每个文件夹一行
+    for folder in "${folders[@]}"; do
+        echo "$folder"
+    done
+    return 0
 }
 
 # 让用户选择/输入 S3/R2 备份路径
 choose_s3_r2_path() {
-    local default_path="$1" # 当前默认路径
-    local selected_path=""
+    log_and_display "当前 S3/R2 备份目标路径: ${S3_BACKUP_PATH:-未设置}" "${BLUE}"
+    
+    if ! test_s3_r2_connection; then
+        press_enter_to_continue
+        return 1
+    fi
 
-    while true; do
-        log_and_display "当前 S3/R2 备份目标路径: ${S3_BACKUP_PATH:-未设置}" "${BLUE}"
-        echo ""
+    while true; do # 添加一个循环来处理无效的路径选择
         log_and_display "请选择 S3/R2 上的备份目标路径："
         log_and_display "1. 从云端现有文件夹中选择"
         log_and_display "2. 手动输入新路径（例如: my_backups/daily/ 或 just_files/）"
-        log_and_display "0. 取消设置"
+        log_and_display "x. 取消设置" # 将0替换为x
         read -rp "请输入选项: " path_choice
 
         case "$path_choice" in
             1)
-                local s3_folders_str=$(get_s3_r2_folders)
-                if [ -z "$s3_folders_str" ]; then
-                    log_and_display "${YELLOW}S3/R2 存储桶中没有可用文件夹，请选择手动输入。${NC}"
-                    press_enter_to_continue
-                    continue # 重新显示路径选择菜单
-                fi
-                local IFS=$'\n' s3_folders_array=($s3_folders_str) # 重新解析为数组
-                unset IFS
+                log_and_display "您将进入 S3/R2 存储桶 ${S3_BUCKET_NAME} 进行路径选择。" "${GREEN}"
+                press_enter_to_continue
+                local selected_path_output=$(browse_remote_folders "s3" "$S3_BUCKET_NAME" "$S3_BACKUP_PATH") # 传递当前路径作为起始
+                local browse_status=$?
 
-                read -rp "请输入文件夹序号或直接输入完整路径（例如 backup/）: " folder_input
-                if [[ "$folder_input" =~ ^[0-9]+$ ]] && [ "$folder_input" -ge 1 ] && [ "$folder_input" -le ${#s3_folders_array[@]} ]; then
-                    selected_path="${s3_folders_array[$((folder_input-1))]}"
+                if [ "$browse_status" -eq 0 ]; then
+                    S3_BACKUP_PATH="$selected_path_output"
+                    # 确保 S3_BACKUP_PATH 不会以 "//" 开头，除非它是根路径 "/"
+                    if [[ "$S3_BACKUP_PATH" == "//"* ]]; then
+                        S3_BACKUP_PATH="${S3_BACKUP_PATH:1}"
+                    fi
+                    # 确保 S3_BACKUP_PATH 以 / 结尾 (对S3来说是惯例)
+                    if [[ -n "$S3_BACKUP_PATH" && "${S3_BACKUP_PATH: -1}" != "/" ]]; then
+                        S3_BACKUP_PATH="${S3_BACKUP_PATH}/"
+                    fi
+                    log_and_display "${GREEN}S3/R2 备份路径已设置为：${S3_BACKUP_PATH}${NC}"
+                    return 0 # 成功设置并退出函数
                 else
-                    selected_path="$folder_input"
+                    log_and_display "${YELLOW}取消设置 S3/R2 备份路径。${NC}"
+                    return 1 # 取消并退出函数
                 fi
-                # 确保路径以斜杠结尾，如果非空
-                if [[ -n "$selected_path" && "${selected_path: -1}" != "/" ]]; then
-                    selected_path="${selected_path}/"
-                fi
-                break # 退出循环，进行路径确认
                 ;;
             2)
                 read -rp "请输入 S3/R2 上的新备份目标路径 (例如 my_backups/daily/): " new_path
@@ -622,12 +793,13 @@ choose_s3_r2_path() {
                 if [[ -n "$new_path" && "${new_path: -1}" != "/" ]]; then
                     new_path="${new_path}/"
                 fi
-                selected_path="$new_path"
-                break # 退出循环，进行路径确认
+                S3_BACKUP_PATH="$new_path"
+                log_and_display "${GREEN}S3/R2 备份路径已设置为：${S3_BACKUP_PATH}${NC}"
+                return 0 # 成功设置并退出函数
                 ;;
-            0)
+            "x" | "X") # 接收x或X
                 log_and_display "取消设置 S3/R2 备份路径。" "${BLUE}"
-                return 1 # 表示取消
+                return 1 # 取消并退出函数
                 ;;
             *)
                 log_and_display "${RED}无效的选项，请重新输入。${NC}"
@@ -635,55 +807,46 @@ choose_s3_r2_path() {
                 ;;
         esac
     done
-
-    # 确认路径
-    read -rp "您选择的 S3/R2 目标路径是 '${selected_path}'。确认吗？(y/N): " confirm_path
-    if [[ "$confirm_path" =~ ^[Yy]$ ]]; then
-        S3_BACKUP_PATH="$selected_path"
-        log_and_display "${GREEN}S3/R2 备份路径已设置为：${S3_BACKUP_PATH}${NC}"
-        return 0 # 表示成功设置
-    else
-        log_and_display "${YELLOW}取消设置 S3/R2 备份路径，请重新选择。${NC}"
-        return 1 # 表示用户决定重新选择
-    fi
 }
 
 # 让用户选择/输入 WebDAV 备份路径
 choose_webdav_path() {
-    local default_path="$1" # 当前默认路径
-    local selected_path=""
+    log_and_display "当前 WebDAV 备份目标路径: ${WEBDAV_BACKUP_PATH:-未设置}" "${BLUE}"
 
-    while true; do
-        log_and_display "当前 WebDAV 备份目标路径: ${WEBDAV_BACKUP_PATH:-未设置}" "${BLUE}"
-        echo ""
+    if ! test_webdav_connection; then
+        press_enter_to_continue
+        return 1
+    fi
+
+    while true; do # 添加一个循环来处理无效的路径选择
         log_and_display "请选择 WebDAV 上的备份目标路径："
         log_and_display "1. 从云端现有文件夹中选择"
         log_and_display "2. 手动输入新路径（例如: my_backups/daily/ 或 just_files/）"
-        log_and_display "0. 取消设置"
+        log_and_display "x. 取消设置" # 将0替换为x
         read -rp "请输入选项: " path_choice
 
         case "$path_choice" in
             1)
-                local webdav_folders_str=$(get_webdav_folders)
-                if [ -z "$webdav_folders_str" ]; then
-                    log_and_display "${YELLOW}WebDAV 服务器中没有可用文件夹，请选择手动输入。${NC}"
-                    press_enter_to_continue
-                    continue # 重新显示路径选择菜单
-                fi
-                local IFS=$'\n' webdav_folders_array=($webdav_folders_str)
-                unset IFS
+                log_and_display "您将进入 WebDAV 服务器 ${WEBDAV_URL} 进行路径选择。" "${GREEN}"
+                press_enter_to_continue
+                # 调用通用的浏览函数
+                # WebDAV 的起始路径通常是 /
+                local initial_webdav_path="${WEBDAV_BACKUP_PATH:-/}"
+                local selected_path_output=$(browse_remote_folders "webdav" "$WEBDAV_URL" "$initial_webdav_path")
+                local browse_status=$?
 
-                read -rp "请输入文件夹序号或直接输入完整路径（例如 backup/）: " folder_input
-                if [[ "$folder_input" =~ ^[0-9]+$ ]] && [ "$folder_input" -ge 1 ] && [ "$folder_input" -le ${#webdav_folders_array[@]} ]; then
-                    selected_path="${webdav_folders_array[$((folder_input-1))]}"
+                if [ "$browse_status" -eq 0 ]; then
+                    WEBDAV_BACKUP_PATH="$selected_path_output"
+                    # 确保 WEBDAV_BACKUP_PATH 以 / 结尾
+                    if [[ -n "$WEBDAV_BACKUP_PATH" && "${WEBDAV_BACKUP_PATH: -1}" != "/" ]]; then
+                        WEBDAV_BACKUP_PATH="${WEBDAV_BACKUP_PATH}/"
+                    fi
+                    log_and_display "${GREEN}WebDAV 备份路径已设置为：${WEBDAV_BACKUP_PATH}${NC}"
+                    return 0 # 成功设置并退出函数
                 else
-                    selected_path="$folder_input"
+                    log_and_display "${YELLOW}取消设置 WebDAV 备份路径。${NC}"
+                    return 1 # 取消并退出函数
                 fi
-                # 确保路径以斜杠结尾，如果非空
-                if [[ -n "$selected_path" && "${selected_path: -1}" != "/" ]]; then
-                    selected_path="${selected_path}/"
-                fi
-                break # 退出循环，进行路径确认
                 ;;
             2)
                 read -rp "请输入 WebDAV 上的新备份目标路径 (例如 my_backups/daily/): " new_path
@@ -691,12 +854,13 @@ choose_webdav_path() {
                 if [[ -n "$new_path" && "${new_path: -1}" != "/" ]]; then
                     new_path="${new_path}/"
                 fi
-                selected_path="$new_path"
-                break # 退出循环，进行路径确认
+                WEBDAV_BACKUP_PATH="$new_path"
+                log_and_display "${GREEN}WebDAV 备份路径已设置为：${WEBDAV_BACKUP_PATH}${NC}"
+                return 0 # 成功设置并退出函数
                 ;;
-            0)
+            "x" | "X") # 接收x或X
                 log_and_display "取消设置 WebDAV 备份路径。" "${BLUE}"
-                return 1 # 表示取消
+                return 1 # 取消并退出函数
                 ;;
             *)
                 log_and_display "${RED}无效的选项，请重新输入。${NC}"
@@ -704,16 +868,6 @@ choose_webdav_path() {
                 ;;
         esac
     done
-
-    read -rp "您选择的 WebDAV 目标路径是 '${selected_path}'。确认吗？(y/N): " confirm_path
-    if [[ "$confirm_path" =~ ^[Yy]$ ]]; then
-        WEBDAV_BACKUP_PATH="$selected_path"
-        log_and_display "${GREEN}WebDAV 备份路径已设置为：${WEBDAV_BACKUP_PATH}${NC}"
-        return 0 # 表示成功设置
-    else
-        log_and_display "${YELLOW}取消设置 WebDAV 备份路径，请重新选择。${NC}"
-        return 1 # 表示用户决定重新选择
-    fi
 }
 
 
@@ -766,7 +920,7 @@ manage_s3_r2_account() {
             2)
                 # 先测试连接，如果成功再选择路径
                 if test_s3_r2_connection; then
-                    choose_s3_r2_path "$S3_BACKUP_PATH" # 传递当前路径作为默认值
+                    choose_s3_r2_path # 这里不再传递 $S3_BACKUP_PATH，因为 browse_remote_folders 会处理默认值和导航
                     save_config # 路径选择后保存配置
                 fi
                 press_enter_to_continue
@@ -852,7 +1006,7 @@ manage_webdav_account() {
             2)
                 # 先测试连接，如果成功再选择路径
                 if test_webdav_connection; then
-                    choose_webdav_path "$WEBDAV_BACKUP_PATH" # 传递当前路径作为默认值
+                    choose_webdav_path # WebDAV 的路径选择需要更多的上下文
                     save_config # 路径选择后保存配置
                 fi
                 press_enter_to_continue
@@ -1208,8 +1362,17 @@ apply_retention_policy() {
             local curl_output=$(curl -s -L -k --user "$WEBDAV_USERNAME:$WEBDAV_PASSWORD" --request PROPFIND --header "Depth: 1" "$target_url" 2>/dev/null)
 
             if [ $? -eq 0 ]; then
-                # 提取 href 标签中的文件名
-                webdav_backups=($(echo "$curl_output" | grep -oP '<D:href>\K([^<]*[a-zA-Z0-9_-]+_[0-9]{14}\.zip)(?=</D:href>)' | sed "s|^${target_url//./\\.}||"))
+                if command -v xmllint &> /dev/null; then
+                    while IFS= read -r href; do
+                        # 确保是文件而不是目录，并且匹配备份文件名格式
+                        local filename=$(basename "$href")
+                        if [[ "$filename" =~ ^[a-zA-Z0-9_-]+_[0-9]{14}\.zip$ ]]; then
+                            webdav_backups+=("$filename")
+                        fi
+                    done < <(echo "$curl_output" | xmllint --xpath "//D:response/D:href/text()" - 2>/dev/null | grep -v '/$' | sort -u) # 提取所有非目录的href
+                else # Fallback for no xmllint
+                     webdav_backups=($(echo "$curl_output" | grep -oP '<D:href>\K([^<]*?)(?=</D:href>)' | grep -v '/$' | sed "s|^${target_url//./\\.}||" | grep -E '^[a-zA-Z0-9_-]+_[0-9]{14}\.zip$'))
+                fi
             fi
         fi
         total_webdav_backups_found=${#webdav_backups[@]}
