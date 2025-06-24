@@ -22,9 +22,9 @@ RETENTION_VALUE=0           # 要保留的备份数量或天数
 
 # --- Rclone 配置 ---
 # 数组，用于存储格式为 "remote_name:remote/path" 的 Rclone 目标
-declare -a RCLONE_TARGETS_ARRAY=() 
+declare -a RCLONE_TARGETS_ARRAY=()
 # 用于配置文件保存的目标字符串，使用 ;; 作为分隔符
-RCLONE_TARGETS_STRING="" 
+RCLONE_TARGETS_STRING=""
 # 数组，用于存储 RCLONE_TARGETS_ARRAY 中已启用的目标的索引
 declare -a ENABLED_RCLONE_TARGET_INDICES_ARRAY=()
 # 用于配置文件保存的已启用目标的索引字符串
@@ -79,8 +79,10 @@ log_and_display() {
     local plain_message
     plain_message=$(echo -e "$message" | sed 's/\x1b\[[0-9;]*m//g')
 
+    # 将纯文本消息记录到日志文件
     echo "$(date '+%Y-%m-%d %H:%M:%S') - ${plain_message}" >> "$LOG_FILE"
 
+    # 在标准输出或标准错误中显示带颜色的消息
     if [[ -n "$color" ]]; then
         echo -e "$color$message$NC" > "$output_destination"
     else
@@ -142,7 +144,7 @@ load_config() {
             log_and_display "${YELLOW}警告：配置文件 $CONFIG_FILE 权限不安全 (${current_perms})，建议设置为 600。${NC}"
             chmod 600 "$CONFIG_FILE" 2>/dev/null
         fi
-        
+
         source "$CONFIG_FILE"
         log_and_display "配置已从 $CONFIG_FILE 加载。" "${BLUE}"
 
@@ -289,10 +291,12 @@ view_and_manage_backup_paths() {
             echo "  $((i+1)). ${BACKUP_SOURCE_PATHS_ARRAY[$i]}"
         done
         echo ""
-        echo "1. 修改现有路径"
-        echo "2. 删除路径"
-        echo "0. 返回"
-        echo -e "${BLUE}------------------------------------------------${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  1. ${YELLOW}修改现有路径${NC}"
+        echo -e "  2. ${YELLOW}删除路径${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  0. ${RED}返回${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         read -rp "请输入选项: " sub_choice
 
         case $sub_choice in
@@ -344,10 +348,12 @@ set_backup_path() {
         echo -e "${BLUE}=== 3. 自定义备份路径 ===${NC}"
         echo "当前已配置备份路径数量: ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个"
         echo ""
-        echo "1. 添加新的备份路径"
-        echo "2. 查看/修改/删除现有备份路径"
-        echo "0. 返回主菜单"
-        echo -e "${BLUE}------------------------------------------------${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  1. ${YELLOW}添加新的备份路径${NC}"
+        echo -e "  2. ${YELLOW}查看/管理现有路径${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  0. ${RED}返回主菜单${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         read -rp "请输入选项: " choice
 
         case $choice in
@@ -415,7 +421,7 @@ create_rclone_s3_remote() {
     echo ""
 
     log_and_display "正在创建 Rclone 远程端: ${remote_name}..." "${BLUE}"
-    
+
     local rclone_create_cmd
     rclone_create_cmd=(rclone config create "$remote_name" s3 provider "$provider" access_key_id "$access_key_id" secret_access_key "$secret_access_key")
     if [[ -n "$endpoint" ]]; then
@@ -548,7 +554,7 @@ create_rclone_sftp_remote() {
     read -rp "请输入用户名: " user
     read -rp "请输入端口号 [默认 22]: " port
     port=${port:-22}
-    
+
     read -rp "使用密码(p)还是 SSH 密钥文件(k)进行认证? (p/k): " auth_choice
     local pass_obscured=""
     local key_file=""
@@ -565,9 +571,9 @@ create_rclone_sftp_remote() {
     else
         log_and_display "${RED}无效选项。${NC}"; press_enter_to_continue; return 1;
     fi
-    
+
     log_and_display "正在创建 Rclone 远程端: ${remote_name}..." "${BLUE}"
-    
+
     local rclone_create_cmd
     rclone_create_cmd=(rclone config create "$remote_name" sftp host "$host" user "$user" port "$port")
     if [[ -n "$pass_obscured" ]]; then
@@ -575,7 +581,7 @@ create_rclone_sftp_remote() {
     elif [[ -n "$key_file" ]]; then
         rclone_create_cmd+=(key_file "$key_file")
     fi
-    
+
     if "${rclone_create_cmd[@]}"; then
         log_and_display "${GREEN}远程端 '${remote_name}' 创建成功！${NC}"
         log_and_display "${YELLOW}提示: 首次连接 SFTP 服务器时，Rclone 可能需要您确认主机的密钥指纹。${NC}"
@@ -681,30 +687,31 @@ create_rclone_alias_remote() {
 create_rclone_remote_wizard() {
     while true; do
         display_header
-        echo -e "${BLUE}=== [助手] 在脚本内创建新的 Rclone 远程端 ===${NC}"
+        echo -e "${BLUE}=== [助手] 创建新的 Rclone 远程端 ===${NC}"
         echo "请选择您要创建的云存储类型："
         echo ""
-        echo -e "${GREEN}--- 对象存储/云盘 ---${NC}"
-        echo " 1. S3 兼容存储 (如 Cloudflare R2, AWS S3, MinIO 等)"
-        echo " 2. Backblaze B2"
-        echo " 3. Microsoft Azure Blob Storage"
-        echo " 4. Mega.nz"
-        echo " 5. pCloud"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 对象存储/云盘 ━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  1. ${YELLOW}S3 兼容存储 (如 R2, AWS S3, MinIO)${NC}"
+        echo -e "  2. ${YELLOW}Backblaze B2${NC}"
+        echo -e "  3. ${YELLOW}Microsoft Azure Blob Storage${NC}"
+        echo -e "  4. ${YELLOW}Mega.nz${NC}"
+        echo -e "  5. ${YELLOW}pCloud${NC}"
         echo ""
-        echo -e "${GREEN}--- 传统协议 ---${NC}"
-        echo " 6. WebDAV"
-        echo " 7. SFTP"
-        echo " 8. FTP"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━ 传统协议 ━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  6. ${YELLOW}WebDAV${NC}"
+        echo -e "  7. ${YELLOW}SFTP${NC}"
+        echo -e "  8. ${YELLOW}FTP${NC}"
         echo ""
-        echo -e "${GREEN}--- 功能性远程端 (包装器) ---${NC}"
-        echo " 9. Crypt (加密一个现有远程端)"
-        echo " 10. Alias (为一个远程路径创建别名)"
+        echo -e "${BLUE}━━━━━━━━━━━━━━ 功能性远程端 (包装器) ━━━━━━━━━━━━━━${NC}"
+        echo -e "  9. ${YELLOW}Crypt (加密一个现有远程端)${NC}"
+        echo -e "  10. ${YELLOW}Alias (为一个远程路径创建别名)${NC}"
         echo ""
         echo "对于 Google Drive, Dropbox 等需要浏览器授权的类型,"
         echo "请在终端中运行 'rclone config' 命令进行配置。"
         echo ""
-        echo " 0. 返回上一级菜单"
-        echo -e "${BLUE}---------------------------------------------------${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  0. ${RED}返回上一级菜单${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         read -rp "请输入选项: " choice
 
         case "$choice" in
@@ -743,7 +750,7 @@ check_rclone_remote_exists() {
 get_rclone_direct_contents() {
     local rclone_target="$1" # 格式 "remote:path"
     log_and_display "正在获取 Rclone 目标 '${rclone_target}' 的内容..." "${BLUE}" "/dev/stderr"
-    
+
     local contents=()
     local folders_list
     folders_list=$(rclone lsf --dirs-only "${rclone_target}" 2>/dev/null)
@@ -793,16 +800,19 @@ choose_rclone_path() {
             echo "当前路径下无内容。"
         fi
 
-        echo -e "${BLUE}------------------------------------------------${NC}"
-        echo "操作选项:"
+        echo ""
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+        echo "  (输入上方序号以进入文件夹)"
         if [[ "$current_remote_path" != "/" ]]; then
-            echo -e "  ${GREEN}m${NC} - 返回上一级目录"
+            echo -e "  ${YELLOW}m${NC} - 返回上一级目录"
         fi
-        echo -e "  ${GREEN}k${NC} - 将当前路径 '${current_remote_path}' 设置为备份目标"
-        echo -e "  ${GREEN}a${NC} - 手动输入新路径"
-        echo -e "  ${GREEN}x${NC} - 取消并返回"
-        echo -e "${BLUE}------------------------------------------------${NC}"
+        echo -e "  ${YELLOW}k${NC} - 将当前路径 '${current_remote_path}' 设为目标"
+        echo -e "  ${YELLOW}a${NC} - 手动输入新路径"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  ${RED}x${NC} - 取消并返回"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         read -rp "请输入您的选择 (数字或字母): " choice
+
 
         case "$choice" in
             "m" | "M" )
@@ -844,13 +854,13 @@ choose_rclone_path() {
     return 0
 }
 
-# [新] 查看、管理和启用备份目标
+# 查看、管理和启用备份目标
 view_and_manage_rclone_targets() {
     local needs_saving="false"
     while true; do
         display_header
         echo -e "${BLUE}=== 查看、管理和启用备份目标 ===${NC}"
-        
+
         if [ ${#RCLONE_TARGETS_ARRAY[@]} -eq 0 ]; then
             log_and_display "${YELLOW}当前没有配置任何 Rclone 目标。${NC}"
         else
@@ -862,7 +872,7 @@ view_and_manage_rclone_targets() {
                         is_enabled="true"; break;
                     fi
                 done
-                
+
                 echo -n "$((i+1)). ${RCLONE_TARGETS_ARRAY[$i]} "
                 if [[ "$is_enabled" == "true" ]]; then
                     echo -e "[${GREEN}已启用${NC}]"
@@ -871,17 +881,16 @@ view_and_manage_rclone_targets() {
                 fi
             done
         fi
-        
-        echo -e "${BLUE}------------------------------------------------${NC}"
-        # --- [MODIFIED] Menu layout changed to a single column for clarity ---
-        echo "  a - 添加新目标"
-        echo "  d - 删除目标"
-        echo "  m - 修改目标路径"
-        echo "  t - 切换启用/禁用状态"
+
         echo ""
-        echo "  0 - 保存并返回"
-        # --- [MODIFIED] End of change ---
-        echo -e "${BLUE}------------------------------------------------${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  a - ${YELLOW}添加新目标${NC}"
+        echo -e "  d - ${YELLOW}删除目标${NC}"
+        echo -e "  m - ${YELLOW}修改目标路径${NC}"
+        echo -e "  t - ${YELLOW}切换启用/禁用状态${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  0 - ${RED}保存并返回${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         read -rp "请输入选项: " choice
 
         case "$choice" in
@@ -909,7 +918,7 @@ view_and_manage_rclone_targets() {
                     if [[ "$confirm" =~ ^[Yy]$ ]]; then
                         unset 'RCLONE_TARGETS_ARRAY[$deleted_index]'
                         RCLONE_TARGETS_ARRAY=("${RCLONE_TARGETS_ARRAY[@]}")
-                        
+
                         local new_enabled_indices=()
                         for enabled_idx in "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}"; do
                             if (( enabled_idx < deleted_index )); then new_enabled_indices+=("$enabled_idx");
@@ -925,7 +934,7 @@ view_and_manage_rclone_targets() {
                 fi
                 press_enter_to_continue
                 ;;
-                
+
             m|M) # 修改
                 if [ ${#RCLONE_TARGETS_ARRAY[@]} -eq 0 ]; then log_and_display "${YELLOW}没有可修改的目标。${NC}"; press_enter_to_continue; continue; fi
                 read -rp "请输入要修改路径的目标序号: " index
@@ -933,7 +942,7 @@ view_and_manage_rclone_targets() {
                     local mod_index=$((index - 1))
                     local target_to_modify="${RCLONE_TARGETS_ARRAY[$mod_index]}"
                     local remote_name="${target_to_modify%%:*}"
-                    
+
                     log_and_display "正在为远程端 '${remote_name}' 重新选择路径..."
                     if choose_rclone_path "$remote_name"; then
                         local new_path="$CHOSEN_RCLONE_PATH"
@@ -987,12 +996,12 @@ view_and_manage_rclone_targets() {
     done
 }
 
-# [新] 测试 Rclone 远程端连接
+# 测试 Rclone 远程端连接
 test_rclone_remotes() {
     while true; do
         display_header
         echo -e "${BLUE}=== 测试 Rclone 远程端连接 ===${NC}"
-        
+
         local remotes_list=()
         mapfile -t remotes_list < <(rclone listremotes | sed 's/://')
 
@@ -1008,8 +1017,9 @@ test_rclone_remotes() {
             echo " $((i+1)). ${remotes_list[$i]}"
         done
         echo ""
-        echo " 0. 返回"
-        echo -e "${BLUE}------------------------------------------------${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  0. ${RED}返回${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         read -rp "请选择要测试连接的远程端序号 (0 返回): " choice
 
         if [[ "$choice" -eq 0 ]]; then break; fi
@@ -1017,7 +1027,7 @@ test_rclone_remotes() {
         if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#remotes_list[@]} ]; then
             local remote_to_test="${remotes_list[$((choice-1))]}"
             log_and_display "正在测试 '${remote_to_test}'..." "${YELLOW}"
-            
+
             if rclone about "${remote_to_test}:" >/dev/null 2>&1; then
                 log_and_display "连接测试成功！ '${remote_to_test}' 可用。" "${GREEN}"
                 echo -e "${GREEN}--- Rclone About Info ---${NC}"
@@ -1039,16 +1049,16 @@ set_cloud_storage() {
     while true; do
         display_header
         echo -e "${BLUE}=== 5. 云存储设定 (Rclone) ===${NC}"
+        echo -e "${YELLOW}提示: '备份目标' 是 '远程端' + 具体路径 (例如 mydrive:/backups)。${NC}"
+        echo -e "${YELLOW}      '远程端' 是您在 Rclone 中的云存储账户配置。${NC}"
         echo ""
-        echo " 1. 查看、管理和启用备份目标"
-        echo " 2. [助手] 创建新的 Rclone 远程端"
-        echo " 3. 测试 Rclone 远程端连接"
-        echo ""
-        echo -e "${YELLOW}提示: '备份目标' 是 '远程端' 加上具体路径 (例如 mydrive:/backups)。${NC}"
-        echo "       '远程端' 是您在 Rclone 中的云存储账户配置。"
-        echo ""
-        echo " 0. 返回主菜单"
-        echo -e "${BLUE}------------------------------------------------${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  1. ${YELLOW}查看、管理和启用备份目标${NC}"
+        echo -e "  2. ${YELLOW}[助手] 创建新的 Rclone 远程端${NC}"
+        echo -e "  3. ${YELLOW}测试 Rclone 远程端连接${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  0. ${RED}返回主菜单${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         read -rp "请输入选项: " choice
 
         case $choice in
@@ -1071,7 +1081,7 @@ set_telegram_notification() {
 
     read -rp "请输入 Telegram Chat ID [当前: ${TELEGRAM_CHAT_ID}]: " input_chat_id
     TELEGRAM_CHAT_ID="${input_chat_id:-$TELEGRAM_CHAT_ID}"
-    
+
     save_config
     log_and_display "${GREEN}Telegram 通知配置已更新并保存。${NC}"
     press_enter_to_continue
@@ -1090,11 +1100,13 @@ set_retention_policy() {
             *)       echo -e "  ${YELLOW}未知策略或未设置${NC}" ;;
         esac
         echo ""
-        echo "1. 设置按数量保留 (例如：保留最新的 5 个)"
-        echo "2. 设置按天数保留 (例如：保留最近 30 天)"
-        echo "3. 关闭保留策略"
-        echo "0. 返回主菜单"
-        echo -e "${BLUE}------------------------------------------------${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  1. ${YELLOW}设置按数量保留 (例: 保留最新的 5 个)${NC}"
+        echo -e "  2. ${YELLOW}设置按天数保留 (例: 保留最近 30 天)${NC}"
+        echo -e "  3. ${YELLOW}关闭保留策略${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  0. ${RED}返回主菜单${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         read -rp "请输入选项: " sub_choice
 
         case $sub_choice in
@@ -1158,7 +1170,7 @@ apply_retention_policy() {
             log_and_display "在 ${rclone_target} 中未找到备份文件，跳过。" "${YELLOW}"
             continue
         fi
-        
+
         local sorted_backups
         sorted_backups=$(echo "$backups_list" | sort -t ';' -k 2)
 
@@ -1167,7 +1179,7 @@ apply_retention_policy() {
 
         local deleted_count=0
         local total_found=${#backups_to_process[@]}
-        
+
         if [[ "$RETENTION_POLICY_TYPE" == "count" ]]; then
             local num_to_delete=$(( total_found - RETENTION_VALUE ))
             if [ "$num_to_delete" -gt 0 ]; then
@@ -1253,7 +1265,7 @@ perform_backup() {
             send_telegram_message "*${SCRIPT_NAME}：压缩失败*\n路径: \`${current_backup_path}\`"
             continue
         fi
-        
+
         local backup_file_size
         backup_file_size=$(du -h "$temp_archive_path" | awk '{print $1}')
         local path_summary_message="*${SCRIPT_NAME}：路径处理*\n路径: \`${current_backup_path}\`\n文件: \`${archive_name}\` (${backup_file_size})\n\n*上传状态:*"
@@ -1271,7 +1283,7 @@ perform_backup() {
                 upload_statuses+="\n- \`${rclone_target}\`: 失败"
             fi
         done
-        
+
         if [[ "$any_upload_succeeded_for_path" == "true" ]]; then
             overall_succeeded_count=$((overall_succeeded_count + 1))
             path_summary_message=${path_summary_message/\*路径处理/\*路径处理 (成功)\*}
@@ -1296,7 +1308,7 @@ perform_backup() {
         LAST_AUTO_BACKUP_TIMESTAMP=$(date +%s)
         save_config
     fi
-    
+
     send_telegram_message "*${SCRIPT_NAME}：总览 (${overall_status})*\n成功备份路径数: ${overall_succeeded_count}/${total_paths_to_backup}"
 
     if [[ "$overall_succeeded_count" -gt 0 ]]; then
@@ -1382,7 +1394,7 @@ check_auto_backup() {
         send_telegram_message "*${SCRIPT_NAME}：自动备份失败*\n原因: 未启用 Rclone 目标。"
         return 1
     fi
-    
+
     if [[ "$LAST_AUTO_BACKUP_TIMESTAMP" -eq 0 || $(( current_timestamp - LAST_AUTO_BACKUP_TIMESTAMP >= interval_seconds )) ]]; then
         log_and_display "执行自动备份..." "${BLUE}"
         perform_backup "自动备份 (Cron)"
