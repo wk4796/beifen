@@ -2,64 +2,62 @@
 set -e # Exit immediately if a command exits with a non-zero status.
 
 # 脚本全局配置
-SCRIPT_NAME="个人自用数据备份"
-# 使用 XDG Base Directory Specification，将配置文件和日志文件放在标准位置
-# 如果您不熟悉 XDG，可以继续使用 $HOME/.personal_backup_config
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/personal_backup"
-LOG_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/personal_backup"
+SCRIPT_NAME="个人自用数据备份 (Rclone)"
+# 使用 XDG Base Directory Specification
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/personal_backup_rclone"
+LOG_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/personal_backup_rclone"
 CONFIG_FILE="$CONFIG_DIR/config"
 LOG_FILE="$LOG_DIR/log.txt"
+LOCK_FILE="$CONFIG_DIR/script.lock"
+
+# 日志轮转配置 (8MB)
+LOG_MAX_SIZE_BYTES=8388608
+
+# --- 日志级别定义 ---
+# 值越小，级别越低，输出越详细
+LOG_LEVEL_DEBUG=1
+LOG_LEVEL_INFO=2
+LOG_LEVEL_WARN=3
+LOG_LEVEL_ERROR=4
 
 # 默认值 (如果配置文件未找到)
 declare -a BACKUP_SOURCE_PATHS_ARRAY=() # 要备份的源路径数组
-BACKUP_SOURCE_PATHS_STRING="" # 用于配置文件保存的路径字符串，使用特殊分隔符连接
+BACKUP_SOURCE_PATHS_STRING="" # 用于配置文件保存的路径字符串
+PACKAGING_STRATEGY="separate" # "separate" (独立打包) or "single" (合并打包)
 
-AUTO_BACKUP_INTERVAL_DAYS=7 # 默认自动备份间隔天数 (例如，7 天 = 1 周)
+# 新增功能配置
+BACKUP_MODE="archive"           # "archive" (归档模式) or "sync" (同步模式)
+ENABLE_INTEGRITY_CHECK="true"   # "true" or "false"，备份后完整性校验
+
+# 压缩格式配置
+COMPRESSION_FORMAT="zip"      # "zip" or "tar.gz"
+COMPRESSION_LEVEL=6           # 1 (fastest) to 9 (best)
+ZIP_PASSWORD=""               # Password for zip files, empty for none
+
+# 日志配置
+CONSOLE_LOG_LEVEL=$LOG_LEVEL_INFO # 终端输出的日志级别
+FILE_LOG_LEVEL=$LOG_LEVEL_DEBUG   # 文件记录的日志级别
+
+
+AUTO_BACKUP_INTERVAL_DAYS=7 # 默认自动备份间隔天数
 LAST_AUTO_BACKUP_TIMESTAMP=0 # 上次自动备份的 Unix 时间戳
 
 # 备份保留策略默认值
 RETENTION_POLICY_TYPE="none" # "none", "count", "days"
-RETENTION_VALUE=0           # 要保留的备份数量或天数
+RETENTION_VALUE=0            # 要保留的备份数量或天数
 
-# 云存储凭证变量 (现在从配置文件加载/保存，更方便)
-S3_ACCESS_KEY=""
-S3_SECRET_KEY=""
-S3_ENDPOINT="" # Cloudflare R2 端点，例如："https://<ACCOUNT_ID>.r2.cloudflarestorage.com"
-S3_BUCKET_NAME=""
-S3_BACKUP_PATH="" # S3/R2 备份的目标路径
+# --- Rclone 配置 ---
+declare -a RCLONE_TARGETS_ARRAY=()
+RCLONE_TARGETS_STRING=""
+declare -a ENABLED_RCLONE_TARGET_INDICES_ARRAY=()
+ENABLED_RCLONE_TARGET_INDICES_STRING=""
+declare -a RCLONE_TARGETS_METADATA_ARRAY=()
+RCLONE_TARGETS_METADATA_STRING=""
+RCLONE_BWLIMIT="" # 带宽限制 (例如 "8M" 代表 8 MByte/s)
 
-WEBDAV_URL=""
-WEBDAV_USERNAME=""
-WEBDAV_PASSWORD=""
-WEBDAV_BACKUP_PATH="" # WebDAV 备份的目标路径
 
-# --- FTP/FTPS/SFTP 凭证变量统一管理 ---
-FTP_HOST=""
-FTP_USERNAME=""
-FTP_PASSWORD=""
-FTP_PORT=21 # 默认 FTP 端口
-FTP_BACKUP_PATH=""
-
-FTPS_HOST=""
-FTPS_USERNAME=""
-FTPS_PASSWORD=""
-FTPS_PORT=21 # 默认 FTPS 端口
-FTPS_BACKUP_PATH=""
-
-SFTP_HOST=""
-SFTP_USERNAME=""
-SFTP_PASSWORD="" # SFTP 建议使用 SSH 密钥，但这里也支持密码
-SFTP_PORT=22 # 默认 SFTP 端口
-SFTP_BACKUP_PATH=""
-
-# 备份目标标志
-BACKUP_TARGET_S3="false"      # 是否启用 S3/R2 备份 (true/false)
-BACKUP_TARGET_WEBDAV="false" # 是否启用 WebDAV 备份 (true/false)
-BACKUP_TARGET_FTP="false"      # 是否启用 FTP 备份 (true/false)
-BACKUP_TARGET_FTPS="false"      # 是否启用 FTPS 备份 (true/false)
-BACKUP_TARGET_SFTP="false"      # 是否启用 SFTP 备份 (true/false)
-
-# Telegram 通知变量 (现在从配置文件加载/保存)
+# --- Telegram 通知变量 ---
+TELEGRAM_ENABLED="false"
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
 
@@ -68,24 +66,107 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # 无颜色 - 重置为默认终端颜色
+NC='\033[0m' # 无颜色
 
-# 用于存储临时压缩文件的目录，使用 mktemp 创建一个安全的临时目录
+# 临时目录
 TEMP_DIR=""
 
 # --- 辅助函数 ---
 
-# 确保在脚本退出时清理临时目录
-cleanup_temp_dir() {
-    if [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]]; then
-        rm -rf "$TEMP_DIR"
-        # 不使用 log_and_display，避免在退出时产生过多日志
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - 清理临时目录: $TEMP_DIR" >> "$LOG_FILE"
+# [新增] 初始化目录，确保脚本所需路径存在
+initialize_directories() {
+    # 使用 mkdir -p 可以安全地创建目录，如果目录已存在则什么也不做。
+    # 这是解决新设备上首次运行脚本时 "No such file or directory" 错误的关键。
+    if ! mkdir -p "$CONFIG_DIR" 2>/dev/null; then
+        # 在日志系统完全工作前，只能用 echo 输出到标准错误流
+        echo -e "${RED}[ERROR] 无法创建配置目录: $CONFIG_DIR。请检查权限。${NC}" >&2
+        exit 1
+    fi
+    if ! mkdir -p "$LOG_DIR" 2>/dev/null; then
+        echo -e "${RED}[ERROR] 无法创建日志目录: $LOG_DIR。请检查权限。${NC}" >&2
+        exit 1
     fi
 }
 
-# 注册清理函数，以便在脚本退出时运行 (即使发生错误)
-trap cleanup_temp_dir EXIT
+
+# 确保在脚本退出时清理临时目录和锁文件
+cleanup() {
+    if [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]]; then
+        rm -rf "$TEMP_DIR"
+        log_debug "清理临时目录: $TEMP_DIR"
+    fi
+    if [ -f "$LOCK_FILE" ] && [ "$(cat "$LOCK_FILE")" -eq "$$" ]; then
+        rm -f "$LOCK_FILE"
+        log_debug "移除进程锁: $LOCK_FILE"
+    fi
+}
+
+# 注册清理函数
+trap cleanup EXIT SIGINT SIGTERM
+
+# [NEW] 日志核心函数
+_log() {
+    local level_value=$1
+    local level_name=$2
+    local color=$3
+    local message="$4"
+    local plain_message
+    plain_message=$(echo -e "$message" | sed 's/\x1b\[[0-9;]*m//g')
+
+    # 写入日志文件
+    if [[ $level_value -ge $FILE_LOG_LEVEL ]]; then
+        # '>>' 操作符会自动创建文件（如果目录存在）
+        echo "$(date '+%Y-%m-%d %H:%M:%S') [${level_name}] - ${plain_message}" >> "$LOG_FILE"
+    fi
+
+    # 输出到终端
+    if [[ $level_value -ge $CONSOLE_LOG_LEVEL ]]; then
+        echo -e "${color}[${level_name}] ${message}${NC}"
+    fi
+}
+
+log_debug() { _log $LOG_LEVEL_DEBUG "DEBUG" "${BLUE}" "$1"; }
+log_info() { _log $LOG_LEVEL_INFO "INFO" "${GREEN}" "$1"; }
+log_warn() { _log $LOG_LEVEL_WARN "WARN" "${YELLOW}" "$1"; }
+log_error() { _log $LOG_LEVEL_ERROR "ERROR" "${RED}" "$1"; }
+
+
+# 进程锁功能
+acquire_lock() {
+    if [ -e "$LOCK_FILE" ]; then
+        local old_pid
+        old_pid=$(cat "$LOCK_FILE")
+        if ps -p "$old_pid" > /dev/null; then
+            log_error "另一个脚本实例 (PID: $old_pid) 正在运行。已退出。"
+            exit 1
+        else
+            log_warn "发现一个过期的锁文件 (PID: $old_pid)，已自动移除。"
+            rm -f "$LOCK_FILE"
+        fi
+    fi
+    # '>' 操作符会自动创建文件（如果目录存在）
+    echo $$ > "$LOCK_FILE"
+}
+
+# 日志文件轮转功能
+rotate_log_if_needed() {
+    # [修改] 移除此处的 mkdir，因为它已在 initialize_directories 中完成
+    if [[ ! -f "$LOG_FILE" ]]; then
+        touch "$LOG_FILE"
+        return
+    fi
+
+    local log_size
+    log_size=$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)
+
+    if (( log_size > LOG_MAX_SIZE_BYTES )); then
+        local rotated_log_file="${LOG_FILE}.$(date +%Y%m%d-%H%M%S).rotated"
+        log_warn "日志文件已轮转 (超过 8MB)，旧日志已保存为 ${rotated_log_file}。"
+        mv "$LOG_FILE" "${rotated_log_file}"
+        touch "$LOG_FILE"
+    fi
+}
+
 
 # 清屏
 clear_screen() {
@@ -96,294 +177,471 @@ clear_screen() {
 display_header() {
     clear_screen
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}      $SCRIPT_NAME      ${NC}"
+    echo -e "${GREEN}      $SCRIPT_NAME        ${NC}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 }
 
 # 显示消息并记录到日志
-# 参数 1: 消息内容
-# 参数 2: 颜色代码 (可选)
-# 参数 3: 输出目的地 (可选，默认为 /dev/stdout。使用 /dev/stderr 将输出到标准错误)
 log_and_display() {
-    local message="$1"
-    local color="$2"
-    local output_destination="${3:-/dev/stdout}" # Default to stdout
-    local plain_message
-    # Strip ANSI escape codes from the message for logging
-    plain_message=$(echo -e "$message" | sed 's/\x1b\[[0-9;]*m//g')
-
-    # Log to file with timestamp
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - ${plain_message}" >> "$LOG_FILE"
-
-    # Display to specified destination with optional color
-    if [[ -n "$color" ]]; then
-        echo -e "$color$message$NC" > "$output_destination"
-    else
-        echo -e "$message" > "$output_destination"
-    fi
+    # DEPRECATED: This function is kept for backward compatibility with older config files.
+    # New logging should use log_info, log_warn, etc.
+    log_info "$1"
 }
 
 # 等待用户按 Enter 键继续
 press_enter_to_continue() {
     echo ""
-    log_and_display "${BLUE}按 Enter 键继续...${NC}" ""
+    echo -e "${BLUE}按 Enter 键继续...${NC}"
     read -r
     clear_screen
-}
-
-# NEW: URL解码函数
-# 参数 1: URL编码的字符串
-url_decode() {
-    local url_encoded="${1//+/ }"
-    printf '%b' "${url_encoded//%/\\x}"
 }
 
 # --- 配置保存和加载 ---
 
 # 保存配置到文件
 save_config() {
-    # 确保配置目录存在
-    mkdir -p "$CONFIG_DIR" 2>/dev/null
+    # [修改] 移除此处的 mkdir，因为它已在 initialize_directories 中完成
+    # 现在可以假设 $CONFIG_DIR 总是存在的
     if [ ! -d "$CONFIG_DIR" ]; then
-        log_and_display "${RED}错误：无法创建配置目录 $CONFIG_DIR，请检查权限。${NC}"
+        log_error "配置目录 $CONFIG_DIR 不存在或不是一个目录。请检查权限。"
         return 1
     fi
 
-    # 将数组转换为字符串，使用 ;; 作为分隔符，确保路径中不太可能出现
     BACKUP_SOURCE_PATHS_STRING=$(IFS=';;'; echo "${BACKUP_SOURCE_PATHS_ARRAY[*]}")
+    RCLONE_TARGETS_STRING=$(IFS=';;'; echo "${RCLONE_TARGETS_ARRAY[*]}")
+    ENABLED_RCLONE_TARGET_INDICES_STRING=$(IFS=';;'; echo "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[*]}")
+    RCLONE_TARGETS_METADATA_STRING=$(IFS=';;'; echo "${RCLONE_TARGETS_METADATA_ARRAY[*]}")
 
-    # 使用原子写入，避免部分写入导致文件损坏
     {
-        echo "BACKUP_SOURCE_PATHS_STRING=\"$BACKUP_SOURCE_PATHS_STRING\"" # 保存路径字符串
+        echo "BACKUP_SOURCE_PATHS_STRING=\"$BACKUP_SOURCE_PATHS_STRING\""
+        echo "PACKAGING_STRATEGY=\"$PACKAGING_STRATEGY\""
+        echo "BACKUP_MODE=\"$BACKUP_MODE\""
+        echo "ENABLE_INTEGRITY_CHECK=\"$ENABLE_INTEGRITY_CHECK\""
+        echo "COMPRESSION_FORMAT=\"$COMPRESSION_FORMAT\""
+        echo "COMPRESSION_LEVEL=$COMPRESSION_LEVEL"
+        echo "ZIP_PASSWORD=\"$ZIP_PASSWORD\""
+        echo "CONSOLE_LOG_LEVEL=${CONSOLE_LOG_LEVEL:-$LOG_LEVEL_INFO}"
+        echo "FILE_LOG_LEVEL=${FILE_LOG_LEVEL:-$LOG_LEVEL_DEBUG}"
+        echo "RCLONE_BWLIMIT=\"$RCLONE_BWLIMIT\""
         echo "AUTO_BACKUP_INTERVAL_DAYS=$AUTO_BACKUP_INTERVAL_DAYS"
         echo "LAST_AUTO_BACKUP_TIMESTAMP=$LAST_AUTO_BACKUP_TIMESTAMP"
         echo "RETENTION_POLICY_TYPE=\"$RETENTION_POLICY_TYPE\""
         echo "RETENTION_VALUE=$RETENTION_VALUE"
-
-        # 保存敏感凭证
-        echo "S3_ACCESS_KEY=\"$S3_ACCESS_KEY\""
-        echo "S3_SECRET_KEY=\"$S3_SECRET_KEY\""
-        echo "S3_ENDPOINT=\"$S3_ENDPOINT\""
-        echo "S3_BUCKET_NAME=\"$S3_BUCKET_NAME\""
-        echo "S3_BACKUP_PATH=\"$S3_BACKUP_PATH\"" # 保存 S3/R2 备份路径
-
-        echo "WEBDAV_URL=\"$WEBDAV_URL\""
-        echo "WEBDAV_USERNAME=\"$WEBDAV_USERNAME\""
-        echo "WEBDAV_PASSWORD=\"$WEBDAV_PASSWORD\""
-        echo "WEBDAV_BACKUP_PATH=\"$WEBDAV_BACKUP_PATH\"" # 保存 WebDAV 备份的目标路径
-
-        # --- FTP/FTPS/SFTP 配置保存 ---
-        echo "FTP_HOST=\"$FTP_HOST\""
-        echo "FTP_USERNAME=\"$FTP_USERNAME\""
-        echo "FTP_PASSWORD=\"$FTP_PASSWORD\""
-        echo "FTP_PORT=$FTP_PORT"
-        echo "FTP_BACKUP_PATH=\"$FTP_BACKUP_PATH\""
-
-        echo "FTPS_HOST=\"$FTPS_HOST\""
-        echo "FTPS_USERNAME=\"$FTPS_USERNAME\""
-        echo "FTPS_PASSWORD=\"$FTPS_PASSWORD\""
-        echo "FTPS_PORT=$FTPS_PORT"
-        echo "FTPS_BACKUP_PATH=\"$FTPS_BACKUP_PATH\""
-
-        echo "SFTP_HOST=\"$SFTP_HOST\""
-        echo "SFTP_USERNAME=\"$SFTP_USERNAME\""
-        echo "SFTP_PASSWORD=\"$SFTP_PASSWORD\""
-        echo "SFTP_PORT=$SFTP_PORT"
-        echo "SFTP_BACKUP_PATH=\"$SFTP_BACKUP_PATH\""
-
-        echo "BACKUP_TARGET_S3=\"$BACKUP_TARGET_S3\"" # 保存备份目标标志
-        echo "BACKUP_TARGET_WEBDAV=\"$BACKUP_TARGET_WEBDAV\"" # 保存备份目标标志
-        echo "BACKUP_TARGET_FTP=\"$BACKUP_TARGET_FTP\"" # 保存 FTP 备份目标标志
-        echo "BACKUP_TARGET_FTPS=\"$BACKUP_TARGET_FTPS\"" # 保存 FTPS 备份目标标志
-        echo "BACKUP_TARGET_SFTP=\"$BACKUP_TARGET_SFTP\"" # 保存 SFTP 备份目标标志
-
+        echo "RCLONE_TARGETS_STRING=\"$RCLONE_TARGETS_STRING\""
+        echo "ENABLED_RCLONE_TARGET_INDICES_STRING=\"$ENABLED_RCLONE_TARGET_INDICES_STRING\""
+        echo "RCLONE_TARGETS_METADATA_STRING=\"$RCLONE_TARGETS_METADATA_STRING\""
+        echo "TELEGRAM_ENABLED=\"$TELEGRAM_ENABLED\""
         echo "TELEGRAM_BOT_TOKEN=\"$TELEGRAM_BOT_TOKEN\""
         echo "TELEGRAM_CHAT_ID=\"$TELEGRAM_CHAT_ID\""
     } > "$CONFIG_FILE"
 
-    log_and_display "配置已保存到 $CONFIG_FILE"
-    # 重要：立即设置配置文件为安全权限
-    chmod 600 "$CONFIG_FILE" 2>/dev/null # 抑制 chmod 失败时的错误 (例如，在只读文件系统上)
-    log_and_display "${YELLOW}已将配置文件 $CONFIG_FILE 权限设置为 600 (只有所有者可读写)，请确保您的系统安全。${NC}"
+    log_info "配置已保存到 $CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE" 2>/dev/null
 }
 
 # 从文件加载配置
 load_config() {
-    # 确保日志目录存在
-    mkdir -p "$LOG_DIR" 2>/dev/null
-    if [ ! -d "$LOG_DIR" ]; then
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - 错误：无法创建日志目录 $LOG_DIR，请检查权限。" | tee -a "$LOG_FILE"
-        return 1
-    fi
-
+    # [修改] 移除此处的 mkdir 和相关检查，因为目录已确保存在
     if [[ -f "$CONFIG_FILE" ]]; then
-        # 检查权限，如果不是 600，则发出警告并尝试设置
         current_perms=$(stat -c "%a" "$CONFIG_FILE" 2>/dev/null)
         if [[ "$current_perms" != "600" ]]; then
-            log_and_display "${YELLOW}警告：配置文件 $CONFIG_FILE 权限不安全 (${current_perms})，建议设置为 600。正在尝试设置...${NC}"
+            log_warn "配置文件 $CONFIG_FILE 权限不安全 (${current_perms})，建议设置为 600。"
             chmod 600 "$CONFIG_FILE" 2>/dev/null
-            if [ $? -ne 0 ]; then
-                log_and_display "${RED}错误：无法将配置文件 $CONFIG_FILE 权限设置为 600，请手动检查。${NC}"
-            else
-                log_and_display "${GREEN}已将配置文件 $CONFIG_FILE 权限设置为 600。${NC}"
-            fi
         fi
-        source "$CONFIG_FILE"
-        log_and_display "配置已从 $CONFIG_FILE 加载。" "${BLUE}"
 
-        # 将字符串解析回数组
+        source "$CONFIG_FILE"
+        log_info "配置已从 $CONFIG_FILE 加载。"
+
         if [[ -n "$BACKUP_SOURCE_PATHS_STRING" ]]; then
             IFS=';;'; read -r -a BACKUP_SOURCE_PATHS_ARRAY <<< "$BACKUP_SOURCE_PATHS_STRING"
         else
             BACKUP_SOURCE_PATHS_ARRAY=()
         fi
+        if [[ -n "$RCLONE_TARGETS_STRING" ]]; then
+            IFS=';;'; read -r -a RCLONE_TARGETS_ARRAY <<< "$RCLONE_TARGETS_STRING"
+        else
+            RCLONE_TARGETS_ARRAY=()
+        fi
+        if [[ -n "$ENABLED_RCLONE_TARGET_INDICES_STRING" ]]; then
+            IFS=';;'; read -r -a ENABLED_RCLONE_TARGET_INDICES_ARRAY <<< "$ENABLED_RCLONE_TARGET_INDICES_STRING"
+        else
+            ENABLED_RCLONE_TARGET_INDICES_ARRAY=()
+        fi
+        
+        if [[ -n "$RCLONE_TARGETS_METADATA_STRING" ]]; then
+            IFS=';;'; read -r -a RCLONE_TARGETS_METADATA_ARRAY <<< "$RCLONE_TARGETS_METADATA_STRING"
+        fi
+        
+        if [[ ${#RCLONE_TARGETS_METADATA_ARRAY[@]} -ne ${#RCLONE_TARGETS_ARRAY[@]} ]]; then
+            log_warn "检测到旧版配置，正在更新目标元数据..."
+            local temp_meta_array=()
+            for i in "${!RCLONE_TARGETS_ARRAY[@]}"; do
+                local meta="${RCLONE_TARGETS_METADATA_ARRAY[$i]:-手动添加}"
+                temp_meta_array+=("$meta")
+            done
+            RCLONE_TARGETS_METADATA_ARRAY=("${temp_meta_array[@]}")
+            save_config
+        fi
+
     else
-        log_and_display "未找到配置文件 $CONFIG_FILE，将使用默认配置。首次运行或配置已被删除。" "${YELLOW}"
-        # 确保新变量在未找到配置时也初始化为默认值
-        BACKUP_SOURCE_PATHS_ARRAY=()
-        BACKUP_SOURCE_PATHS_STRING=""
-        S3_BACKUP_PATH=""
-        WEBDAV_BACKUP_PATH=""
-        FTP_BACKUP_PATH=""
-        FTPS_BACKUP_PATH=""
-        SFTP_BACKUP_PATH=""
-        BACKUP_TARGET_S3="false"
-        BACKUP_TARGET_WEBDAV="false"
-        BACKUP_TARGET_FTP="false"
-        BACKUP_TARGET_FTPS="false"
-        BACKUP_TARGET_SFTP="false"
+        log_warn "未找到配置文件 $CONFIG_FILE，将使用默认配置。"
     fi
 }
 
 # --- 核心功能 ---
 
-# 检查所需依赖项
 check_dependencies() {
     local missing_deps=()
-    command -v zip &> /dev/null || missing_deps+=("zip")
-    # 检查 realpath 命令是否存在，用于规范化路径
-    command -v realpath &> /dev/null || missing_deps+=("realpath")
-    command -v basename &> /dev/null || missing_deps+=("basename") # WebDAV解析需要
+    local apt_packages=()
+    command -v zip &> /dev/null || { missing_deps+=("zip"); apt_packages+=("zip"); }
+    command -v unzip &> /dev/null || { missing_deps+=("unzip"); apt_packages+=("unzip"); }
+    command -v tar &> /dev/null || { missing_deps+=("tar"); apt_packages+=("tar"); }
+    command -v realpath &> /dev/null || { missing_deps+=("realpath"); apt_packages+=("coreutils"); }
+    command -v rclone &> /dev/null || missing_deps+=("rclone")
+    command -v df &> /dev/null || { missing_deps+=("df (coreutils)"); apt_packages+=("coreutils"); }
+    command -v du &> /dev/null || { missing_deps+=("du (coreutils)"); apt_packages+=("coreutils"); }
+    command -v less &> /dev/null || { missing_deps+=("less"); apt_packages+=("less"); }
 
-    # 仅当 S3/R2 凭证在配置中设置时才检查 S3/R2 依赖项
-    if [[ -n "$S3_ACCESS_KEY" && -n "$S3_SECRET_KEY" && -n "$S3_ENDPOINT" && -n "$S3_BUCKET_NAME" ]]; then
-        # 优先检测 awscli，其次 s3cmd
-        if ! (command -v aws &> /dev/null || command -v s3cmd &> /dev/null); then
-            missing_deps+=("awscli 或 s3cmd (用于S3/R2)")
-        fi
-        command -v jq &> /dev/null || missing_deps+=("jq (用于S3/R2文件夹列表解析)") # S3/R2现在需要jq
-    fi
-    # 仅当 WebDAV 凭证在配置中设置时才检查 WebDAV 依赖项
-    if [[ -n "$WEBDAV_URL" && -n "$WEBDAV_USERNAME" && -n "$WEBDAV_PASSWORD" ]]; then
-        command -v curl &> /dev/null || missing_deps+=("curl (用于WebDAV)")
-        command -v xmllint &> /dev/null || missing_deps+=("xmllint (用于WebDAV, 通常在 libxml2-utils 或 libxml2 包中)")
-    fi
-    
-    # 统一检查 lftp，因为它现在处理 FTP, FTPS 和 SFTP
-    if [[ -n "$FTP_HOST" && -n "$FTP_USERNAME" && -n "$FTP_PASSWORD" ]] || \
-        [[ -n "$FTPS_HOST" && -n "$FTPS_USERNAME" && -n "$FTPS_PASSWORD" ]] || \
-        [[ -n "$SFTP_HOST" && -n "$SFTP_USERNAME" ]]; then
-        command -v lftp &> /dev/null || missing_deps+=("lftp (用于FTP/FTPS/SFTP)")
-    fi
 
-    # 仅当 Telegram 凭证在配置中设置时才检查 curl 依赖项
-    if [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
-        command -v curl &> /dev/null || missing_deps+=("curl (用于Telegram)")
+    if [[ "$TELEGRAM_ENABLED" == "true" ]]; then
+        command -v curl &> /dev/null || { missing_deps+=("curl"); apt_packages+=("curl"); }
     fi
 
     if [ ${#missing_deps[@]} -gt 0 ]; then
-        log_and_display "${RED}检测到以下依赖项缺失，请安装后重试：${missing_deps[*]}${NC}"
-        log_and_display "例如 (Debian/Ubuntu): sudo apt update && sudo apt install zip awscli curl jq realpath lftp libxml2-utils" "${YELLOW}"
-        log_and_display "例如 (CentOS/RHEL): sudo yum install zip awscli curl jq realpath lftp libxml2" "${YELLOW}"
-        press_enter_to_continue
-        return 1
+        log_error "检测到以下依赖项缺失：${missing_deps[*]}"
+        read -rp "是否需要我为您尝试自动安装这些依赖？(需要 sudo 权限) (y/N): " choice
+        if [[ "$choice" =~ ^[Yy]$ ]]; then
+            local installed_something=0
+            if command -v apt-get &> /dev/null && [ ${#apt_packages[@]} -gt 0 ]; then
+                log_warn "正在使用 apt-get 安装: ${apt_packages[*]}..."
+                if sudo apt-get update && sudo apt-get install -y "${apt_packages[@]}"; then
+                    log_info "软件包安装成功。"
+                    installed_something=1
+                else
+                    log_error "软件包安装失败。"
+                fi
+            fi
+
+            if [[ " ${missing_deps[*]} " =~ " rclone " ]]; then
+                log_warn "正在安装/更新 Rclone..."
+                if curl https://rclone.org/install.sh | sudo bash; then
+                    log_info "Rclone 安装成功。"
+                    installed_something=1
+                else
+                    log_error "Rclone 安装失败。"
+                fi
+            fi
+
+            if [ "$installed_something" -eq 1 ]; then
+                log_info "依赖安装尝试完成，请重新运行脚本。"
+                exit 0
+            else
+                log_error "自动安装失败，请手动安装。"
+                press_enter_to_continue
+                return 1
+            fi
+        else
+            log_warn "已取消自动安装。请手动安装后重试。"
+            press_enter_to_continue
+            return 1
+        fi
     fi
     return 0
 }
 
 
-# ================================================================
-# ===     [修改后] 发送 Telegram 消息的函数                   ===
-# === 核心改动：使用 curl 的 --data-urlencode 来自动处理换行符。 ===
-# ================================================================
 send_telegram_message() {
+    if [[ "$TELEGRAM_ENABLED" != "true" ]]; then
+        return 0
+    fi
+
     local message_content="$1"
     if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
-        log_and_display "${YELLOW}Telegram 通知未配置，跳过发送消息。${NC}" "" "/dev/stderr"
-        return 1
+        log_warn "Telegram 通知已启用，但凭证未配置，跳过发送消息。"
+        return 0
     fi
-
-    # 再次检查 curl 是否存在
     if ! command -v curl &> /dev/null; then
-        log_and_display "${RED}错误：发送 Telegram 消息需要 'curl' 命令，但未找到。${NC}" "" "/dev/stderr"
+        log_error "发送 Telegram 消息需要 'curl'，但未安装。"
         return 1
     fi
-
-    log_and_display "正在发送 Telegram 消息..." "" "/dev/stderr"
-    # 使用 --data-urlencode 让 curl 自动处理换行符等特殊字符的编码
-    # 这比手动编码更可靠，并且不再需要 jq。
+    log_info "正在发送 Telegram 消息..."
     if curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
         --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
         --data-urlencode "text=${message_content}" \
         --data-urlencode "parse_mode=Markdown" > /dev/null; then
-        log_and_display "${GREEN}Telegram 消息发送成功。${NC}" "" "/dev/stderr"
+        log_info "Telegram 消息发送成功。"
     else
-        log_and_display "${RED}Telegram 消息发送失败！请检查配置、凭证和网络连接。${NC}" "" "/dev/stderr"
+        log_error "Telegram 消息发送失败！"
     fi
 }
 
+restore_backup() {
+    display_header
+    echo -e "${BLUE}=== 从云端恢复到本地 ===${NC}"
+    log_info "请注意：此功能仅适用于“归档模式”创建的备份文件。"
 
-# 1. 设置自动备份间隔
+    if [ ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} -eq 0 ]; then
+        log_error "没有已启用的备份目标可供恢复。"
+        press_enter_to_continue
+        return
+    fi
+
+    log_info "请选择要从哪个目标恢复："
+    local enabled_targets=()
+    for index in "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}"; do
+        enabled_targets+=("${RCLONE_TARGETS_ARRAY[$index]}")
+    done
+
+    for i in "${!enabled_targets[@]}"; do
+        echo " $((i+1)). ${enabled_targets[$i]}"
+    done
+    echo " 0. 返回"
+    read -rp "请输入选项: " target_choice
+
+    if [[ "$target_choice" == "0" ]]; then
+        log_info "已取消。"
+        press_enter_to_continue
+        return
+    fi
+
+    if ! [[ "$target_choice" =~ ^[0-9]+$ ]] || [ "$target_choice" -gt ${#enabled_targets[@]} ]; then
+        log_error "无效选项。"
+        press_enter_to_continue
+        return
+    fi
+    
+    local selected_target="${enabled_targets[$((target_choice-1))]}"
+    log_info "正在从 ${selected_target} 获取备份列表..."
+    
+    local backup_files_str
+    backup_files_str=$(rclone lsf --files-only "${selected_target}" | grep -E '\.zip$|\.tar\.gz$' | sort -r)
+
+    if [[ -z "$backup_files_str" ]]; then
+        log_error "在 ${selected_target} 中未找到任何 .zip 或 .tar.gz 备份文件。"
+        press_enter_to_continue
+        return
+    fi
+    
+    local backup_files=()
+    mapfile -t backup_files <<< "$backup_files_str"
+    
+    log_info "发现以下备份文件（按名称逆序排序）："
+    for i in "${!backup_files[@]}"; do
+        echo " $((i+1)). ${backup_files[$i]}"
+    done
+    echo " 0. 返回"
+    read -rp "请选择要恢复的备份文件序号: " file_choice
+
+    if [[ "$file_choice" == "0" ]]; then
+        log_info "已取消。"
+        press_enter_to_continue
+        return
+    fi
+
+    if ! [[ "$file_choice" =~ ^[0-9]+$ ]] || [ "$file_choice" -gt ${#backup_files[@]} ]; then
+        log_error "无效选项。"
+        press_enter_to_continue
+        return
+    fi
+
+    local selected_file="${backup_files[$((file_choice-1))]}"
+    local remote_file_path="${selected_target}"
+    if [[ "${remote_file_path: -1}" != "/" ]]; then
+        remote_file_path+="/"
+    fi
+    remote_file_path+="${selected_file}"
+
+    local temp_archive_path="${TEMP_DIR}/${selected_file}"
+    log_warn "正在下载备份文件: ${selected_file}..."
+    
+    local bw_limit_arg=""
+    if [[ -n "$RCLONE_BWLIMIT" ]]; then
+        bw_limit_arg="--bwlimit ${RCLONE_BWLIMIT}"
+        log_info "下载将使用带宽限制: ${RCLONE_BWLIMIT}"
+    fi
+
+    if ! rclone copyto "${remote_file_path}" "${temp_archive_path}" --progress ${bw_limit_arg}; then
+        log_error "下载备份文件失败！"
+        press_enter_to_continue
+        return
+    fi
+    log_info "下载成功！"
+    
+    echo ""
+    echo "您想如何处理这个备份文件？"
+    echo " 1. 解压到指定目录"
+    echo " 2. 仅列出压缩包内容"
+    echo " 0. 取消"
+    read -rp "请输入选项: " action_choice
+    
+    case "$action_choice" in
+        1)
+            read -rp "请输入要解压到的绝对路径 (例如: /root/restore/): " restore_dir
+            if [[ -z "$restore_dir" ]]; then
+                log_error "路径不能为空！"
+            else
+                mkdir -p "$restore_dir"
+                log_warn "正在解压到 ${restore_dir} ..."
+                if [[ "$selected_file" == *.zip ]]; then
+                    if unzip -o "${temp_archive_path}" -d "${restore_dir}" &>/dev/null; then
+                        log_info "解压完成！"
+                    else
+                        read -s -p "解压失败，文件可能已加密。请输入密码 (留空则跳过): " restore_pass
+                        echo ""
+                        if [[ -n "$restore_pass" ]]; then
+                            if unzip -o -P "$restore_pass" "${temp_archive_path}" -d "${restore_dir}"; then
+                                log_info "解压完成！"
+                            else
+                                log_error "密码错误或文件损坏，解压失败！"
+                            fi
+                        else
+                            log_error "解压失败！"
+                        fi
+                    fi
+                elif [[ "$selected_file" == *.tar.gz ]]; then
+                    if tar -xzf "${temp_archive_path}" -C "${restore_dir}"; then
+                        log_info "解压完成！"
+                    else
+                        log_error "解压失败！"
+                    fi
+                else
+                    log_error "未知的压缩格式！"
+                fi
+            fi
+            ;;
+        2)
+            log_info "备份文件 '${selected_file}' 内容如下："
+            if [[ "$selected_file" == *.zip ]]; then
+                unzip -l "${temp_archive_path}"
+            elif [[ "$selected_file" == *.tar.gz ]]; then
+                tar -tzvf "${temp_archive_path}"
+            fi
+            ;;
+        *)
+            log_info "已取消操作。"
+            ;;
+    esac
+    rm -f "${temp_archive_path}"
+    press_enter_to_continue
+}
+
+manage_auto_backup_menu() {
+    while true; do
+        display_header
+        echo -e "${BLUE}=== 1. 自动备份与计划任务 ===${NC}"
+        echo -e "  1. ${YELLOW}设置自动备份间隔${NC} (当前: ${AUTO_BACKUP_INTERVAL_DAYS} 天)"
+        echo -e "  2. ${YELLOW}[助手] 配置 Cron 定时任务${NC}"
+        echo ""
+        echo -e "  0. ${RED}返回主菜单${NC}"
+        read -rp "请输入选项: " choice
+        
+        case $choice in
+            1) set_auto_backup_interval ;;
+            2) setup_cron_job ;;
+            0) break ;;
+            *) log_error "无效选项。"; press_enter_to_continue ;;
+        esac
+    done
+}
+
 set_auto_backup_interval() {
     display_header
-    echo -e "${BLUE}=== 1. 自动备份设定 ===${NC}"
-    echo "当前自动备份间隔: ${AUTO_BACKUP_INTERVAL_DAYS} 天"
-    echo ""
-    read -rp "请输入新的自动备份间隔时间（天数，最小1天，例如 7 为 1 周）: " interval_input
-
+    echo -e "${BLUE}--- 设置自动备份间隔 ---${NC}"
+    read -rp "请输入新的自动备份间隔时间（天数，最小1天）[当前: ${AUTO_BACKUP_INTERVAL_DAYS}]: " interval_input
     if [[ "$interval_input" =~ ^[0-9]+$ ]] && [ "$interval_input" -ge 1 ]; then
         AUTO_BACKUP_INTERVAL_DAYS="$interval_input"
         save_config
-        log_and_display "${GREEN}自动备份间隔已成功设置为：${AUTO_BACKUP_INTERVAL_DAYS} 天。${NC}"
-        log_and_display "${YELLOW}提示：现在您只需确保 Cron Job 每天运行此脚本一次。脚本会根据您设置的间隔自动判断是否执行备份。${NC}"
-        log_and_display "${YELLOW}Cron Job 条目示例 (请将 /path/to/your_script.sh 替换为实际路径):${NC}"
-        log_and_display "${YELLOW}0 0 * * * bash /path/to/your_script.sh check_auto_backup > /dev/null 2>&1${NC}" # 每天午夜运行
+        log_info "自动备份间隔已成功设置为：${AUTO_BACKUP_INTERVAL_DAYS} 天。"
     else
-        log_and_display "${RED}输入无效，请输入一个大于等于 1 的整数。${NC}"
+        log_error "输入无效。"
     fi
     press_enter_to_continue
 }
 
-# 2. 手动备份
+setup_cron_job() {
+    display_header
+    echo -e "${BLUE}--- Cron 定时任务助手 ---${NC}"
+    echo "此助手可以帮助您添加一个系统的定时任务，以实现无人值守自动备份。"
+    echo -e "${YELLOW}脚本将每天在您指定的时间运行一次，并根据您设置的间隔天数决定是否执行备份。${NC}"
+    
+    read -rp "请输入您希望每天执行检查的时间 (24小时制, HH:MM, 例如 03:00): " cron_time
+    if ! [[ "$cron_time" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
+        log_error "时间格式无效！请输入 HH:MM 格式。"
+        press_enter_to_continue
+        return
+    fi
+    
+    local cron_minute="${cron_time#*:}"
+    local cron_hour="${cron_time%%:*}"
+    
+    cron_minute=$(printf "%d" "$cron_minute")
+    cron_hour=$(printf "%d" "$cron_hour")
+
+    local script_path
+    script_path=$(readlink -f "$0")
+    local cron_command="${cron_minute} ${cron_hour} * * * ${script_path} check_auto_backup >> \"${LOG_FILE}\" 2>&1"
+    
+    if crontab -l 2>/dev/null | grep -qF "$script_path check_auto_backup"; then
+        log_warn "检测到已存在此脚本的定时任务。"
+        read -rp "您想用新的时间设置覆盖它吗？(y/N): " confirm_replace
+        if [[ "$confirm_replace" =~ ^[Yy]$ ]]; then
+            local temp_crontab
+            temp_crontab=$(crontab -l 2>/dev/null | grep -vF "$script_path check_auto_backup")
+            (echo "${temp_crontab}"; echo "$cron_command") | crontab -
+            log_info "定时任务已更新！"
+        else
+            log_info "已取消操作。"
+        fi
+    else
+        (crontab -l 2>/dev/null; echo "$cron_command") | crontab -
+        log_info "定时任务添加成功！"
+    fi
+
+    log_info "您可以使用 'crontab -l' 命令查看所有定时任务。"
+    press_enter_to_continue
+}
+
 manual_backup() {
     display_header
     echo -e "${BLUE}=== 2. 手动备份 ===${NC}"
-    # 检查是否有至少一个备份路径
+
     if [ ${#BACKUP_SOURCE_PATHS_ARRAY[@]} -eq 0 ]; then
-        log_and_display "${RED}错误：没有设置任何备份源路径。请先通过 '3. 自定义备份路径' 添加路径。${NC}"
+        log_error "没有设置任何备份源路径。"
+        log_warn "请先在选项 [3] 中添加要备份的路径。"
         press_enter_to_continue
         return 1
     fi
-    log_and_display "您选择了手动备份，立即执行备份上传。" "${GREEN}"
+    if [ ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} -eq 0 ]; then
+        log_error "没有启用任何 Rclone 备份目标。"
+        log_warn "请先在选项 [5] 中配置并启用一个或多个目标。"
+        press_enter_to_continue
+        return 1
+    fi
+
     perform_backup "手动备份"
     press_enter_to_continue
 }
 
-# --- 修改后的 3. 自定义备份路径 ---
 add_backup_path() {
     display_header
     echo -e "${BLUE}=== 添加备份路径 ===${NC}"
-    read -rp "请输入要备份的文件或文件夹的绝对路径（例如 /home/user/mydata 或 /etc/nginx/nginx.conf）: " path_input
+    read -rp "请输入要备份的文件或文件夹的绝对路径: " path_input
 
-    local resolved_path=$(realpath -q "$path_input" 2>/dev/null)
+    if [[ -z "$path_input" ]]; then
+        log_error "路径不能为空。"
+        press_enter_to_continue
+        return
+    fi
+
+    local resolved_path
+    resolved_path=$(realpath -q "$path_input" 2>/dev/null)
 
     if [[ -z "$resolved_path" ]]; then
-        log_and_display "${RED}错误：输入的路径无效或不存在。${NC}"
+        log_error "输入的路径 '$path_input' 无效或不存在。"
     elif [[ ! -d "$resolved_path" && ! -f "$resolved_path" ]]; then
-        log_and_display "${RED}错误：输入的路径 '$resolved_path' 不存在或不是有效的文件/目录。${NC}"
+        log_error "输入的路径 '$resolved_path' 不是有效的文件/目录。"
     else
-        # 检查是否已存在
         local found=false
         for p in "${BACKUP_SOURCE_PATHS_ARRAY[@]}"; do
             if [[ "$p" == "$resolved_path" ]]; then
@@ -393,11 +651,11 @@ add_backup_path() {
         done
 
         if "$found"; then
-            log_and_display "${YELLOW}该路径 '$resolved_path' 已存在于备份列表中。${NC}"
+            log_warn "该路径 '$resolved_path' 已存在。"
         else
             BACKUP_SOURCE_PATHS_ARRAY+=("$resolved_path")
             save_config
-            log_and_display "${GREEN}备份路径 '$resolved_path' 已成功添加。${NC}"
+            log_info "备份路径 '$resolved_path' 已添加。"
         fi
     fi
     press_enter_to_continue
@@ -408,7 +666,7 @@ view_and_manage_backup_paths() {
         display_header
         echo -e "${BLUE}=== 查看/管理备份路径 ===${NC}"
         if [ ${#BACKUP_SOURCE_PATHS_ARRAY[@]} -eq 0 ]; then
-            log_and_display "${YELLOW}当前没有设置任何备份路径。${NC}"
+            log_warn "当前没有设置任何备份路径。"
             press_enter_to_continue
             break
         fi
@@ -418,1892 +676,412 @@ view_and_manage_backup_paths() {
             echo "  $((i+1)). ${BACKUP_SOURCE_PATHS_ARRAY[$i]}"
         done
         echo ""
-        echo "1. 修改现有路径"
-        echo "2. 删除路径"
-        echo "0. 返回自定义备份路径菜单"
-        echo -e "${BLUE}------------------------------------------------${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  1. ${YELLOW}修改现有路径${NC}"
+        echo -e "  2. ${YELLOW}删除路径${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  0. ${RED}返回${NC}"
         read -rp "请输入选项: " sub_choice
 
         case $sub_choice in
-            1) # 修改路径
+            1)
                 read -rp "请输入要修改的路径序号: " path_index
                 if [[ "$path_index" =~ ^[0-9]+$ ]] && [ "$path_index" -ge 1 ] && [ "$path_index" -le ${#BACKUP_SOURCE_PATHS_ARRAY[@]} ]; then
                     local current_path="${BACKUP_SOURCE_PATHS_ARRAY[$((path_index-1))]}"
-                    read -rp "您正在修改路径 '${current_path}'。请输入新的绝对路径: " new_path_input
+                    read -rp "修改路径 '${current_path}'。请输入新路径: " new_path_input
+                    
+                    if [[ -z "$new_path_input" ]]; then
+                        log_error "错误：路径不能为空。"
+                        press_enter_to_continue
+                        continue
+                    fi
 
-                    local resolved_new_path=$(realpath -q "$new_path_input" 2>/dev/null)
+                    local resolved_new_path
+                    resolved_new_path=$(realpath -q "$new_path_input" 2>/dev/null)
 
-                    if [[ -z "$resolved_new_path" ]]; then
-                        log_and_display "${RED}错误：输入的路径无效或不存在。${NC}"
-                    elif [[ ! -d "$resolved_new_path" && ! -f "$resolved_new_path" ]]; then
-                        log_and_display "${RED}错误：输入的路径 '$resolved_new_path' 不存在或不是有效的文件/目录。${NC}"
+                    if [[ -z "$resolved_new_path" || (! -d "$resolved_new_path" && ! -f "$resolved_new_path") ]]; then
+                        log_error "错误：新路径无效或不存在。"
                     else
-                        # 移除目录的尾部斜杠，但保留文件路径的完整性
-                        if [[ -d "$resolved_new_path" ]]; then
-                            resolved_new_path="${resolved_new_path%/}"
-                        fi
                         BACKUP_SOURCE_PATHS_ARRAY[$((path_index-1))]="$resolved_new_path"
                         save_config
-                        log_and_display "${GREEN}路径已成功修改为：${resolved_new_path}${NC}"
+                        log_info "路径已修改。"
                     fi
                 else
-                    log_and_display "${RED}无效的路径序号。${NC}"
+                    log_error "无效序号。"
                 fi
                 press_enter_to_continue
                 ;;
-            2) # 删除路径
+            2)
                 read -rp "请输入要删除的路径序号: " path_index
                 if [[ "$path_index" =~ ^[0-9]+$ ]] && [ "$path_index" -ge 1 ] && [ "$path_index" -le ${#BACKUP_SOURCE_PATHS_ARRAY[@]} ]; then
-                    log_and_display "${YELLOW}警告：您确定要删除路径 '${BACKUP_SOURCE_PATHS_ARRAY[$((path_index-1))]}'吗？(y/N)${NC}"
-                    read -rp "请确认: " confirm_delete
-                    if [[ "$confirm_delete" =~ ^[Yy]$ ]]; then
-                        # 从数组中删除元素
+                    read -rp "确定要删除路径 '${BACKUP_SOURCE_PATHS_ARRAY[$((path_index-1))]}'吗？(y/N): " confirm
+                    if [[ "$confirm" =~ ^[Yy]$ ]]; then
                         unset 'BACKUP_SOURCE_PATHS_ARRAY[$((path_index-1))]'
-                        BACKUP_SOURCE_PATHS_ARRAY=("${BACKUP_SOURCE_PATHS_ARRAY[@]}") # 重新索引数组
+                        BACKUP_SOURCE_PATHS_ARRAY=("${BACKUP_SOURCE_PATHS_ARRAY[@]}")
                         save_config
-                        log_and_display "${GREEN}路径已成功删除。${NC}"
-                    else
-                        log_and_display "取消删除路径。" "${BLUE}"
+                        log_info "路径已删除。"
                     fi
                 else
-                    log_and_display "${RED}无效的路径序号。${NC}"
+                    log_error "无效序号。"
                 fi
                 press_enter_to_continue
                 ;;
-            0)
-                log_and_display "返回自定义备份路径菜单。" "${BLUE}"
-                break
-                ;;
-            *)
-                log_and_display "${RED}无效的选项，请重新输入。${NC}"
-                press_enter_to_continue
-                ;;
+            0) break ;;
+            *) log_error "无效选项。"; press_enter_to_continue ;;
         esac
     done
 }
 
-# 3. 自定义备份路径主函数
-set_backup_path() {
+set_packaging_strategy() {
+    display_header
+    echo -e "${BLUE}--- 设置打包策略 ---${NC}"
+    echo "请选择在“归档模式”下如何打包多个源文件/目录："
+    echo ""
+    echo -e "  1. ${YELLOW}每个源单独打包${NC} (Separate) - 生成多个 .zip 文件，恢复灵活。"
+    echo -e "  2. ${YELLOW}所有源打包成一个${NC} (Single) - 只生成一个 .zip 文件，便于整体迁移。"
+    echo ""
+    echo -e "当前策略: ${GREEN}${PACKAGING_STRATEGY}${NC}"
+    read -rp "请输入选项 (1 或 2): " choice
+
+    case $choice in
+        1)
+            PACKAGING_STRATEGY="separate"
+            save_config
+            log_info "打包策略已设置为: 每个源单独打包。"
+            ;;
+        2)
+            PACKAGING_STRATEGY="single"
+            save_config
+            log_info "打包策略已设置为: 所有源打包成一个。"
+            ;;
+        *)
+            log_error "无效选项。"
+            ;;
+    esac
+    press_enter_to_continue
+}
+
+set_backup_mode() {
+    display_header
+    echo -e "${BLUE}--- 设置备份模式 ---${NC}"
+    echo "请选择您的主要备份策略："
+    echo ""
+    echo -e "  1. ${YELLOW}归档模式${NC} (Archive) - 先打包成 .zip 再上传。支持版本保留和恢复。适合重要文件归档。"
+    echo -e "  2. ${YELLOW}同步模式${NC} (Sync) - 直接将本地目录结构同步到云端，效率高。适合频繁变动的大量文件。${RED}(此模式下保留策略和恢复功能无效)${NC}"
+    echo ""
+    local current_mode_text="归档模式 (Archive)"
+    if [[ "$BACKUP_MODE" == "sync" ]]; then
+        current_mode_text="同步模式 (Sync)"
+    fi
+    echo -e "当前模式: ${GREEN}${current_mode_text}${NC}"
+    read -rp "请输入选项 (1 或 2): " choice
+
+    case $choice in
+        1)
+            BACKUP_MODE="archive"
+            save_config
+            log_info "备份模式已设置为: 归档模式。"
+            ;;
+        2)
+            BACKUP_MODE="sync"
+            save_config
+            log_info "备份模式已设置为: 同步模式。"
+            ;;
+        *)
+            log_error "无效选项。"
+            ;;
+    esac
+    press_enter_to_continue
+}
+
+set_backup_path_and_mode() {
     while true; do
         display_header
-        echo -e "${BLUE}=== 3. 自定义备份路径 ===${NC}"
+        echo -e "${BLUE}=== 3. 自定义备份路径与模式 ===${NC}"
         echo "当前已配置备份路径数量: ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个"
+
+        local mode_text="归档模式 (Archive)"
+        if [[ "$BACKUP_MODE" == "sync" ]]; then
+            mode_text="同步模式 (Sync)"
+        fi
+        echo -e "当前备份模式: ${GREEN}${mode_text}${NC}"
+        
+        local strategy_text="每个源单独打包"
+        if [[ "$PACKAGING_STRATEGY" == "single" ]]; then
+            strategy_text="所有源打包成一个"
+        fi
+        echo -e "归档模式打包策略: ${GREEN}${strategy_text}${NC}"
+
         echo ""
-        echo "1. 添加新的备份路径"
-        echo "2. 查看/修改/删除现有备份路径"
-        echo "0. 返回主菜单"
-        echo -e "${BLUE}------------------------------------------------${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  1. ${YELLOW}添加新的备份路径${NC}"
+        echo -e "  2. ${YELLOW}查看/管理现有路径${NC}"
+        echo -e "  3. ${YELLOW}设置打包策略${NC} (仅归档模式有效)"
+        echo -e "  4. ${YELLOW}设置备份模式${NC} (归档/同步)"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  0. ${RED}返回主菜单${NC}"
         read -rp "请输入选项: " choice
 
         case $choice in
             1) add_backup_path ;;
             2) view_and_manage_backup_paths ;;
-            0)
-                log_and_display "返回主菜单。" "${BLUE}"
-                break
-                ;;
-            *)
-                log_and_display "${RED}无效的选项，请重新输入。${NC}"
-                press_enter_to_continue
-                ;;
+            3) set_packaging_strategy ;;
+            4) set_backup_mode ;;
+            0) break ;;
+            *) log_error "无效选项。"; press_enter_to_continue ;;
         esac
     done
 }
 
-# 4. 压缩格式信息 (保持不变)
-display_compression_info() {
+# [NEW] 管理压缩设置的菜单
+manage_compression_settings() {
+    while true; do
+        display_header
+        echo -e "${BLUE}=== 4. 压缩包格式与选项 ===${NC}"
+        echo -e "当前格式: ${GREEN}${COMPRESSION_FORMAT}${NC}"
+        echo -e "压缩级别: ${GREEN}${COMPRESSION_LEVEL}${NC} (1=最快, 9=最高)"
+        local pass_status="未设置"
+        if [[ -n "$ZIP_PASSWORD" ]]; then
+            pass_status="${YELLOW}已设置${NC}"
+        fi
+        echo -e "ZIP 密码: ${pass_status}"
+        echo ""
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  1. ${YELLOW}切换压缩格式 (zip / tar.gz)${NC}"
+        echo -e "  2. ${YELLOW}设置压缩级别${NC}"
+        echo -e "  3. ${YELLOW}设置/清除 ZIP 密码${NC} (仅对 zip 格式有效)"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  0. ${RED}返回主菜单${NC}"
+        read -rp "请输入选项: " choice
+
+        case "$choice" in
+            1)
+                if [[ "$COMPRESSION_FORMAT" == "zip" ]]; then
+                    COMPRESSION_FORMAT="tar.gz"
+                    log_info "压缩格式已切换为 tar.gz"
+                else
+                    COMPRESSION_FORMAT="zip"
+                    log_info "压缩格式已切换为 zip"
+                fi
+                save_config
+                press_enter_to_continue
+                ;;
+            2)
+                read -rp "请输入新的压缩级别 (1-9) [当前: ${COMPRESSION_LEVEL}]: " level_input
+                if [[ "$level_input" =~ ^[1-9]$ ]]; then
+                    COMPRESSION_LEVEL="$level_input"
+                    save_config
+                    log_info "压缩级别已设置为 ${COMPRESSION_LEVEL}"
+                else
+                    log_error "无效输入，请输入 1 到 9 之间的数字。"
+                fi
+                press_enter_to_continue
+                ;;
+            3)
+                if [[ "$COMPRESSION_FORMAT" != "zip" ]]; then
+                     log_warn "警告：密码保护仅对 zip 格式有效。"
+                     press_enter_to_continue
+                     continue
+                fi
+                read -s -p "请输入新的 ZIP 密码 (留空则清除密码): " pass_input
+                echo ""
+                ZIP_PASSWORD="$pass_input"
+                save_config
+                if [[ -n "$ZIP_PASSWORD" ]]; then
+                    log_info "ZIP 密码已设置。"
+                else
+                    log_info "ZIP 密码已清除。"
+                fi
+                press_enter_to_continue
+                ;;
+            0) break ;;
+            *) log_error "无效选项。"; press_enter_to_continue ;;
+        esac
+    done
+}
+
+
+set_bandwidth_limit() {
     display_header
-    echo -e "${BLUE}=== 4. 压缩包格式 ===${NC}"
-    log_and_display "本脚本当前支持的压缩格式为：${GREEN}ZIP${NC}。" ""
-    log_and_display "如果您需要其他格式（如 .tar.gz），请修改脚本中 'perform_backup' 函数的压缩命令。" "${YELLOW}"
+    echo -e "${BLUE}--- 设置 Rclone 带宽限制 ---${NC}"
+    echo "此设置将限制 Rclone 上传和下载的速度，以避免占用过多网络资源。"
+    echo "格式示例: 8M (8 MByte/s), 512k (512 KByte/s)。留空或输入 0 表示不限制。"
+    
+    local bw_limit_display="${RCLONE_BWLIMIT}"
+    if [[ -z "$bw_limit_display" ]]; then
+        bw_limit_display="不限制"
+    fi
+
+    read -rp "请输入新的带宽限制 [当前: ${bw_limit_display}]: " bw_input
+    
+    if [[ -z "$bw_input" || "$bw_input" == "0" ]]; then
+        RCLONE_BWLIMIT=""
+        log_info "带宽限制已取消。"
+    else
+        if [[ "$bw_input" =~ ^[0-9]+([kKmM])?$ ]]; then
+            RCLONE_BWLIMIT="$bw_input"
+            log_info "带宽限制已设置为: ${RCLONE_BWLIMIT}"
+        else
+            log_error "格式无效！请输入类似 '8M' 或 '512k' 的值。"
+        fi
+    fi
+    save_config
     press_enter_to_continue
 }
 
-# --- 云存储连接测试和内容列表 ---
-
-# 测试 S3/R2 连接
-test_s3_r2_connection() {
-    if [[ -z "$S3_ACCESS_KEY" || -z "$S3_SECRET_KEY" || -z "$S3_ENDPOINT" || -z "$S3_BUCKET_NAME" ]]; then
-        log_and_display "${RED}S3/R2 配置不完整，无法测试连接。请先填写 Access Key, Secret Key, Endpoint 和 Bucket 名称。${NC}" "" "/dev/stderr"
-        return 1
-    fi
-
-    log_and_display "正在测试 S3/R2 连接到桶：${S3_BUCKET_NAME}..." "${BLUE}" "/dev/stderr"
-
-    export AWS_ACCESS_KEY_ID="$S3_ACCESS_KEY"
-    export AWS_SECRET_ACCESS_KEY="$S3_SECRET_KEY"
-
-    local test_output=""
-    local test_status=1
-
-    if command -v aws &> /dev/null; then
-        # 尝试使用 s3api list-objects-v2，因为 aws s3 ls 有时在某些环境下对选项解析有问题
-        if { test_output=$(aws s3api list-objects-v2 --bucket "$S3_BUCKET_NAME" --max-keys 1 --endpoint-url "$S3_ENDPOINT" 2>&1); } then
-            test_status=0
-        else
-            test_status=$?
-        fi
-    elif command -v s3cmd &> /dev/null; then
-        log_and_display "${YELLOW}正在使用 s3cmd 进行连接测试。请确保 ~/.s3cfg 已正确配置 Cloudflare R2。${NC}" "" "/dev/stderr"
-        if { test_output=$(s3cmd ls "s3://${S3_BUCKET_NAME}/" 2>&1); } then
-            test_status=0
-        else
-            test_status=$?
-        fi
-    else
-        log_and_display "${RED}未找到 'awscli' 或 's3cmd' 命令，无法测试 S3/R2 连接。${NC}" "" "/dev/stderr"
-        unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
-        return 1
-    fi
-
-    unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
-
-    if [ "$test_status" -eq 0 ]; then
-        # MODIFIED: Check for API error even on exit 0
-        if echo "$test_output" | grep -q 'Error'; then
-             log_and_display "${RED}S3/R2 连接失败！服务器返回错误。请检查配置、凭证和网络连接。错误信息: ${test_output}${NC}" "" "/dev/stderr"
-             return 1
-        fi
-        log_and_display "${GREEN}S3/R2 连接成功！${NC}" "" "/dev/stderr"
-        return 0
-    else
-        log_and_display "${RED}S3/R2 连接失败！请检查配置、凭证和网络连接。错误信息: ${test_output}${NC}" "" "/dev/stderr"
-        return 1
-    fi
-}
-
-# MODIFIED: Added detailed JSON error checking from the API response.
-get_s3_r2_direct_contents() {
-    local parent_prefix="$1"
-    parent_prefix="${parent_prefix#/}" 
-    if [[ -n "$parent_prefix" && "${parent_prefix: -1}" != "/" ]]; then
-        parent_prefix="${parent_prefix}/"
-    fi
-    if [[ -z "$parent_prefix" ]]; then
-        parent_prefix=""
-    fi
-
-    export AWS_ACCESS_KEY_ID="$S3_ACCESS_KEY"
-    export AWS_SECRET_ACCESS_KEY="$S3_SECRET_KEY"
-    local contents=()
-    local result_status=1
-
-    log_and_display "正在尝试获取 S3/R2 中 '${parent_prefix:-根目录}' 的直接子文件夹和文件..." "${BLUE}" "/dev/stderr"
-
-    local cmd_output=""
-    local cmd_status=1
-
-    if command -v aws &> /dev/null; then
-        if command -v jq &> /dev/null; then
-            if { cmd_output=$(aws s3api list-objects-v2 \
-                --bucket "$S3_BUCKET_NAME" \
-                --prefix "$parent_prefix" \
-                --delimiter '/' \
-                --endpoint-url "$S3_ENDPOINT" \
-                --output json 2>&1); }; then
-                cmd_status=0
-            else
-                cmd_status=$?
-                log_and_display "${RED}S3/R2 列表失败 (awscli 执行错误)！请检查命令或网络。错误: ${cmd_output}${NC}" "" "/dev/stderr"
-                unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
-                return 1
-            fi
-
-            if [ "$cmd_status" -eq 0 ]; then
-                # --- MODIFIED: Check for API-level errors in the JSON response ---
-                if [[ $(echo "$cmd_output" | jq 'has("Error")') == "true" && $(echo "$cmd_output" | jq '.Error | select(. != null)') != "null" ]]; then
-                    local error_code=$(echo "$cmd_output" | jq -r '.Error.Code')
-                    local error_message=$(echo "$cmd_output" | jq -r '.Error.Message')
-                    log_and_display "${RED}S3/R2 API 返回错误！\n代码: ${error_code}\n消息: ${error_message}${NC}" "" "/dev/stderr"
-                    log_and_display "${YELLOW}请检查您的 Access Key, Secret Key, 桶名, 和存储桶权限。${NC}" "" "/dev/stderr"
-                    unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
-                    return 1
-                fi
-
-                # Continue with normal parsing if no error
-                local folders_json=$(echo "$cmd_output" | jq -r '.CommonPrefixes[].Prefix | select(. != null)' 2>/dev/null)
-                local files_json=$(echo "$cmd_output" | jq -r '.Contents[].Key | select(. != null)' 2>/dev/null)
-                
-                if [[ -n "$folders_json" ]]; then
-                    mapfile -t -O "${#contents[@]}" contents <<< "$(echo "$folders_json" | sed "s|^${parent_prefix}||" | sed 's|/$||' | grep -E '\S' | awk '{print $1" (文件夹)"}')"
-                fi
-                
-                if [[ -n "$files_json" ]]; then
-                    mapfile -t -O "${#contents[@]}" contents <<< "$(echo "$files_json" | sed "s|^${parent_prefix}||" | grep -E '\S' | awk '{print $1" (文件)"}' | grep -vF "${parent_prefix%/}" | grep -v '^$' | grep -v '^\.\.?$')"
-                fi
-
-                IFS=$'\n' contents=($(sort <<<"${contents[*]}"))
-                unset IFS
-                result_status=0
-            fi
-        else 
-            log_and_display "${RED}S3/R2 列表功能需要 'jq'，请安装。例如: sudo apt install jq${NC}" "" "/dev/stderr"
-            return 1
-        fi
-    else
-        log_and_display "${RED}未找到 'awscli' 命令，无法列出 S3/R2 文件夹和文件。${NC}" "" "/dev/stderr"
-    fi
-    unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
-
-    printf '%s\n' "${contents[@]}"
-    return "$result_status"
-}
-
-
-# Test WebDAV connection
-test_webdav_connection() {
-    if [[ -z "$WEBDAV_URL" || -z "$WEBDAV_USERNAME" || -z "$WEBDAV_PASSWORD" ]]; then
-        log_and_display "${RED}WebDAV 配置不完整，无法测试连接。请先填写 URL, 用户名和密码。${NC}" "" "/dev/stderr"
-        return 1
-    fi
-
-    log_and_display "正在测试 WebDAV 连接到：${WEBDAV_URL}..." "${BLUE}" "/dev/stderr"
-
-    # 使用 PROPFIND 方法测试连接，并检查 HTTP 状态码
-    local http_code=$(curl -s -o /dev/null -w "%{http_code}" -L -k --user "$WEBDAV_USERNAME:$WEBDAV_PASSWORD" --request PROPFIND --header "Depth: 1" "${WEBDAV_URL%/}/" 2>/dev/null)
-    local curl_status=$? # 获取 curl 的退出状态码
-
-    if [ "$curl_status" -eq 0 ] && [[ "$http_code" -ge 200 && "$http_code" -lt 300 ]]; then
-        log_and_display "${GREEN}WebDAV 连接成功！ (HTTP状态码: ${http_code})${NC}" "" "/dev/stderr"
-        return 0
-    else
-        log_and_display "${RED}WebDAV 连接失败！HTTP状态码: ${http_code}。请检查配置、凭证和网络连接。${NC}" "" "/dev/stderr"
-        log_and_display "${RED}Curl 错误码: ${curl_status}。${NC}" "" "/dev/stderr"
-        return 1
-    fi
-}
-
-# MODIFIED: Added URL decoding and robust parent filtering using xmllint
-get_webdav_direct_contents() {
-    local current_full_url="$1"
+toggle_integrity_check() {
+    display_header
+    echo -e "${BLUE}--- 备份后完整性校验 ---${NC}"
+    echo "开启后，在“归档模式”下每次上传文件成功后，会额外执行一次校验，确保云端文件未损坏。"
+    echo -e "${YELLOW}这会增加备份时间，但能极大地提升数据可靠性。${NC}"
     
-    log_and_display "正在获取 WebDAV 服务器中 '${current_full_url}' 的子文件夹和文件列表..." "${BLUE}" "/dev/stderr"
-    local contents=()
-    local curl_output=""
-    local result_status=1
-
-    if { curl_output=$(curl -s -L -k --user "$WEBDAV_USERNAME:$WEBDAV_PASSWORD" --request PROPFIND --header "Depth: 1" "$current_full_url" 2>&1); } then
-        result_status=0
-    else
-        result_status=$?
-        log_and_display "${RED}WebDAV 列表失败！错误: ${curl_output}${NC}" "" "/dev/stderr"
-        return 1
+    local check_status="已开启"
+    if [[ "$ENABLE_INTEGRITY_CHECK" != "true" ]]; then
+        check_status="已关闭"
     fi
-
-    if [ "$result_status" -eq 0 ] && [[ -n "$curl_output" ]]; then
-        # Decode the URL we used for the request, for accurate comparison.
-        local decoded_request_url
-        decoded_request_url=$(url_decode "$current_full_url")
-        local decoded_request_path_no_slash="${decoded_request_url%/}"
-        
-        # Use xmllint to reliably parse the XML and extract hrefs
-        local href_list
-        href_list=$(echo "$curl_output" | xmllint --xpath "//*[local-name()='response']/*[local-name()='href']/text()" - 2>/dev/null)
-
-        while IFS= read -r href_encoded; do
-            local decoded_href
-            decoded_href=$(url_decode "$href_encoded")
-            local decoded_href_no_slash="${decoded_href%/}"
-
-            # CRITICAL FIX: Skip the parent directory itself by comparing full decoded paths.
-            if [[ "$decoded_href_no_slash" == "$decoded_request_path_no_slash" ]]; then
-                continue
-            fi
-            
-            # CRITICAL FIX: Extract just the basename reliably.
-            local display_name
-            display_name=$(basename "$decoded_href_no_slash")
-            
-            if [[ -z "$display_name" ]]; then
-                continue
-            fi
-
-            if [[ "$decoded_href" =~ /$ ]]; then # It's a directory
-                contents+=("${display_name} (文件夹)")
-            else # It's a file
-                contents+=("${display_name} (文件)")
-            fi
-        done <<< "$href_list"
-    else
-        log_and_display "${YELLOW}WebDAV 路径 '${current_full_url}' 下没有检测到子文件夹或文件。${NC}" "" "/dev/stderr"
-    fi
+    echo -e "当前状态: ${GREEN}${check_status}${NC}"
     
-    IFS=$'\n' contents=($(sort <<<"${contents[*]}"))
-    unset IFS
-    printf '%s\n' "${contents[@]}"
-    return 0
-}
-
-
-# ================================================================
-# ===         FTP/FTPS/SFTP Functions (REVISED)           ===
-# ================================================================
-
-# --- FTP Functions ---
-
-test_ftp_connection() {
-    if [[ -z "$FTP_HOST" || -z "$FTP_USERNAME" || -z "$FTP_PASSWORD" ]]; then
-        log_and_display "${RED}FTP 配置不完整，无法测试连接。${NC}" "" "/dev/stderr"; return 1;
-    fi
-    log_and_display "正在测试 FTP 连接到：${FTP_HOST}:${FTP_PORT}..." "${BLUE}" "/dev/stderr"
-    local lftp_output
-    if ! lftp_output=$(lftp -p "$FTP_PORT" -u "$FTP_USERNAME,$FTP_PASSWORD" "$FTP_HOST" -e "set net:timeout 15; set ftp:passive-mode true; cls -F /; quit" 2>&1); then
-        log_and_display "${RED}FTP 连接失败！错误: ${lftp_output}${NC}" "" "/dev/stderr"; return 1;
-    fi
-    log_and_display "${GREEN}FTP 连接成功！${NC}" "" "/dev/stderr"; return 0;
-}
-
-# MODIFIED: Changed lftp command to `cd` then `cls` for reliability
-get_ftp_direct_contents() {
-    local host="$1" user="$2" pass="$3" port="$4" parent_path="$5"
-    if [[ "$parent_path" != "/" && "${parent_path: -1}" != "/" ]]; then parent_path="${parent_path}/"; fi
-    log_and_display "正在获取 FTP 服务器中 '${parent_path}' 的子文件夹和文件列表..." "${BLUE}" "/dev/stderr"
-    
-    local lftp_output
-    local result_status=1
-    
-    if { lftp_output=$(lftp -p "$port" -u "$user,$pass" "$host" <<EOF
-set net:timeout 15
-set ftp:passive-mode true
-cd "$parent_path"
-cls -F
-quit
-EOF
-    2>&1); }; then
-        result_status=0
-    else
-        result_status=$?
-        log_and_display "${RED}FTP 列表失败。错误: ${lftp_output}${NC}" "" "/dev/stderr"
-        return 1
-    fi
-
-    local contents=()
-    if [ "$result_status" -eq 0 ] && [[ -n "$lftp_output" ]]; then
-        while IFS= read -r line; do
-            # Filter out lftp's own messages
-            if echo "$line" | grep -qvE '^(cd ok|quit|cls)'; then
-                local cleaned_name="${line%/}" # Remove trailing slash if it's a directory
-                if [[ -z "$cleaned_name" || "$cleaned_name" == "." || "$cleaned_name" == ".." ]]; then continue; fi
-                if [[ "$line" =~ /$ ]]; then 
-                    contents+=("${cleaned_name} (文件夹)")
-                else 
-                    contents+=("${cleaned_name} (文件)")
-                fi
-            fi
-        done <<< "$lftp_output"
-    fi
-
-    if [ ${#contents[@]} -eq 0 ]; then log_and_display "${YELLOW}FTP 路径 '${parent_path}' 下无内容。${NC}" "" "/dev/stderr"; fi
-    IFS=$'\n' contents=($(sort <<<"${contents[*]}")); unset IFS; printf '%s\n' "${contents[@]}"; return 0
-}
-
-# --- FTPS Functions ---
-
-test_ftps_connection() {
-    if [[ -z "$FTPS_HOST" || -z "$FTPS_USERNAME" || -z "$FTPS_PASSWORD" ]]; then
-        log_and_display "${RED}FTPS 配置不完整，无法测试连接。请先填写主机、用户名和密码。${NC}" "" "/dev/stderr"
-        return 1
-    fi
-
-    log_and_display "正在测试 FTPS 连接到：${FTPS_HOST}:${FTPS_PORT} (使用显式加密模式)..." "${BLUE}" "/dev/stderr"
-
-    local lftp_output=""
-    local lftp_status=1
-
-    # 使用修正后的 lftp 命令
-    if { lftp_output=$(lftp -p "$FTPS_PORT" -u "$FTPS_USERNAME,$FTPS_PASSWORD" "$FTPS_HOST" <<EOF
-# --- 调试选项 (如果仍然失败，取消下面一行的注释以获取详细日志) ---
-# debug 3
-
-# --- 兼容性与连接设置 ---
-set net:timeout 20       # 增加网络操作超时
-set net:reconnect-interval-base 5  # 设置重连间隔
-
-# --- FTPS 核心设置 (显式模式 Explicit-Mode) ---
-# 启用被动模式，这对于防火墙/NAT环境至关重要
-set ftp:passive-mode true
-
-# 关键设置: 允许并优先使用 AUTH TLS 启动加密。这是最常见的显式FTPS模式。
-set ftp:ssl-allow true
-
-# 加密数据传输通道 (PROT P)
-set ftp:ssl-protect-data true
-
-# (可选) 如果服务器需要特定的TLS版本，可以取消注释并修改
-# set ssl:priority "NORMAL:%VERS-TLS1.2"
-
-# [重要] 忽略证书验证。如果服务器使用自签名或无效证书，则必须设置为 'no'
-set ssl:verify-certificate no
-
-# --- 命令执行 ---
-cls -F /  # 使用 cls -F / 代替 ls，获取更简洁的列表
-quit
-EOF
-    2>&1); }; then
-        lftp_status=0
-    else
-        lftp_status=$?
-    fi
-
-    if [ "$lftp_status" -eq 0 ]; then
-        log_and_display "${GREEN}FTPS 连接成功！${NC}" "" "/dev/stderr"
-        return 0
-    else
-        log_and_display "${RED}FTPS 连接失败！请检查配置、凭证、端口和网络连接。${NC}" "" "/dev/stderr"
-        log_and_display "${RED}lftp 错误输出: ${lftp_output}${NC}" "" "/dev/stderr"
-        log_and_display "${YELLOW}提示: 如果服务器是老旧的隐式(Implicit)FTPS(通常在端口990)，请在配置中修改端口为990，并在lftp命令中使用 'ftps://${FTPS_HOST}' 代替 '${FTPS_HOST}'。${NC}" "" "/dev/stderr"
-        return 1
-    fi
-}
-
-# MODIFIED: Changed lftp command to `cd` then `cls` for reliability
-get_ftps_direct_contents() {
-    local host="$1" user="$2" pass="$3" port="$4" parent_path="$5"
-    if [[ "$parent_path" != "/" && "${parent_path: -1}" != "/" ]]; then
-        parent_path="${parent_path}/"
-    fi
-
-    log_and_display "正在获取 FTPS 服务器中 '${parent_path}' 的子文件夹和文件列表..." "${BLUE}" "/dev/stderr"
-    local contents=()
-    local lftp_output=""
-    local result_status=1
-
-    # 使用与 test_ftps_connection 相同的健壮 lftp 配置
-    if { lftp_output=$(lftp -p "$port" -u "$user,$pass" "$host" <<EOF
-set net:timeout 20
-set ftp:passive-mode true
-set ftp:ssl-allow true
-set ftp:ssl-protect-data true
-set ssl:verify-certificate no
-cd "$parent_path"
-cls -F
-quit
-EOF
-    2>&1); }; then
-        result_status=0
-    else
-        result_status=$?
-        log_and_display "${RED}FTPS 连接失败或路径 '${parent_path}' 无效，无法获取子文件夹或文件列表。错误: ${lftp_output}${NC}" "" "/dev/stderr"
-        return 1
-    fi
-
-    # 后续的解析逻辑
-    if [ "$result_status" -eq 0 ] && [[ -n "$lftp_output" ]]; then
-        while IFS= read -r line; do
-            # Filter out lftp's own messages
-            if echo "$line" | grep -qvE '^(cd ok|quit|cls)'; then
-                local cleaned_name=$(echo "$line" | sed 's|/$||') # Remove trailing slash if it's a directory
-                if [[ "$cleaned_name" == "." || "$cleaned_name" == ".." || -z "$cleaned_name" ]]; then
-                    continue
-                fi
-                if [[ "$line" =~ /$ ]]; then
-                    contents+=("${cleaned_name} (文件夹)")
-                else
-                    contents+=("${cleaned_name} (文件)")
-                fi
-            fi
-        done <<< "$lftp_output"
-    fi
-    
-    if [ ${#contents[@]} -eq 0 ] && [ "$result_status" -eq 0 ]; then
-         log_and_display "${YELLOW}FTPS 路径 '${parent_path}' 下没有检测到子文件夹或文件。${NC}" "" "/dev/stderr"
-    fi
-
-    IFS=$'\n' contents=($(sort <<<"${contents[*]}"))
-    unset IFS
-    printf '%s\n' "${contents[@]}"
-    return 0
-}
-
-# --- SFTP Functions ---
-
-test_sftp_connection() {
-    if [[ -z "$SFTP_HOST" || -z "$SFTP_USERNAME" ]]; then # Password can be empty for key auth
-        log_and_display "${RED}SFTP 配置不完整，无法测试连接。${NC}" "" "/dev/stderr"; return 1;
-    fi
-    log_and_display "正在测试 SFTP 连接到：${SFTP_USERNAME}@${SFTP_HOST}:${SFTP_PORT}..." "${BLUE}" "/dev/stderr"
-    log_and_display "${YELLOW}注意: lftp 会自动尝试密钥和密码认证。如果首次连接，请手动 'sftp -p ${SFTP_PORT} ${SFTP_USERNAME}@${SFTP_HOST}' 接受主机密钥。${NC}" "" "/dev/stderr"
-    local lftp_output
-    if ! lftp_output=$(lftp -p "$SFTP_PORT" -u "$SFTP_USERNAME,$SFTP_PASSWORD" "sftp://$SFTP_HOST" -e "set net:timeout 15; set sftp:auto-confirm yes; cls -F /; quit" 2>&1); then
-        log_and_display "${RED}SFTP 连接失败！错误: ${lftp_output}${NC}" "" "/dev/stderr"; return 1;
-    fi
-    log_and_display "${GREEN}SFTP 连接成功！${NC}" "" "/dev/stderr"; return 0;
-}
-
-# MODIFIED: Changed lftp command to `cd` then `cls` for reliability
-get_sftp_direct_contents() {
-    local host="$1" user="$2" pass="$3" port="$4" parent_path="$5"
-    if [[ "$parent_path" != "/" && "${parent_path: -1}" != "/" ]]; then parent_path="${parent_path}/"; fi
-    log_and_display "正在获取 SFTP 服务器中 '${parent_path}' 的子文件夹和文件列表..." "${BLUE}" "/dev/stderr"
-
-    local lftp_output
-    local result_status=1
-
-    if { lftp_output=$(lftp -p "$port" -u "$user,$pass" "sftp://$host" <<EOF
-set net:timeout 15
-set sftp:auto-confirm yes
-cd "$parent_path"
-cls -F
-quit
-EOF
-    2>&1); }; then
-        result_status=0
-    else
-        result_status=$?
-        log_and_display "${RED}SFTP 列表失败。错误: ${lftp_output}${NC}" "" "/dev/stderr"; return 1;
-    fi
-    
-    local contents=()
-    if [ "$result_status" -eq 0 ] && [[ -n "$lftp_output" ]]; then
-        while IFS= read -r line; do
-            # Filter out lftp's own messages
-            if echo "$line" | grep -qvE '^(cd ok|quit|cls)'; then
-                local cleaned_name="${line%/}" # Remove trailing slash if it's a directory
-                if [[ -z "$cleaned_name" || "$cleaned_name" == "." || "$cleaned_name" == ".." ]]; then continue; fi
-                if [[ "$line" =~ /$ ]]; then 
-                    contents+=("${cleaned_name} (文件夹)")
-                else 
-                    contents+=("${cleaned_name} (文件)")
-                fi
-            fi
-        done <<< "$lftp_output"
-    fi
-
-    if [ ${#contents[@]} -eq 0 ]; then log_and_display "${YELLOW}SFTP 路径 '${parent_path}' 下无内容。${NC}" "" "/dev/stderr"; fi
-    IFS=$'\n' contents=($(sort <<<"${contents[*]}")); unset IFS; printf '%s\n' "${contents[@]}"; return 0;
-}
-
-
-# ================================================================
-# ===         增强型路径选择函数 (交互式浏览)                  ===
-# ================================================================
-
-# MODIFIED: Refactored to use realpath for robust path manipulation
-choose_s3_r2_path() {
-    local initial_path="${S3_BACKUP_PATH:-/}"
-    local current_remote_path="$initial_path"
-    local final_selected_path=""
-
-    while true; do
-        # --- FIX: NORMALIZE PATH using realpath -m ---
-        current_remote_path=$(realpath -m "$current_remote_path")
-        if [[ "$current_remote_path" != "/" && "${current_remote_path: -1}" != "/" ]]; then
-            current_remote_path="${current_remote_path}/"
-        fi
-
-        display_header
-        echo -e "${BLUE}=== 设置 S3/R2 备份目标路径 ===${NC}"
-        echo -e "当前浏览路径: ${YELLOW}${current_remote_path:-/}${NC}\n"
-
-        # S3 prefixes don't usually start with /
-        local s3_display_path="${current_remote_path#/}"
-        local remote_contents_str=$(get_s3_r2_direct_contents "$s3_display_path")
-        local get_contents_status=$?
-        local remote_contents_array=()
-
-        if [ "$get_contents_status" -ne 0 ]; then
-            log_and_display "${RED}获取 S3/R2 文件夹和文件列表失败，请检查配置或重试。${NC}"
-            press_enter_to_continue
-            continue
-        elif [[ -n "$remote_contents_str" ]]; then
-            mapfile -t remote_contents_array <<< "$remote_contents_str"
-        fi
-
-        if [ ${#remote_contents_array[@]} -gt 0 ]; then
-            echo "当前目录内容 (文件夹和文件):"
-            for i in "${!remote_contents_array[@]}"; do
-                echo "  $((i+1)). ${remote_contents_array[$i]}"
-            done
-            echo ""
+    read -rp "您想切换状态吗？ (y/N): " choice
+    if [[ "$choice" =~ ^[Yy]$ ]]; then
+        if [[ "$ENABLE_INTEGRITY_CHECK" == "true" ]]; then
+            ENABLE_INTEGRITY_CHECK="false"
+            log_warn "完整性校验已关闭。"
         else
-            echo "当前路径下没有检测到子文件夹或文件。"
+            ENABLE_INTEGRITY_CHECK="true"
+            log_info "完整性校验已开启。"
         fi
-
-        echo -e "${BLUE}------------------------------------------------${NC}"
-        echo "操作选项:"
-        if [[ "$current_remote_path" != "/" ]]; then
-            echo -e "  ${GREEN}m${NC} - 返回上一级目录"
-        fi
-        echo -e "  ${GREEN}k${NC} - 将当前路径 '${current_remote_path:-/}' 设置为备份目标"
-        echo -e "  ${GREEN}a${NC} - 手动输入一个新的路径 (绝对路径或相对于当前路径)"
-        echo -e "  ${GREEN}x${NC} - 取消并返回上一级菜单"
-        echo -e "${BLUE}------------------------------------------------${NC}"
-
-        read -rp "请输入您的选择 (数字或字母): " choice
-
-        case "$choice" in
-            "m" | "M" )
-                if [[ "$current_remote_path" != "/" ]]; then
-                    current_remote_path=$(realpath -m "${current_remote_path}/../")
-                    log_and_display "已返回上一级目录: ${current_remote_path}" "${BLUE}"
-                else
-                    log_and_display "${YELLOW}已在根目录，无法返回上一级。${NC}"
-                fi
-                press_enter_to_continue
-                ;;
-            [0-9]* )
-                if [ "$choice" -ge 1 ] && [ "$choice" -le ${#remote_contents_array[@]} ]; then
-                    local chosen_item_with_type="${remote_contents_array[$((choice-1))]}"
-                    if echo "$chosen_item_with_type" | grep -q " (文件夹)$"; then
-                        local chosen_folder="$(echo "$chosen_item_with_type" | sed 's/\ (文件夹)$//')"
-                        current_remote_path="${current_remote_path}${chosen_folder}/"
-                        log_and_display "已进入目录..." "${GREEN}"
-                    else
-                        log_and_display "${YELLOW}您选择的是一个文件，不能进入。请选择一个文件夹或按 'k' 键确认当前目录。${NC}"
-                        press_enter_to_continue
-                    fi
-                else
-                    log_and_display "${RED}无效的数字序号，请重新输入。${NC}"
-                    press_enter_to_continue
-                fi
-                ;;
-            [kK] )
-                final_selected_path="$current_remote_path"
-                break
-                ;;
-            [aA] )
-                read -rp "请输入新的 S3/R2 目标路径（绝对路径或相对于 '${current_remote_path:-/}'）：" new_path_input
-                if [[ ! "$new_path_input" =~ ^/ ]]; then
-                    new_path_input="${current_remote_path}${new_path_input}"
-                fi
-                final_selected_path=$(realpath -m "$new_path_input")
-                if [[ "$final_selected_path" != "/" && "${final_selected_path: -1}" != "/" ]]; then
-                    final_selected_path="${final_selected_path}/"
-                fi
-                break
-                ;;
-            [xX] )
-                log_and_display "取消设置 S3/R2 备份路径。" "${BLUE}"
-                return 1
-                ;;
-            * )
-                log_and_display "${RED}无效的输入，请重新输入。${NC}"
-                press_enter_to_continue
-                ;;
-        esac
-    done
-
-    local display_path_confirm="${final_selected_path:-/ (根目录)}"
-    read -rp "最终确认您选择的 S3/R2 目标路径是 '${display_path_confirm}'。确认吗？(y/N): " confirm_path
-    if [[ "$confirm_path" =~ ^[Yy]$ ]]; then
-        # S3_BACKUP_PATH should not start with a leading slash for awscli compatibility, but keep it for display consistency
-        S3_BACKUP_PATH="${final_selected_path%/}/"
-        if [[ "$S3_BACKUP_PATH" == "//" ]]; then S3_BACKUP_PATH="/"; fi
-        log_and_display "${GREEN}S3/R2 备份路径已设置为：${display_path_confirm}${NC}"
-        return 0
+        save_config
     else
-        log_and_display "${YELLOW}取消设置，请重新选择。${NC}"
-        return 1
+        log_info "状态未改变。"
     fi
+    press_enter_to_continue
 }
 
 
-# MODIFIED: Refactored to use realpath for robust path manipulation and URL cleaning
-choose_webdav_path() {
-    local initial_path="${WEBDAV_BACKUP_PATH:-/}"
-    local current_remote_path="$initial_path"
-    local final_selected_path=""
-    local base_webdav_url="${WEBDAV_URL%/}" # Get base URL once, remove trailing slash
-
-    while true; do
-        # --- FIX: NORMALIZE PATH using realpath -m at the start of each loop ---
-        current_remote_path=$(realpath -m "$current_remote_path")
-        if [[ "$current_remote_path" != "/" && "${current_remote_path: -1}" != "/" ]]; then
-            current_remote_path="${current_remote_path}/"
-        fi
-
-        display_header
-        echo -e "${BLUE}=== 设置 WebDAV 备份目标路径 ===${NC}"
-        echo -e "当前浏览路径: ${YELLOW}${current_remote_path:-/}${NC}\n"
-
-        # --- FIX: Construct clean URL robustly ---
-        # Combine base URL with the canonical path, then clean up any double slashes
-        local full_url="${base_webdav_url}${current_remote_path}"
-        # Use perl for a negative lookbehind to avoid mangling "https://", then clean multiple slashes
-        if command -v perl &> /dev/null; then
-            full_url=$(echo "$full_url" | perl -pe 's,(?<!:)/+,/,g')
-        else # Fallback for systems without perl
-            full_url=$(echo "$full_url" | sed -e 's|[^:]//|/|g')
-        fi
-        
-        local remote_contents_str
-        remote_contents_str=$(get_webdav_direct_contents "$full_url")
-        local get_contents_status=$?
-        local remote_contents_array=()
-
-        if [ "$get_contents_status" -ne 0 ]; then
-            log_and_display "${RED}获取 WebDAV 文件夹和文件列表失败，请检查配置或重试。${NC}"
-            press_enter_to_continue
-            continue
-        elif [[ -n "$remote_contents_str" ]]; then
-            mapfile -t remote_contents_array <<< "$remote_contents_str"
-        fi
-
-
-        if [ ${#remote_contents_array[@]} -gt 0 ]; then
-            echo "当前目录内容 (文件夹和文件):"
-            for i in "${!remote_contents_array[@]}"; do
-                echo "  $((i+1)). ${remote_contents_array[$i]}"
-            done
-            echo ""
-        else
-            echo "当前路径下没有检测到子文件夹或文件。"
-        fi
-
-        echo -e "${BLUE}------------------------------------------------${NC}"
-        echo "操作选项:"
-        if [[ "$current_remote_path" != "/" ]]; then
-            echo -e "  ${GREEN}m${NC} - 返回上一级目录"
-        fi
-        echo -e "  ${GREEN}k${NC} - 将当前路径 '${current_remote_path:-/}' 设置为备份目标"
-        echo -e "  ${GREEN}a${NC} - 手动输入一个新的路径 (绝对路径或相对于当前路径)"
-        echo -e "  ${GREEN}x${NC} - 取消并返回上一级菜单"
-        echo -e "${BLUE}------------------------------------------------${NC}"
-
-        read -rp "请输入您的选择 (数字或字母): " choice
-
-        case "$choice" in
-            "m" | "M" )
-                if [[ "$current_remote_path" != "/" ]]; then
-                    current_remote_path=$(realpath -m "${current_remote_path}/../")
-                    log_and_display "已返回上一级目录: ${current_remote_path}" "${BLUE}"
-                else
-                    log_and_display "${YELLOW}已在根目录，无法返回上一级。${NC}"
-                fi
-                press_enter_to_continue
-                ;;
-            [0-9]* )
-                if [ "$choice" -ge 1 ] && [ "$choice" -le ${#remote_contents_array[@]} ]; then
-                    local chosen_item_with_type="${remote_contents_array[$((choice-1))]}"
-                    if echo "$chosen_item_with_type" | grep -q " (文件夹)$"; then
-                        local chosen_folder="$(echo "$chosen_item_with_type" | sed 's/\ (文件夹)$//')"
-                        current_remote_path="${current_remote_path}${chosen_folder}/"
-                        log_and_display "已进入目录..." "${GREEN}"
-                    else
-                        log_and_display "${YELLOW}您选择的是一个文件，不能进入。请选择一个文件夹或按 'k' 键确认当前目录。${NC}"
-                        press_enter_to_continue
-                    fi
-                else
-                    log_and_display "${RED}无效的数字序号，请重新输入。${NC}"
-                    press_enter_to_continue
-                fi
-                ;;
-            [kK] )
-                final_selected_path="$current_remote_path"
-                break
-                ;;
-            [aA] )
-                read -rp "请输入新的 WebDAV 目标路径（绝对路径或相对于 '${current_remote_path:-/}'）：" new_path_input
-                if [[ ! "$new_path_input" =~ ^/ ]]; then
-                    new_path_input="${current_remote_path}${new_path_input}"
-                fi
-                final_selected_path=$(realpath -m "$new_path_input")
-                if [[ "$final_selected_path" != "/" && "${final_selected_path: -1}" != "/" ]]; then
-                    final_selected_path="${final_selected_path}/"
-                fi
-                break
-                ;;
-            [xX] )
-                log_and_display "取消设置 WebDAV 备份路径。" "${BLUE}"
-                return 1
-                ;;
-            * )
-                log_and_display "${RED}无效的输入，请重新输入。${NC}"
-                press_enter_to_continue
-                ;;
-        esac
-    done
-
-    local display_path_confirm="${final_selected_path:-/ (根目录)}"
-    read -rp "最终确认您选择的 WebDAV 目标路径是 '${display_path_confirm}'。确认吗？(y/N): " confirm_path
-    if [[ "$confirm_path" =~ ^[Yy]$ ]]; then
-        WEBDAV_BACKUP_PATH="$final_selected_path"
-        log_and_display "${GREEN}WebDAV 备份路径已设置为：${display_path_confirm}${NC}"
-        return 0
-    else
-        log_and_display "${YELLOW}取消设置，请重新选择。${NC}"
-        return 1
-    fi
-}
-
-# MODIFIED: Refactored to use realpath for robust path manipulation
-choose_ftp_path() {
-    local initial_path="${FTP_BACKUP_PATH:-/}"
-    local current_remote_path="$initial_path"
-    local final_selected_path=""
-
-    while true; do
-        # --- FIX: NORMALIZE PATH using realpath -m ---
-        current_remote_path=$(realpath -m "$current_remote_path")
-        if [[ "$current_remote_path" != "/" && "${current_remote_path: -1}" != "/" ]]; then
-            current_remote_path="${current_remote_path}/"
-        fi
-        
-        display_header
-        echo -e "${BLUE}=== 设置 FTP 备份目标路径 ===${NC}"
-        echo -e "当前浏览路径: ${YELLOW}${current_remote_path:-/}${NC}\n"
-
-        local remote_contents_str=$(get_ftp_direct_contents "$FTP_HOST" "$FTP_USERNAME" "$FTP_PASSWORD" "$FTP_PORT" "$current_remote_path")
-        local get_contents_status=$?
-        local remote_contents_array=()
-
-        if [ "$get_contents_status" -ne 0 ]; then
-            log_and_display "${RED}获取 FTP 文件夹和文件列表失败，请检查配置或重试。${NC}"
-            press_enter_to_continue
-            continue
-        elif [[ -n "$remote_contents_str" ]]; then
-            mapfile -t remote_contents_array <<< "$remote_contents_str"
-        fi
-
-        if [ ${#remote_contents_array[@]} -gt 0 ]; then
-            echo "当前目录内容 (文件夹和文件):"
-            for i in "${!remote_contents_array[@]}"; do
-                echo "  $((i+1)). ${remote_contents_array[$i]}"
-            done
-            echo ""
-        else
-            echo "当前路径下没有检测到子文件夹或文件。"
-        fi
-
-        echo -e "${BLUE}------------------------------------------------${NC}"
-        echo "操作选项:"
-        if [[ "$current_remote_path" != "/" ]]; then
-            echo -e "  ${GREEN}m${NC} - 返回上一级目录"
-        fi
-        echo -e "  ${GREEN}k${NC} - 将当前路径 '${current_remote_path:-/}' 设置为备份目标"
-        echo -e "  ${GREEN}a${NC} - 手动输入一个新的路径 (绝对路径或相对于当前路径)"
-        echo -e "  ${GREEN}x${NC} - 取消并返回上一级菜单"
-        echo -e "${BLUE}------------------------------------------------${NC}"
-
-        read -rp "请输入您的选择 (数字或字母): " choice
-
-        case "$choice" in
-            "m" | "M" )
-                if [[ "$current_remote_path" != "/" ]]; then
-                    current_remote_path=$(realpath -m "${current_remote_path}/../")
-                    log_and_display "已返回上一级目录: ${current_remote_path}" "${BLUE}"
-                else
-                    log_and_display "${YELLOW}已在根目录，无法返回上一级。${NC}"
-                fi
-                press_enter_to_continue
-                ;;
-            [0-9]* )
-                if [ "$choice" -ge 1 ] && [ "$choice" -le ${#remote_contents_array[@]} ]; then
-                    local chosen_item_with_type="${remote_contents_array[$((choice-1))]}"
-                    if echo "$chosen_item_with_type" | grep -q " (文件夹)$"; then
-                        local chosen_folder="$(echo "$chosen_item_with_type" | sed 's/\ (文件夹)$//')"
-                        current_remote_path="${current_remote_path}${chosen_folder}/"
-                        log_and_display "已进入目录..." "${GREEN}"
-                    else
-                        log_and_display "${YELLOW}您选择的是一个文件，不能进入。请选择一个文件夹或按 'k' 键确认当前目录。${NC}"
-                        press_enter_to_continue
-                    fi
-                else
-                    log_and_display "${RED}无效的数字序号，请重新输入。${NC}"
-                    press_enter_to_continue
-                fi
-                ;;
-            [kK] )
-                final_selected_path="$current_remote_path"
-                break
-                ;;
-            [aA] )
-                read -rp "请输入新的 FTP 目标路径（绝对路径或相对于 '${current_remote_path:-/}'）：" new_path_input
-                if [[ ! "$new_path_input" =~ ^/ ]]; then
-                    new_path_input="${current_remote_path}${new_path_input}"
-                fi
-                final_selected_path=$(realpath -m "$new_path_input")
-                if [[ "$final_selected_path" != "/" && "${final_selected_path: -1}" != "/" ]]; then
-                    final_selected_path="${final_selected_path}/"
-                fi
-                break
-                ;;
-            [xX] )
-                log_and_display "取消设置 FTP 备份路径。" "${BLUE}"
-                return 1
-                ;;
-            * )
-                log_and_display "${RED}无效的输入，请重新输入。${NC}"
-                press_enter_to_continue
-                ;;
-        esac
-    done
-
-    local display_path_confirm="${final_selected_path:-/ (根目录)}"
-    read -rp "最终确认您选择的 FTP 目标路径是 '${display_path_confirm}'。确认吗？(y/N): " confirm_path
-    if [[ "$confirm_path" =~ ^[Yy]$ ]]; then
-        FTP_BACKUP_PATH="$final_selected_path"
-        log_and_display "${GREEN}FTP 备份路径已设置为：${display_path_confirm}${NC}"
-        return 0
-    else
-        log_and_display "${YELLOW}取消设置，请重新选择。${NC}"
-        return 1
-    fi
-}
-
-# MODIFIED: Refactored to use realpath for robust path manipulation
-choose_ftps_path() {
-    local initial_path="${FTPS_BACKUP_PATH:-/}"
-    local current_remote_path="$initial_path"
-    local final_selected_path=""
-
-    while true; do
-        # --- FIX: NORMALIZE PATH using realpath -m ---
-        current_remote_path=$(realpath -m "$current_remote_path")
-        if [[ "$current_remote_path" != "/" && "${current_remote_path: -1}" != "/" ]]; then
-            current_remote_path="${current_remote_path}/"
-        fi
-
-        display_header
-        echo -e "${BLUE}=== 设置 FTPS 备份目标路径 ===${NC}"
-        echo -e "当前浏览路径: ${YELLOW}${current_remote_path:-/}${NC}\n"
-
-        local remote_contents_str=$(get_ftps_direct_contents "$FTPS_HOST" "$FTPS_USERNAME" "$FTPS_PASSWORD" "$FTPS_PORT" "$current_remote_path")
-        local get_contents_status=$?
-        local remote_contents_array=()
-
-        if [ "$get_contents_status" -ne 0 ]; then
-            log_and_display "${RED}获取 FTPS 文件夹和文件列表失败，请检查配置或重试。${NC}"
-            press_enter_to_continue
-            continue
-        elif [[ -n "$remote_contents_str" ]]; then
-            mapfile -t remote_contents_array <<< "$remote_contents_str"
-        fi
-
-
-        if [ ${#remote_contents_array[@]} -gt 0 ]; then
-            echo "当前目录内容 (文件夹和文件):"
-            for i in "${!remote_contents_array[@]}"; do
-                echo "  $((i+1)). ${remote_contents_array[$i]}"
-            done
-            echo ""
-        else
-            echo "当前路径下没有检测到子文件夹或文件。"
-        fi
-
-        echo -e "${BLUE}------------------------------------------------${NC}"
-        echo "操作选项:"
-        if [[ "$current_remote_path" != "/" ]]; then
-            echo -e "  ${GREEN}m${NC} - 返回上一级目录"
-        fi
-        echo -e "  ${GREEN}k${NC} - 将当前路径 '${current_remote_path:-/}' 设置为备份目标"
-        echo -e "  ${GREEN}a${NC} - 手动输入一个新的路径 (绝对路径或相对于当前路径)"
-        echo -e "  ${GREEN}x${NC} - 取消并返回上一级菜单"
-        echo -e "${BLUE}------------------------------------------------${NC}"
-
-        read -rp "请输入您的选择 (数字或字母): " choice
-
-        case "$choice" in
-            "m" | "M" )
-                if [[ "$current_remote_path" != "/" ]]; then
-                    current_remote_path=$(realpath -m "${current_remote_path}/../")
-                    log_and_display "已返回上一级目录: ${current_remote_path}" "${BLUE}"
-                else
-                    log_and_display "${YELLOW}已在根目录，无法返回上一级。${NC}"
-                fi
-                press_enter_to_continue
-                ;;
-            [0-9]* )
-                if [ "$choice" -ge 1 ] && [ "$choice" -le ${#remote_contents_array[@]} ]; then
-                    local chosen_item_with_type="${remote_contents_array[$((choice-1))]}"
-                    if echo "$chosen_item_with_type" | grep -q " (文件夹)$"; then
-                        local chosen_folder="$(echo "$chosen_item_with_type" | sed 's/\ (文件夹)$//')"
-                        current_remote_path="${current_remote_path}${chosen_folder}/"
-                        log_and_display "已进入目录..." "${GREEN}"
-                    else
-                        log_and_display "${YELLOW}您选择的是一个文件，不能进入。请选择一个文件夹或按 'k' 键确认当前目录。${NC}"
-                        press_enter_to_continue
-                    fi
-                else
-                    log_and_display "${RED}无效的数字序号，请重新输入。${NC}"
-                    press_enter_to_continue
-                fi
-                ;;
-            [kK] )
-                final_selected_path="$current_remote_path"
-                break
-                ;;
-            [aA] )
-                read -rp "请输入新的 FTPS 目标路径（绝对路径或相对于 '${current_remote_path:-/}'）：" new_path_input
-                if [[ ! "$new_path_input" =~ ^/ ]]; then
-                    new_path_input="${current_remote_path}${new_path_input}"
-                fi
-                final_selected_path=$(realpath -m "$new_path_input")
-                if [[ "$final_selected_path" != "/" && "${final_selected_path: -1}" != "/" ]]; then
-                    final_selected_path="${final_selected_path}/"
-                fi
-                break
-                ;;
-            [xX] )
-                log_and_display "取消设置 FTPS 备份路径。" "${BLUE}"
-                return 1
-                ;;
-            * )
-                log_and_display "${RED}无效的输入，请重新输入。${NC}"
-                press_enter_to_continue
-                ;;
-        esac
-    done
-
-    local display_path_confirm="${final_selected_path:-/ (根目录)}"
-    read -rp "最终确认您选择的 FTPS 目标路径是 '${display_path_confirm}'。确认吗？(y/N): " confirm_path
-    if [[ "$confirm_path" =~ ^[Yy]$ ]]; then
-        FTPS_BACKUP_PATH="$final_selected_path"
-        log_and_display "${GREEN}FTPS 备份路径已设置为：${display_path_confirm}${NC}"
-        return 0
-    else
-        log_and_display "${YELLOW}取消设置，请重新选择。${NC}"
-        return 1
-    fi
-}
-
-# MODIFIED: Refactored to use realpath for robust path manipulation
-choose_sftp_path() {
-    local initial_path="${SFTP_BACKUP_PATH:-/}"
-    local current_remote_path="$initial_path"
-    local final_selected_path=""
-
-    while true; do
-        # --- FIX: NORMALIZE PATH using realpath -m ---
-        current_remote_path=$(realpath -m "$current_remote_path")
-        if [[ "$current_remote_path" != "/" && "${current_remote_path: -1}" != "/" ]]; then
-            current_remote_path="${current_remote_path}/"
-        fi
-
-        display_header
-        echo -e "${BLUE}=== 设置 SFTP 备份目标路径 ===${NC}"
-        echo -e "当前浏览路径: ${YELLOW}${current_remote_path:-/}${NC}\n"
-
-        local remote_contents_str=$(get_sftp_direct_contents "$SFTP_HOST" "$SFTP_USERNAME" "$SFTP_PASSWORD" "$SFTP_PORT" "$current_remote_path")
-        local get_contents_status=$?
-        local remote_contents_array=()
-
-        if [ "$get_contents_status" -ne 0 ]; then
-            log_and_display "${RED}获取 SFTP 文件夹和文件列表失败，请检查配置或重试。${NC}"
-            press_enter_to_continue
-            continue
-        elif [[ -n "$remote_contents_str" ]]; then
-            mapfile -t remote_contents_array <<< "$remote_contents_str"
-        fi
-
-
-        if [ ${#remote_contents_array[@]} -gt 0 ]; then
-            echo "当前目录内容 (文件夹和文件):"
-            for i in "${!remote_contents_array[@]}"; do
-                echo "  $((i+1)). ${remote_contents_array[$i]}"
-            done
-            echo ""
-        else
-            echo "当前路径下没有检测到子文件夹或文件。"
-        fi
-
-        echo -e "${BLUE}------------------------------------------------${NC}"
-        echo "操作选项:"
-        if [[ "$current_remote_path" != "/" ]]; then
-            echo -e "  ${GREEN}m${NC} - 返回上一级目录"
-        fi
-        echo -e "  ${GREEN}k${NC} - 将当前路径 '${current_remote_path:-/}' 设置为备份目标"
-        echo -e "  ${GREEN}a${NC} - 手动输入一个新的路径 (绝对路径或相对于当前路径)"
-        echo -e "  ${GREEN}x${NC} - 取消并返回上一级菜单"
-        echo -e "${BLUE}------------------------------------------------${NC}"
-
-        read -rp "请输入您的选择 (数字或字母): " choice
-
-        case "$choice" in
-            "m" | "M" )
-                if [[ "$current_remote_path" != "/" ]]; then
-                    current_remote_path=$(realpath -m "${current_remote_path}/../")
-                    log_and_display "已返回上一级目录: ${current_remote_path}" "${BLUE}"
-                else
-                    log_and_display "${YELLOW}已在根目录，无法返回上一级。${NC}"
-                fi
-                press_enter_to_continue
-                ;;
-            [0-9]* )
-                if [ "$choice" -ge 1 ] && [ "$choice" -le ${#remote_contents_array[@]} ]; then
-                    local chosen_item_with_type="${remote_contents_array[$((choice-1))]}"
-                    if echo "$chosen_item_with_type" | grep -q " (文件夹)$"; then
-                        local chosen_folder="$(echo "$chosen_item_with_type" | sed 's/\ (文件夹)$//')"
-                        current_remote_path="${current_remote_path}${chosen_folder}/"
-                        log_and_display "已进入目录..." "${GREEN}"
-                    else
-                        log_and_display "${YELLOW}您选择的是一个文件，不能进入。请选择一个文件夹或按 'k' 键确认当前目录。${NC}"
-                        press_enter_to_continue
-                    fi
-                else
-                    log_and_display "${RED}无效的数字序号，请重新输入。${NC}"
-                    press_enter_to_continue
-                fi
-                ;;
-            [kK] )
-                final_selected_path="$current_remote_path"
-                break
-                ;;
-            [aA] )
-                read -rp "请输入新的 SFTP 目标路径（绝对路径或相对于 '${current_remote_path:-/}'）：" new_path_input
-                if [[ ! "$new_path_input" =~ ^/ ]]; then
-                    new_path_input="${current_remote_path}${new_path_input}"
-                fi
-                final_selected_path=$(realpath -m "$new_path_input")
-                if [[ "$final_selected_path" != "/" && "${final_selected_path: -1}" != "/" ]]; then
-                    final_selected_path="${final_selected_path}/"
-                fi
-                break
-                ;;
-            [xX] )
-                log_and_display "取消设置 SFTP 备份路径。" "${BLUE}"
-                return 1
-                ;;
-            * )
-                log_and_display "${RED}无效的输入，请重新输入。${NC}"
-                press_enter_to_continue
-                ;;
-        esac
-    done
-
-    local display_path_confirm="${final_selected_path:-/ (根目录)}"
-    read -rp "最终确认您选择的 SFTP 目标路径是 '${display_path_confirm}'。确认吗？(y/N): " confirm_path
-    if [[ "$confirm_path" =~ ^[Yy]$ ]]; then
-        SFTP_BACKUP_PATH="$final_selected_path"
-        log_and_display "${GREEN}SFTP 备份路径已设置为：${display_path_confirm}${NC}"
-        return 0
-    else
-        log_and_display "${YELLOW}取消设置，请重新选择。${NC}"
-        return 1
-    fi
-}
-
-
-# ================================================================
-# ===         云存储账号管理菜单                             ===
-# ================================================================
-
-# 管理 S3/R2 账号设置
-manage_s3_r2_account() {
-    while true; do
-        display_header
-        echo -e "${BLUE}=== 管理 S3/R2 存储账号 ===${NC}"
-        local s3_status="${RED}未配置${NC}"
-        local s3_path_status="${YELLOW}未设置目标路径${NC}"
-
-        # 判断 S3/R2 账号是否已配置
-        if [[ -n "$S3_ACCESS_KEY" && -n "$S3_SECRET_KEY" && -n "$S3_ENDPOINT" && -n "$S3_BUCKET_NAME" ]]; then
-            s3_status="${GREEN}已配置${NC} (桶: ${S3_BUCKET_NAME})"
-            if [[ -n "$S3_BACKUP_PATH" ]]; then
-                s3_path_status="${GREEN}已设置目标路径: ${S3_BACKUP_PATH}${NC}"
-            fi
-        fi
-
-        echo "当前 S3/R2 账号状态: $s3_status"
-        echo "S3/R2 目标路径状态: $s3_path_status"
-        echo ""
-        echo "1. 添加/修改 S3/R2 账号凭证"
-        echo "2. 测试 S3/R2 连接"
-        echo "3. 设置备份目标路径"
-        echo "4. 清除 S3/R2 账号配置"
-        echo "0. 返回云存储设定主菜单"
-        echo -e "${BLUE}------------------------------------------------${NC}"
-        read -rp "请输入选项: " sub_choice
-
-        case $sub_choice in
-            1)
-                log_and_display "--- 添加/修改 S3/R2 账号凭证 ---"
-                log_and_display "${YELLOW}凭证将保存到本地配置文件，请确保配置文件安全！${NC}"
-                # Changed: Do not display current Access Key directly
-                read -rp "请输入 S3/R2 Access Key ID [当前: $(if [[ -n "$S3_ACCESS_KEY" ]]; then echo "已设置"; else echo "未设置"; fi)]: " input_key
-                S3_ACCESS_KEY="${input_key:-$S3_ACCESS_KEY}" # 如果输入为空，保留当前值
-
-                # Changed: Use -s for secret key and hide current value
-                read -s -rp "请输入 S3/R2 Secret Access Key (留空不修改当前密钥): " input_secret
-                echo "" # Newline after hidden input
-                if [[ -n "$input_secret" ]]; then # Only update if new secret is provided
-                    S3_SECRET_KEY="$input_secret"
-                fi
-
-                read -rp "请输入 S3/R2 Endpoint URL (例如 Cloudflare R2 的 https://<ACCOUNT_ID>.r2.cloudflarestorage.com) [当前: ${S3_ENDPOINT}]: " input_endpoint
-                S3_ENDPOINT="${input_endpoint:-$S3_ENDPOINT}"
-
-                read -rp "请输入 S3/R2 Bucket 名称 [当前: ${S3_BUCKET_NAME}]: " input_bucket
-                S3_BUCKET_NAME="${input_bucket:-$S3_BUCKET_NAME}"
-
-                save_config
-                log_and_display "${GREEN}S3/R2 账号凭证已更新并保存。${NC}"
-                press_enter_to_continue
-                ;;
-            2)
-                test_s3_r2_connection
-                press_enter_to_continue
-                ;;
-            3)
-                # 检查凭证是否已设置 (修复了这里的逻辑错误)
-                if [[ -z "$S3_ACCESS_KEY" || -z "$S3_SECRET_KEY" || -z "$S3_ENDPOINT" || -z "$S3_BUCKET_NAME" ]]; then # 修复这里的条件：全部检查是否为空
-                    log_and_display "${RED}S3/R2 配置不完整，无法设置目标路径。请先通过选项 '1' 添加凭证。${NC}"
-                else
-                    if choose_s3_r2_path; then
-                        save_config # 仅在路径成功设置后保存
-                    fi
-                fi
-                press_enter_to_continue
-                ;;
-            4)
-                log_and_display "${YELLOW}警告：这将清除所有 S3/R2 账号配置。确定吗？(y/N)${NC}"
-                read -rp "请确认: " confirm_clear
-                if [[ "$confirm_clear" =~ ^[Yy]$ ]]; then
-                    S3_ACCESS_KEY=""
-                    S3_SECRET_KEY=""
-                    S3_ENDPOINT=""
-                    S3_BUCKET_NAME=""
-                    S3_BACKUP_PATH=""
-                    BACKUP_TARGET_S3="false" # 禁用 S3 备份
-                    save_config
-                    log_and_display "${GREEN}S3/R2 账号配置已清除。${NC}"
-                else
-                    log_and_display "取消清除 S3/R2 账号配置。" "${BLUE}"
-                fi
-                press_enter_to_continue
-                ;;
-            0)
-                log_and_display "返回云存储设定主菜单。" "${BLUE}"
-                break
-                ;;
-            *)
-                log_and_display "${RED}无效的选项，请重新输入。${NC}"
-                press_enter_to_continue
-                ;;
-        esac
-    done
-}
-
-# 管理 WebDAV 账号设置
-manage_webdav_account() {
-    while true; do
-        display_header
-        echo -e "${BLUE}=== 管理 WebDAV 存储账号 ===${NC}"
-        local webdav_status="${RED}未配置${NC}"
-        local webdav_path_status="${YELLOW}未设置目标路径${NC}"
-
-        # 判断 WebDAV 账号是否已配置
-        if [[ -n "$WEBDAV_URL" && -n "$WEBDAV_USERNAME" && -n "$WEBDAV_PASSWORD" ]]; then
-            # 隐藏密码显示
-            local display_url="${WEBDAV_URL}"
-            display_url="${display_url/:\/\/www./:\/\/\*\*\*./}"
-            webdav_status="${GREEN}已配置${NC} (URL: ${display_url} 用户名: ${WEBDAV_USERNAME})"
-            if [[ -n "$WEBDAV_BACKUP_PATH" ]]; then
-                webdav_path_status="${GREEN}已设置目标路径: ${WEBDAV_BACKUP_PATH}${NC}"
-            fi
-        fi
-
-        echo "当前 WebDAV 账号状态: $webdav_status"
-        echo "WebDAV 目标路径状态: $webdav_path_status"
-        echo ""
-        echo "1. 添加/修改 WebDAV 账号凭证"
-        echo "2. 测试 WebDAV 连接"
-        echo "3. 设置备份目标路径"
-        echo "4. 清除 WebDAV 账号配置"
-        echo "0. 返回云存储设定主菜单"
-        echo -e "${BLUE}------------------------------------------------${NC}"
-        read -rp "请输入选项: " sub_choice
-
-        case $sub_choice in
-            1)
-                log_and_display "--- 添加/修改 WebDAV 账号凭证 ---"
-                log_and_display "${YELLOW}凭证将保存到本地配置文件，请确保配置文件安全！${NC}"
-                read -rp "请输入 WebDAV URL (例如 http://your.webdav.server/path/) [当前: ${WEBDAV_URL}]: " input_url
-                WEBDAV_URL="${input_url:-$WEBDAV_URL}"
-
-                read -rp "请输入 WebDAV 用户名 [当前: ${WEBDAV_USERNAME}]: " input_username
-                WEBDAV_USERNAME="${input_username:-$WEBDAV_USERNAME}"
-
-                read -s -rp "请输入 WebDAV 密码 (留空不修改当前密码): " input_password
-                echo "" # 隐藏输入后换行
-                if [[ -n "$input_password" ]]; then # 仅在提供了新密码时才更新
-                    WEBDAV_PASSWORD="$input_password"
-                fi
-
-                save_config
-                log_and_display "${GREEN}WebDAV 账号凭证已更新并保存。${NC}"
-                press_enter_to_continue
-                ;;
-            2)
-                test_webdav_connection
-                press_enter_to_continue
-                ;;
-            3)
-                if [[ -z "$WEBDAV_URL" || -z "$WEBDAV_USERNAME" || -z "$WEBDAV_PASSWORD" ]]; then
-                    log_and_display "${RED}WebDAV 配置不完整，无法设置目标路径。请先通过选项 '1' 添加凭证。${NC}"
-                else
-                    if choose_webdav_path; then
-                        save_config # 仅在路径成功设置后保存
-                    fi
-                fi
-                press_enter_to_continue
-                ;;
-            4)
-                log_and_display "${YELLOW}警告：这将清除所有 WebDAV 账号配置。确定吗？(y/N)${NC}"
-                read -rp "请确认: " confirm_clear
-                if [[ "$confirm_clear" =~ ^[Yy]$ ]]; then
-                    WEBDAV_URL=""
-                    WEBDAV_USERNAME=""
-                    WEBDAV_PASSWORD=""
-                    WEBDAV_BACKUP_PATH=""
-                    BACKUP_TARGET_WEBDAV="false" # 禁用 WebDAV 备份
-                    save_config
-                    log_and_display "${GREEN}WebDAV 账号配置已清除。${NC}"
-                else
-                    log_and_display "取消清除 WebDAV 账号配置。" "${BLUE}"
-                fi
-                press_enter_to_continue
-                ;;
-            0)
-                log_and_display "返回云存储设定主菜单。" "${BLUE}"
-                break
-                ;;
-            *)
-                log_and_display "${RED}无效的选项，请重新输入。${NC}"
-                press_enter_to_continue
-                ;;
-        esac
-    done
-}
-
-# 管理 FTP 账号设置
-manage_ftp_account() {
-    while true; do
-        display_header
-        echo -e "${BLUE}=== 管理 FTP 存储账号 ===${NC}"
-        local ftp_status="${RED}未配置${NC}"
-        local ftp_path_status="${YELLOW}未设置目标路径${NC}"
-
-        if [[ -n "$FTP_HOST" && -n "$FTP_USERNAME" && -n "$FTP_PASSWORD" ]]; then
-            ftp_status="${GREEN}已配置${NC} (主机: ${FTP_HOST}:${FTP_PORT} 用户名: ${FTP_USERNAME})"
-            if [[ -n "$FTP_BACKUP_PATH" ]]; then
-                ftp_path_status="${GREEN}已设置目标路径: ${FTP_BACKUP_PATH}${NC}"
-            fi
-        fi
-
-        echo "当前 FTP 账号状态: $ftp_status"
-        echo "FTP 目标路径状态: $ftp_path_status"
-        echo ""
-        echo "1. 添加/修改 FTP 账号凭证"
-        echo "2. 测试 FTP 连接"
-        echo "3. 设置备份目标路径"
-        echo "4. 清除 FTP 账号配置"
-        echo "0. 返回云存储设定主菜单"
-        echo -e "${BLUE}------------------------------------------------${NC}"
-        read -rp "请输入选项: " sub_choice
-
-        case $sub_choice in
-            1)
-                log_and_display "--- 添加/修改 FTP 账号凭证 ---"
-                log_and_display "${YELLOW}凭证将保存到本地配置文件，请确保配置文件安全！${NC}"
-                read -rp "请输入 FTP 主机名 (例如 ftp.example.com) [当前: ${FTP_HOST}]: " input_host
-                FTP_HOST="${input_host:-$FTP_HOST}"
-
-                read -rp "请输入 FTP 用户名 [当前: ${FTP_USERNAME}]: " input_username
-                FTP_USERNAME="${input_username:-$FTP_USERNAME}"
-
-                read -s -rp "请输入 FTP 密码 (留空不修改当前密码): " input_password
-                echo ""
-                if [[ -n "$input_password" ]]; then
-                    FTP_PASSWORD="$input_password"
-                fi
-
-                read -rp "请输入 FTP 端口 (默认: 21) [当前: ${FTP_PORT}]: " input_port
-                FTP_PORT="${input_port:-$FTP_PORT}"
-                [[ "$FTP_PORT" =~ ^[0-9]+$ ]] || FTP_PORT=21 # 确保是数字，否则恢复默认
-
-                save_config
-                log_and_display "${GREEN}FTP 账号凭证已更新并保存。${NC}"
-                press_enter_to_continue
-                ;;
-            2)
-                test_ftp_connection
-                press_enter_to_continue
-                ;;
-            3)
-                if [[ -z "$FTP_HOST" || -z "$FTP_USERNAME" || -z "$FTP_PASSWORD" ]]; then
-                    log_and_display "${RED}FTP 配置不完整，无法设置目标路径。请先通过选项 '1' 添加凭证。${NC}"
-                else
-                    if choose_ftp_path; then
-                        save_config
-                    fi
-                fi
-                press_enter_to_continue
-                ;;
-            4)
-                log_and_display "${YELLOW}警告：这将清除所有 FTP 账号配置。确定吗？(y/N)${NC}"
-                read -rp "请确认: " confirm_clear
-                if [[ "$confirm_clear" =~ ^[Yy]$ ]]; then
-                    FTP_HOST=""
-                    FTP_USERNAME=""
-                    FTP_PASSWORD=""
-                    FTP_PORT=21
-                    FTP_BACKUP_PATH=""
-                    BACKUP_TARGET_FTP="false"
-                    save_config
-                    log_and_display "${GREEN}FTP 账号配置已清除。${NC}"
-                else
-                    log_and_display "取消清除 FTP 账号配置。" "${BLUE}"
-                fi
-                press_enter_to_continue
-                ;;
-            0)
-                log_and_display "返回云存储设定主菜单。" "${BLUE}"
-                break
-                ;;
-            *)
-                log_and_display "${RED}无效的选项，请重新输入。${NC}"
-                press_enter_to_continue
-                ;;
-        esac
-    done
-}
-
-# 管理 FTPS 账号设置
-manage_ftps_account() {
-    while true; do
-        display_header
-        echo -e "${BLUE}=== 管理 FTPS 存储账号 ===${NC}"
-        local ftps_status="${RED}未配置${NC}"
-        local ftps_path_status="${YELLOW}未设置目标路径${NC}"
-
-        if [[ -n "$FTPS_HOST" && -n "$FTPS_USERNAME" && -n "$FTPS_PASSWORD" ]]; then
-            ftps_status="${GREEN}已配置${NC} (主机: ${FTPS_HOST}:${FTPS_PORT} 用户名: ${FTPS_USERNAME})"
-            if [[ -n "$FTPS_BACKUP_PATH" ]]; then
-                ftps_path_status="${GREEN}已设置目标路径: ${FTPS_BACKUP_PATH}${NC}"
-            fi
-        fi
-
-        echo "当前 FTPS 账号状态: $ftps_status"
-        echo "FTPS 目标路径状态: $ftps_path_status"
-        echo ""
-        echo "1. 添加/修改 FTPS 账号凭证"
-        echo "2. 测试 FTPS 连接"
-        echo "3. 设置备份目标路径"
-        echo "4. 清除 FTPS 账号配置"
-        echo "0. 返回云存储设定主菜单"
-        echo -e "${BLUE}------------------------------------------------${NC}"
-        read -rp "请输入选项: " sub_choice
-
-        case $sub_choice in
-            1)
-                log_and_display "--- 添加/修改 FTPS 账号凭证 ---"
-                log_and_display "${YELLOW}凭证将保存到本地配置文件，请确保配置文件安全！${NC}"
-                read -rp "请输入 FTPS 主机名 (例如 ftps.example.com) [当前: ${FTPS_HOST}]: " input_host
-                FTPS_HOST="${input_host:-$FTPS_HOST}"
-
-                read -rp "请输入 FTPS 用户名 [当前: ${FTPS_USERNAME}]: " input_username
-                FTPS_USERNAME="${input_username:-$FTPS_USERNAME}"
-
-                read -s -rp "请输入 FTPS 密码 (留空不修改当前密码): " input_password
-                echo "" # 隐藏输入后换行
-                if [[ -n "$input_password" ]]; then # 仅在提供了新密码时才更新
-                    FTPS_PASSWORD="$input_password"
-                fi
-
-                read -rp "请输入 FTPS 端口 (默认: 21, 隐式FTPS通常为990) [当前: ${FTPS_PORT}]: " input_port
-                FTPS_PORT="${input_port:-$FTPS_PORT}"
-                [[ "$FTPS_PORT" =~ ^[0-9]+$ ]] || FTPS_PORT=21
-
-                save_config
-                log_and_display "${GREEN}FTPS 账号凭证已更新并保存。${NC}"
-                press_enter_to_continue
-                ;;
-            2)
-                test_ftps_connection
-                press_enter_to_continue
-                ;;
-            3)
-                if [[ -z "$FTPS_HOST" || -z "$FTPS_USERNAME" || -z "$FTPS_PASSWORD" ]]; then
-                    log_and_display "${RED}FTPS 配置不完整，无法设置目标路径。请先通过选项 '1' 添加凭证。${NC}"
-                else
-                    if choose_ftps_path; then
-                        save_config # 仅在路径成功设置后保存
-                    fi
-                fi
-                press_enter_to_continue
-                ;;
-            4)
-                log_and_display "${YELLOW}警告：这将清除所有 FTPS 账号配置。确定吗？(y/N)${NC}"
-                read -rp "请确认: " confirm_clear
-                if [[ "$confirm_clear" =~ ^[Yy]$ ]]; then
-                    FTPS_HOST=""
-                    FTPS_USERNAME=""
-                    FTPS_PASSWORD=""
-                    FTPS_PORT=21
-                    FTPS_BACKUP_PATH=""
-                    BACKUP_TARGET_FTPS="false"
-                    save_config
-                    log_and_display "${GREEN}FTPS 账号配置已清除。${NC}"
-                else
-                    log_and_display "取消清除 FTPS 账号配置。" "${BLUE}"
-                fi
-                press_enter_to_continue
-                ;;
-            0)
-                log_and_display "返回云存储设定主菜单。" "${BLUE}"
-                break
-                ;;
-            *)
-                log_and_display "${RED}无效的选项，请重新输入。${NC}"
-                press_enter_to_continue
-                ;;
-        esac
-    done
-}
-
-# 管理 SFTP 账号设置
-manage_sftp_account() {
-    while true; do
-        display_header
-        echo -e "${BLUE}=== 管理 SFTP 存储账号 ===${NC}"
-        local sftp_status="${RED}未配置${NC}"
-        local sftp_path_status="${YELLOW}未设置目标路径${NC}"
-
-        if [[ -n "$SFTP_HOST" && -n "$SFTP_USERNAME" ]]; then
-            sftp_status="${GREEN}已配置${NC} (主机: ${SFTP_HOST}:${SFTP_PORT} 用户名: ${SFTP_USERNAME})"
-            if [[ -n "$SFTP_BACKUP_PATH" ]]; then
-                sftp_path_status="${GREEN}已设置目标路径: ${SFTP_BACKUP_PATH}${NC}"
-            fi
-        fi
-
-        echo "当前 SFTP 账号状态: $sftp_status"
-        echo "SFTP 目标路径状态: $sftp_path_status"
-        echo ""
-        echo "1. 添加/修改 SFTP 账号凭证"
-        echo "2. 测试 SFTP 连接"
-        echo "3. 设置备份目标路径"
-        echo "4. 清除 SFTP 账号配置"
-        echo "0. 返回云存储设定主菜单"
-        echo -e "${BLUE}------------------------------------------------${NC}"
-        read -rp "请输入选项: " sub_choice
-
-        case $sub_choice in
-            1)
-                log_and_display "--- 添加/修改 SFTP 账号凭证 ---"
-                log_and_display "${YELLOW}凭证将保存到本地配置文件，请确保配置文件安全！${NC}"
-                log_and_display "${YELLOW}建议使用 SSH 密钥进行 SFTP 认证以提高安全性。${NC}"
-                read -rp "请输入 SFTP 主机名 (例如 sftp.example.com 或 192.168.1.1) [当前: ${SFTP_HOST}]: " input_host
-                SFTP_HOST="${input_host:-$SFTP_HOST}"
-
-                read -rp "请输入 SFTP 用户名 [当前: ${SFTP_USERNAME}]: " input_username
-                SFTP_USERNAME="${input_username:-$SFTP_USERNAME}"
-
-                read -s -rp "请输入 SFTP 密码或密钥密码 (若无密码认证，请留空): " input_password
-                echo ""
-                if [[ -n "$input_password" ]]; then
-                    SFTP_PASSWORD="$input_password"
-                else
-                    # Allow user to clear the password if they want to switch to key-only auth
-                    SFTP_PASSWORD=""
-                fi
-
-                read -rp "请输入 SFTP 端口 (默认: 22) [当前: ${SFTP_PORT}]: " input_port
-                SFTP_PORT="${input_port:-$SFTP_PORT}"
-                [[ "$SFTP_PORT" =~ ^[0-9]+$ ]] || SFTP_PORT=22
-
-                save_config
-                log_and_display "${GREEN}SFTP 账号凭证已更新并保存。${NC}"
-                press_enter_to_continue
-                ;;
-            2)
-                test_sftp_connection
-                press_enter_to_continue
-                ;;
-            3)
-                if [[ -z "$SFTP_HOST" || -z "$SFTP_USERNAME" ]]; then
-                    log_and_display "${RED}SFTP 配置不完整，无法设置目标路径。请先通过选项 '1' 添加凭证。${NC}"
-                else
-                    if choose_sftp_path; then
-                        save_config
-                    fi
-                fi
-                press_enter_to_continue
-                ;;
-            4)
-                log_and_display "${YELLOW}警告：这将清除所有 SFTP 账号配置。确定吗？(y/N)${NC}"
-                read -rp "请确认: " confirm_clear
-                if [[ "$confirm_clear" =~ ^[Yy]$ ]]; then
-                    SFTP_HOST=""
-                    SFTP_USERNAME=""
-                    SFTP_PASSWORD=""
-                    SFTP_PORT=22
-                    SFTP_BACKUP_PATH=""
-                    BACKUP_TARGET_SFTP="false"
-                    save_config
-                    log_and_display "${GREEN}SFTP 账号配置已清除。${NC}"
-                else
-                    log_and_display "取消清除 SFTP 账号配置。" "${BLUE}"
-                fi
-                press_enter_to_continue
-                ;;
-            0)
-                log_and_display "返回云存储设定主菜单。" "${BLUE}"
-                break
-                ;;
-            *)
-                log_and_display "${RED}无效的选项，请重新输入。${NC}"
-                press_enter_to_continue
-                ;;
-        esac
-    done
-}
-
-
-# ================================================================
-# ===         [修改后] 选择要使用的云存储目标                  ===
-# ================================================================
-select_backup_targets() {
-    while true; do
-        display_header
-        echo -e "${BLUE}=== 选择启用的云备份目标 ===${NC}"
-        echo "通过输入序号来切换对应目标的 [启用/禁用] 状态。"
-        echo "------------------------------------------------"
-
-        local s3_configured="false"
-        local webdav_configured="false"
-        local ftp_configured="false"
-        local ftps_configured="false"
-        local sftp_configured="false"
-
-        # 检查 S3/R2 配置状态
-        if [[ -n "$S3_ACCESS_KEY" && -n "$S3_SECRET_KEY" && -n "$S3_ENDPOINT" && -n "$S3_BUCKET_NAME" && -n "$S3_BACKUP_PATH" ]]; then
-            s3_configured="true"
-            echo -n "1. S3/R2 存储 (当前: "
-            if [[ "$BACKUP_TARGET_S3" == "true" ]]; then echo -e "${GREEN}启用${NC})"; else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "     (路径: ${S3_BACKUP_PATH})"
-        else
-            echo -e "1. S3/R2 存储 (${RED}未完全配置，无法启用${NC})"
-        fi
-
-        # 检查 WebDAV 配置状态
-        if [[ -n "$WEBDAV_URL" && -n "$WEBDAV_USERNAME" && -n "$WEBDAV_PASSWORD" && -n "$WEBDAV_BACKUP_PATH" ]]; then
-            webdav_configured="true"
-            echo -n "2. WebDAV 存储 (当前: "
-            if [[ "$BACKUP_TARGET_WEBDAV" == "true" ]]; then echo -e "${GREEN}启用${NC})"; else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "     (路径: ${WEBDAV_BACKUP_PATH})"
-        else
-            echo -e "2. WebDAV 存储 (${RED}未完全配置，无法启用${NC})"
-        fi
-
-        # FTP
-        if [[ -n "$FTP_HOST" && -n "$FTP_USERNAME" && -n "$FTP_PASSWORD" && -n "$FTP_BACKUP_PATH" ]]; then
-            ftp_configured="true"
-            echo -n "3. FTP 存储 (当前: "
-            if [[ "$BACKUP_TARGET_FTP" == "true" ]]; then echo -e "${GREEN}启用${NC})"; else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "     (路径: ${FTP_BACKUP_PATH})"
-        else
-            echo -e "3. FTP 存储 (${RED}未完全配置，无法启用${NC})"
-        fi
-
-        # FTPS
-        if [[ -n "$FTPS_HOST" && -n "$FTPS_USERNAME" && -n "$FTPS_PASSWORD" && -n "$FTPS_BACKUP_PATH" ]]; then
-            ftps_configured="true"
-            echo -n "4. FTPS 存储 (当前: "
-            if [[ "$BACKUP_TARGET_FTPS" == "true" ]]; then echo -e "${GREEN}启用${NC})"; else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "     (路径: ${FTPS_BACKUP_PATH})"
-        else
-            echo -e "4. FTPS 存储 (${RED}未完全配置，无法启用${NC})"
-        fi
-
-        # SFTP
-        if [[ -n "$SFTP_HOST" && -n "$SFTP_USERNAME" && -n "$SFTP_BACKUP_PATH" ]]; then
-            sftp_configured="true"
-            echo -n "5. SFTP 存储 (当前: "
-            if [[ "$BACKUP_TARGET_SFTP" == "true" ]]; then echo -e "${GREEN}启用${NC})"; else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "     (路径: ${SFTP_BACKUP_PATH})"
-        else
-            echo -e "5. SFTP 存储 (${RED}未完全配置，无法启用${NC})"
-        fi
-
-        echo ""
-        echo "0. 保存并返回主菜单"
-        echo -e "${BLUE}------------------------------------------------${NC}"
-        read -rp "请输入要切换状态的目标序号 (输入'0'保存并退出): " choice
-
-        case "$choice" in
-            1)
-                if [[ "$s3_configured" == "true" ]]; then
-                    if [[ "$BACKUP_TARGET_S3" == "true" ]]; then
-                        BACKUP_TARGET_S3="false"
-                        log_and_display "S3/R2 备份已 ${YELLOW}禁用${NC}。"
-                    else
-                        BACKUP_TARGET_S3="true"
-                        log_and_display "S3/R2 备份已 ${GREEN}启用${NC}。"
-                    fi
-                else
-                    log_and_display "${RED}S3/R2 未配置，无法切换状态。${NC}"
-                fi
-                press_enter_to_continue
-                ;;
-            2)
-                if [[ "$webdav_configured" == "true" ]]; then
-                    if [[ "$BACKUP_TARGET_WEBDAV" == "true" ]]; then
-                        BACKUP_TARGET_WEBDAV="false"
-                        log_and_display "WebDAV 备份已 ${YELLOW}禁用${NC}。"
-                    else
-                        BACKUP_TARGET_WEBDAV="true"
-                        log_and_display "WebDAV 备份已 ${GREEN}启用${NC}。"
-                    fi
-                else
-                    log_and_display "${RED}WebDAV 未配置，无法切换状态。${NC}"
-                fi
-                press_enter_to_continue
-                ;;
-            3)
-                if [[ "$ftp_configured" == "true" ]]; then
-                    if [[ "$BACKUP_TARGET_FTP" == "true" ]]; then
-                        BACKUP_TARGET_FTP="false"
-                        log_and_display "FTP 备份已 ${YELLOW}禁用${NC}。"
-                    else
-                        BACKUP_TARGET_FTP="true"
-                        log_and_display "FTP 备份已 ${GREEN}启用${NC}。"
-                    fi
-                else
-                    log_and_display "${RED}FTP 未配置，无法切换状态。${NC}"
-                fi
-                press_enter_to_continue
-                ;;
-            4)
-                if [[ "$ftps_configured" == "true" ]]; then
-                    if [[ "$BACKUP_TARGET_FTPS" == "true" ]]; then
-                        BACKUP_TARGET_FTPS="false"
-                        log_and_display "FTPS 备份已 ${YELLOW}禁用${NC}。"
-                    else
-                        BACKUP_TARGET_FTPS="true"
-                        log_and_display "FTPS 备份已 ${GREEN}启用${NC}。"
-                    fi
-                else
-                    log_and_display "${RED}FTPS 未配置，无法切换状态。${NC}"
-                fi
-                press_enter_to_continue
-                ;;
-            5)
-                if [[ "$sftp_configured" == "true" ]]; then
-                    if [[ "$BACKUP_TARGET_SFTP" == "true" ]]; then
-                        BACKUP_TARGET_SFTP="false"
-                        log_and_display "SFTP 备份已 ${YELLOW}禁用${NC}。"
-                    else
-                        BACKUP_TARGET_SFTP="true"
-                        log_and_display "SFTP 备份已 ${GREEN}启用${NC}。"
-                    fi
-                else
-                    log_and_display "${RED}SFTP 未配置，无法切换状态。${NC}"
-                fi
-                press_enter_to_continue
-                ;;
-            0)
-                save_config
-                log_and_display "备份目标设置已保存。" "${BLUE}"
-                break
-                ;;
-            *)
-                log_and_display "${RED}无效的选项 '${choice}'，请重新输入。${NC}"
-                press_enter_to_continue
-                ;;
-        esac
-    done
-}
-
-
-# 5. 云存储设定
 set_cloud_storage() {
     while true; do
         display_header
-        echo -e "${BLUE}=== 5. 云存储设定 ===${NC}"
-
-        local s3_info="${RED}未配置${NC}"
-        if [[ -n "$S3_ACCESS_KEY" && -n "$S3_BUCKET_NAME" ]]; then
-            s3_info="${GREEN}已配置${NC} (桶: ${S3_BUCKET_NAME} | 路径: ${S3_BACKUP_PATH:-未设置})"
-        fi
-
-        local webdav_info="${RED}未配置${NC}"
-        if [[ -n "$WEBDAV_URL" && -n "$WEBDAV_USERNAME" ]]; then
-            local display_url="${WEBDAV_URL}"
-            display_url="${display_url/:\/\/www./:\/\/\*\*\*./}"
-            webdav_info="${GREEN}已配置${NC} (URL: ${display_url} | 用户名: ${WEBDAV_USERNAME} | 路径: ${WEBDAV_BACKUP_PATH:-未设置})"
-        fi
-
-        local ftp_info="${RED}未配置${NC}"
-        if [[ -n "$FTP_HOST" && -n "$FTP_USERNAME" ]]; then
-            ftp_info="${GREEN}已配置${NC} (主机: ${FTP_HOST}:${FTP_PORT} | 用户名: ${FTP_USERNAME} | 路径: ${FTP_BACKUP_PATH:-未设置})"
-        fi
-
-        local ftps_info="${RED}未配置${NC}"
-        if [[ -n "$FTPS_HOST" && -n "$FTPS_USERNAME" ]]; then
-            ftps_info="${GREEN}已配置${NC} (主机: ${FTPS_HOST}:${FTPS_PORT} | 用户名: ${FTPS_USERNAME} | 路径: ${FTPS_BACKUP_PATH:-未设置})"
-        fi
-
-        local sftp_info="${RED}未配置${NC}"
-        if [[ -n "$SFTP_HOST" && -n "$SFTP_USERNAME" ]]; then
-            sftp_info="${GREEN}已配置${NC} (主机: ${SFTP_HOST}:${SFTP_PORT} | 用户名: ${SFTP_USERNAME} | 路径: ${SFTP_BACKUP_PATH:-未设置})"
-        fi
-
-        echo "1. 选择启用的云备份目标 (S3:${BACKUP_TARGET_S3},WebDAV:${BACKUP_TARGET_WEBDAV},FTP:${BACKUP_TARGET_FTP},FTPS:${BACKUP_TARGET_FTPS},SFTP:${BACKUP_TARGET_SFTP})"
+        echo -e "${BLUE}=== 5. 云存储设定 (Rclone) ===${NC}"
+        echo -e "${YELLOW}提示: '备份目标' 是 '远程端' + 具体路径 (例如 mydrive:/backups)。${NC}"
         echo ""
-        echo "2. 管理 S3/R2 账号 (当前: $s3_info)"
-        echo "3. 管理 WebDAV 账号 (当前: $webdav_info)"
-        echo "4. 管理 FTP 账号 (当前: $ftp_info)"
-        echo "5. 管理 FTPS 账号 (当前: $ftps_info)"
-        echo "6. 管理 SFTP 账号 (当前: $sftp_info)"
-        echo "0. 返回主菜单"
-        echo -e "${BLUE}------------------------------------------------${NC}"
-        read -rp "请输入选项: " sub_choice
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  1. ${YELLOW}查看、管理和启用备份目标${NC}"
+        echo -e "  2. ${YELLOW}[助手] 创建新的 Rclone 远程端${NC}"
+        echo -e "  3. ${YELLOW}测试 Rclone 远程端连接${NC}"
+        
+        local bw_limit_display="${RCLONE_BWLIMIT}"
+        if [[ -z "$bw_limit_display" ]]; then
+            bw_limit_display="不限制"
+        fi
+        echo -e "  4. ${YELLOW}设置带宽限制${NC} (当前: ${bw_limit_display})"
 
-        case $sub_choice in
-            1) select_backup_targets ;;
-            2) manage_s3_r2_account ;;
-            3) manage_webdav_account ;;
-            4) manage_ftp_account ;;
-            5) manage_ftps_account ;;
-            6) manage_sftp_account ;;
-            0)
-                log_and_display "返回主菜单。" "${BLUE}"
+        local check_status_text="已开启"
+        if [[ "$ENABLE_INTEGRITY_CHECK" != "true" ]]; then
+            check_status_text="已关闭"
+        fi
+        echo -e "  5. ${YELLOW}备份后完整性校验${NC} (当前: ${check_status_text})"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  0. ${RED}返回主菜单${NC}"
+        read -rp "请输入选项: " choice
+
+        case $choice in
+            1) view_and_manage_rclone_targets ;;
+            2) create_rclone_remote_wizard ;;
+            3) test_rclone_remotes ;;
+            4) set_bandwidth_limit ;;
+            5) toggle_integrity_check ;;
+            0) break ;;
+            *) log_error "无效选项。"; press_enter_to_continue ;;
+        esac
+    done
+}
+
+
+set_telegram_notification() {
+    local needs_saving="false"
+    while true; do
+        display_header
+        echo -e "${BLUE}=== 6. 消息通知设定 (Telegram) ===${NC}"
+        
+        local status_text
+        if [[ "$TELEGRAM_ENABLED" == "true" ]]; then
+            status_text="${GREEN}已启用${NC}"
+        else
+            status_text="${YELLOW}已禁用${NC}"
+        fi
+        echo -e "当前状态: ${status_text}"
+        echo -e "Bot Token: ${TELEGRAM_BOT_TOKEN}"
+        echo -e "Chat ID:   ${TELEGRAM_CHAT_ID}"
+        echo ""
+        
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+        if [[ "$TELEGRAM_ENABLED" == "true" ]]; then
+            echo -e "  1. ${YELLOW}禁用通知${NC}"
+        else
+            echo -e "  1. ${GREEN}启用通知${NC}"
+        fi
+        echo -e "  2. ${YELLOW}设置/修改凭证 (Token 和 Chat ID)${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  0. ${RED}保存并返回${NC}"
+        read -rp "请输入选项: " choice
+
+        case $choice in
+            1) 
+                if [[ "$TELEGRAM_ENABLED" == "true" ]]; then
+                    TELEGRAM_ENABLED="false"
+                    log_warn "Telegram 通知已禁用。"
+                else
+                    TELEGRAM_ENABLED="true"
+                    log_info "Telegram 通知已启用。"
+                fi
+                needs_saving="true"
+                press_enter_to_continue
+                ;;
+            2) 
+                log_warn "凭证将保存到本地配置文件！"
+                read -rp "请输入新的 Telegram Bot Token [留空不修改]: " input_token
+                TELEGRAM_BOT_TOKEN="${input_token:-$TELEGRAM_BOT_TOKEN}"
+
+                read -rp "请输入新的 Telegram Chat ID [留空不修改]: " input_chat_id
+                TELEGRAM_CHAT_ID="${input_chat_id:-$TELEGRAM_CHAT_ID}"
+
+                log_info "Telegram 凭证已更新。"
+                needs_saving="true"
+                press_enter_to_continue
+                ;;
+            0) 
+                if [[ "$needs_saving" == "true" ]]; then
+                    save_config
+                fi
                 break
                 ;;
             *)
-                log_and_display "${RED}无效的选项，请重新输入。${NC}"
+                log_error "无效选项。"
                 press_enter_to_continue
                 ;;
         esac
     done
 }
 
-# 6. 设置 Telegram 通知设定
-set_telegram_notification() {
-    display_header
-    echo -e "${BLUE}=== 6. 消息通知设定 (Telegram) ===${NC}"
-    log_and_display "${YELLOW}Telegram Bot Token 和 Chat ID 将保存到本地配置文件，请确保配置文件安全！${NC}"
-    read -rp "请输入 Telegram Bot Token [当前: ${TELEGRAM_BOT_TOKEN}]: " input_token
-    TELEGRAM_BOT_TOKEN="${input_token:-$TELEGRAM_BOT_TOKEN}"
-
-    read -rp "请输入 Telegram Chat ID [当前: ${TELEGRAM_CHAT_ID}]: " input_chat_id
-    TELEGRAM_CHAT_ID="${input_chat_id:-$TELEGRAM_CHAT_ID}"
-    
-    save_config
-    log_and_display "${GREEN}Telegram 通知配置已更新并保存。${NC}"
-    log_and_display "${YELLOW}提示：您可以向 @BotFather 获取 Bot Token，然后向您的 Bot 发送消息，再访问 https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates 获取 Chat ID。${NC}"
-    press_enter_to_continue
-}
-
-# 7. 设置备份保留策略
 set_retention_policy() {
     while true; do
         display_header
         echo -e "${BLUE}=== 7. 设置备份保留策略 (云端) ===${NC}"
+        echo -e "${YELLOW}请注意：此策略仅对“归档模式”生成的备份文件有效。${NC}"
         echo "当前策略: "
         case "$RETENTION_POLICY_TYPE" in
             "none") echo -e "  ${YELLOW}无保留策略（所有备份将保留）${NC}" ;;
             "count") echo -e "  ${YELLOW}保留最新 ${RETENTION_VALUE} 个备份${NC}" ;;
             "days")  echo -e "  ${YELLOW}保留最近 ${RETENTION_VALUE} 天内的备份${NC}" ;;
-            *)      echo -e "  ${YELLOW}未知策略或未设置${NC}" ;; # 添加默认情况
+            *)       echo -e "  ${YELLOW}未知策略或未设置${NC}" ;;
         esac
         echo ""
-        echo "1. 设置按数量保留 (例如：保留最新的 5 个备份)"
-        echo "2. 设置按天数保留 (例如：保留最近 30 天内的备份)"
-        echo "3. 关闭保留策略"
-        echo "0. 返回主菜单"
-        echo -e "${BLUE}------------------------------------------------${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  1. ${YELLOW}设置按数量保留 (例: 保留最新的 5 个)${NC}"
+        echo -e "  2. ${YELLOW}设置按天数保留 (例: 保留最近 30 天)${NC}"
+        echo -e "  3. ${YELLOW}关闭保留策略${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  0. ${RED}返回主菜单${NC}"
         read -rp "请输入选项: " sub_choice
 
         case $sub_choice in
@@ -2313,9 +1091,9 @@ set_retention_policy() {
                     RETENTION_POLICY_TYPE="count"
                     RETENTION_VALUE="$value_input"
                     save_config
-                    log_and_display "${GREEN}已设置保留最新 ${RETENTION_VALUE} 个备份的策略。${NC}"
+                    log_info "已设置保留最新 ${RETENTION_VALUE} 个备份。"
                 else
-                    log_and_display "${RED}输入无效，请输入一个大于等于 1 的整数。${NC}"
+                    log_error "输入无效。"
                 fi
                 press_enter_to_continue
                 ;;
@@ -2325,9 +1103,9 @@ set_retention_policy() {
                     RETENTION_POLICY_TYPE="days"
                     RETENTION_VALUE="$value_input"
                     save_config
-                    log_and_display "${GREEN}已设置保留最近 ${RETENTION_VALUE} 天内的备份策略。${NC}"
+                    log_info "已设置保留最近 ${RETENTION_VALUE} 天。"
                 else
-                    log_and_display "${RED}输入无效，请输入一个大于等于 1 的整数。${NC}"
+                    log_error "输入无效。"
                 fi
                 press_enter_to_continue
                 ;;
@@ -2335,781 +1113,693 @@ set_retention_policy() {
                 RETENTION_POLICY_TYPE="none"
                 RETENTION_VALUE=0
                 save_config
-                log_and_display "${GREEN}已关闭备份保留策略。${NC}"
+                log_info "已关闭备份保留策略。"
+                press_enter_to_continue
+                ;;
+            0) break ;;
+            *) log_error "无效选项。"; press_enter_to_continue ;;
+        esac
+    done
+}
+
+
+apply_retention_policy() {
+    log_info "--- 正在应用备份保留策略 (Rclone) ---"
+
+    if [[ "$RETENTION_POLICY_TYPE" == "none" ]]; then
+        log_info "未设置保留策略，跳过清理。"
+        return 0
+    fi
+
+    local retention_summary="*${SCRIPT_NAME}：保留策略完成*"
+    retention_summary+=$'\n'"保留策略执行完毕。"
+
+    for enabled_idx in "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}"; do
+        local rclone_target="${RCLONE_TARGETS_ARRAY[$enabled_idx]}"
+        log_info "正在为目标 ${rclone_target} 应用保留策略..."
+
+        local backups_list
+        backups_list=$(rclone lsf --files-only "${rclone_target}" | grep -E '\.zip$|\.tar\.gz$' || true)
+        
+        if [[ -z "$backups_list" ]]; then
+            log_warn "在 ${rclone_target} 中未找到备份文件，跳过。"
+            continue
+        fi
+
+        local sorted_backups
+        sorted_backups=$(echo "$backups_list" | sort)
+
+        local backups_to_process=()
+        mapfile -t backups_to_process <<< "$sorted_backups"
+
+        local deleted_count=0
+        local total_found=${#backups_to_process[@]}
+
+        if [[ "$RETENTION_POLICY_TYPE" == "count" ]]; then
+            local num_to_delete=$(( total_found - RETENTION_VALUE ))
+            if [ "$num_to_delete" -gt 0 ]; then
+                log_warn "发现 ${num_to_delete} 个旧备份，将删除..."
+                for (( i=0; i<num_to_delete; i++ )); do
+                    local file_to_delete="${backups_to_process[$i]}"
+                    
+                    local target_path_for_delete="${rclone_target}"
+                    if [[ "${target_path_for_delete: -1}" != "/" ]]; then
+                        target_path_for_delete+="/"
+                    fi
+                    
+                    log_info "正在删除: ${target_path_for_delete}${file_to_delete}"
+                    if rclone deletefile "${target_path_for_delete}${file_to_delete}"; then
+                        deleted_count=$((deleted_count + 1))
+                    fi
+                done
+            fi
+        elif [[ "$RETENTION_POLICY_TYPE" == "days" ]]; then
+            local current_timestamp=$(date +%s)
+            local cutoff_timestamp=$(( current_timestamp - RETENTION_VALUE * 24 * 3600 ))
+            log_warn "将删除 ${RETENTION_VALUE} 天前的备份..."
+            for item in "${backups_to_process[@]}"; do
+                local timestamp_str
+                timestamp_str=$(echo "$item" | grep -o -E '[0-9]{14}' || true)
+                if [[ -z "$timestamp_str" ]]; then continue; fi
+
+                local file_timestamp
+                file_timestamp=$(date -d "${timestamp_str}" +%s 2>/dev/null || echo 0)
+
+                if [[ "$file_timestamp" -ne 0 && "$file_timestamp" -lt "$cutoff_timestamp" ]]; then
+                    local target_path_for_delete="${rclone_target}"
+                    if [[ "${target_path_for_delete: -1}" != "/" ]]; then
+                        target_path_for_delete+="/"
+                    fi
+
+                    log_info "正在删除: ${target_path_for_delete}${item}"
+                    if rclone deletefile "${target_path_for_delete}${item}"; then
+                        deleted_count=$((deleted_count + 1))
+                    fi
+                fi
+            done
+        fi
+        log_info "${rclone_target} 清理完成，删除 ${deleted_count} 个文件。"
+        retention_summary+=$'\n'"- ${rclone_target}: 找到 ${total_found} 个, 删除 ${deleted_count} 个。"
+    done
+    send_telegram_message "${retention_summary}"
+}
+
+check_temp_space() {
+    local required_space_kb=0
+    log_info "正在计算所需临时空间..."
+    for path in "${BACKUP_SOURCE_PATHS_ARRAY[@]}"; do
+        if [[ -e "$path" ]]; then
+            local size_kb
+            size_kb=$(du -sk "$path" | awk '{print $1}')
+            required_space_kb=$((required_space_kb + size_kb))
+        fi
+    done
+
+    required_space_kb=$((required_space_kb * 12 / 10))
+
+    local available_space_kb
+    available_space_kb=$(df -k "$(dirname "$TEMP_DIR")" | awk 'NR==2 {print $4}')
+    
+    local required_hr
+    required_hr=$(numfmt --to=iec-i --suffix=B --format="%.1f" "$((required_space_kb * 1024))")
+    local available_hr
+    available_hr=$(numfmt --to=iec-i --suffix=B --format="%.1f" "$((available_space_kb * 1024))")
+
+    log_info "预估需要临时空间: ~${required_hr}, 可用空间: ${available_hr}"
+
+    if [[ "$available_space_kb" -lt "$required_space_kb" ]]; then
+        log_error "临时目录空间不足！"
+        send_telegram_message "*${SCRIPT_NAME}：备份失败*\n原因: 临时目录空间不足。需要约 ${required_hr}，但只有 ${available_hr} 可用。"
+        return 1
+    fi
+    return 0
+}
+
+perform_sync_backup() {
+    local backup_type="$1"
+    local readable_time=$(date '+%Y-%m-%d %H:%M:%S')
+    local total_paths_to_backup=${#BACKUP_SOURCE_PATHS_ARRAY[@]}
+    local overall_succeeded_count=0
+    local any_sync_succeeded="false"
+
+    log_info "--- ${backup_type} 过程开始 (同步模式) ---"
+    send_telegram_message "*${SCRIPT_NAME}：开始 (${backup_type} - 同步模式)*\n时间: ${readable_time}\n将同步 ${total_paths_to_backup} 个路径。"
+    log_warn "备份模式: [同步模式]。保留策略和恢复功能在此模式下不可用。"
+
+    local bw_limit_arg=""
+    if [[ -n "$RCLONE_BWLIMIT" ]]; then
+        bw_limit_arg="--bwlimit ${RCLONE_BWLIMIT}"
+        log_info "同步将使用带宽限制: ${RCLONE_BWLIMIT}"
+    fi
+
+    for ((i=0; i<total_paths_to_backup; i++)); do
+        local path_to_sync="${BACKUP_SOURCE_PATHS_ARRAY[$i]}"
+        local path_basename
+        path_basename=$(basename "$path_to_sync")
+        
+        log_info "--- 正在处理路径 $((i+1))/${total_paths_to_backup}: ${path_to_sync} ---"
+        
+        if [[ ! -e "$path_to_sync" ]]; then
+            log_error "路径 '$path_to_sync' 不存在，跳过。"
+            send_telegram_message "*${SCRIPT_NAME}：路径同步失败*\n路径: \`${path_to_sync}\`\n原因: 路径不存在。"
+            continue
+        fi
+
+        local path_sync_succeeded="false"
+        local sync_statuses=""
+        for enabled_idx in "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}"; do
+            local rclone_target="${RCLONE_TARGETS_ARRAY[$enabled_idx]}"
+            local sync_destination="${rclone_target%/}/${path_basename}"
+            
+            log_info "正在同步 ${path_to_sync} 到 ${sync_destination}..."
+            if rclone sync "$path_to_sync" "$sync_destination" --progress ${bw_limit_arg}; then
+                log_info "同步到 ${rclone_target} 成功！"
+                path_sync_succeeded="true"
+                any_sync_succeeded="true"
+                sync_statuses+="\n- \`${rclone_target}\`: 同步成功"
+            else
+                log_error "同步到 ${rclone_target} 失败！"
+                sync_statuses+="\n- \`${rclone_target}\`: 同步失败"
+            fi
+        done
+
+        if [[ "$path_sync_succeeded" == "true" ]]; then
+            overall_succeeded_count=$((overall_succeeded_count + 1))
+            send_telegram_message "*${SCRIPT_NAME}：路径同步 (成功)*\n源: \`${path_to_sync}\`\n*目标状态:*${sync_statuses}"
+        else
+            send_telegram_message "*${SCRIPT_NAME}：路径同步 (失败)*\n源: \`${path_to_sync}\`\n*目标状态:*${sync_statuses}"
+        fi
+    done
+
+    local overall_status="失败"
+    if [ "$overall_succeeded_count" -eq "$total_paths_to_backup" ] && [ "$total_paths_to_backup" -gt 0 ]; then
+        overall_status="全部成功"
+    elif [ "$overall_succeeded_count" -gt 0 ]; then
+        overall_status="部分成功"
+    fi
+
+    log_info "--- ${backup_type} (同步模式) 过程结束 ---"
+    
+    if [[ "$any_sync_succeeded" == "true" ]]; then
+        LAST_AUTO_BACKUP_TIMESTAMP=$(date +%s)
+        save_config
+    fi
+    send_telegram_message "*${SCRIPT_NAME}：同步总览 (${overall_status})*\n成功同步路径数: ${overall_succeeded_count}/${total_paths_to_backup}"
+}
+
+perform_archive_backup() {
+    local backup_type="$1"
+    local readable_time=$(date '+%Y-%m-%d %H:%M:%S')
+    local overall_succeeded_count=0
+    local total_paths_to_backup=${#BACKUP_SOURCE_PATHS_ARRAY[@]}
+    local any_upload_succeeded="false"
+
+    log_info "--- ${backup_type} 过程开始 (归档模式) ---"
+    send_telegram_message "*${SCRIPT_NAME}：开始 (${backup_type} - 归档模式)*\n时间: ${readable_time}\n将备份 ${total_paths_to_backup} 个路径。"
+
+    if ! check_temp_space; then
+        return 1
+    fi
+
+    local timestamp
+    timestamp=$(date +%Y%m%d%H%M%S)
+    
+    local archive_ext=".zip"
+    if [[ "$COMPRESSION_FORMAT" == "tar.gz" ]]; then
+        archive_ext=".tar.gz"
+    fi
+
+    if [[ "$PACKAGING_STRATEGY" == "single" ]]; then
+        log_info "打包策略: [所有源打包成一个]。"
+        local archive_name="all_sources_${timestamp}${archive_ext}"
+        local temp_archive_path="${TEMP_DIR}/${archive_name}"
+
+        log_info "正在压缩到 '$archive_name'..."
+        local compress_success=true
+        if [[ "$COMPRESSION_FORMAT" == "zip" ]]; then
+            local zip_args=(-rq -${COMPRESSION_LEVEL})
+            if [[ -n "$ZIP_PASSWORD" ]]; then
+                zip_args+=(-P "$ZIP_PASSWORD")
+            fi
+            zip "${zip_args[@]}" "$temp_archive_path" "${BACKUP_SOURCE_PATHS_ARRAY[@]}" || compress_success=false
+        else # tar.gz
+            GZIP="-${COMPRESSION_LEVEL}" tar -czf "$temp_archive_path" "${BACKUP_SOURCE_PATHS_ARRAY[@]}" || compress_success=false
+        fi
+
+        if $compress_success; then
+            if upload_archive "$temp_archive_path" "$archive_name" "所有源"; then
+                any_upload_succeeded="true"
+                overall_succeeded_count=$((total_paths_to_backup))
+            fi
+            rm -f "$temp_archive_path"
+        else
+            log_error "创建合并压缩包失败！"
+            send_telegram_message "*${SCRIPT_NAME}：压缩失败*\n打包所有源时出错。"
+        fi
+
+    else # separate
+        log_info "打包策略: [每个源单独打包]。"
+        for i in "${!BACKUP_SOURCE_PATHS_ARRAY[@]}"; do
+            local current_backup_path="${BACKUP_SOURCE_PATHS_ARRAY[$i]}"
+            local path_display_name
+            path_display_name=$(basename "$current_backup_path")
+            local sanitized_path_name
+            sanitized_path_name=$(echo "$path_display_name" | sed 's/[^a-zA-Z0-9_-]/_/g')
+            local archive_name="${sanitized_path_name}_${timestamp}${archive_ext}"
+            local temp_archive_path="${TEMP_DIR}/${archive_name}"
+            
+            log_info "--- 正在处理路径 $((i+1))/${total_paths_to_backup}: ${current_backup_path} ---"
+
+            if [[ ! -e "$current_backup_path" ]]; then
+                log_error "路径 '$current_backup_path' 不存在，跳过。"
+                send_telegram_message "*${SCRIPT_NAME}：路径失败*\n路径: \`${current_backup_path}\`\n原因: 路径不存在。"
+                continue
+            fi
+
+            log_info "正在压缩到 '$archive_name'..."
+            local compress_success=true
+            if [[ "$COMPRESSION_FORMAT" == "zip" ]]; then
+                local zip_args=(-rq -${COMPRESSION_LEVEL})
+                if [[ -n "$ZIP_PASSWORD" ]]; then
+                    zip_args+=(-P "$ZIP_PASSWORD")
+                fi
+                (cd "$(dirname "$current_backup_path")" && zip "${zip_args[@]}" "$temp_archive_path" "$(basename "$current_backup_path")") || compress_success=false
+            else # tar.gz
+                (cd "$(dirname "$current_backup_path")" && GZIP="-${COMPRESSION_LEVEL}" tar -czf "$temp_archive_path" "$(basename "$current_backup_path")") || compress_success=false
+            fi
+
+            if ! $compress_success; then
+                log_error "文件压缩失败！"
+                send_telegram_message "*${SCRIPT_NAME}：压缩失败*\n路径: \`${current_backup_path}\`"
+                continue
+            fi
+            
+            if upload_archive "$temp_archive_path" "$archive_name" "$current_backup_path"; then
+                overall_succeeded_count=$((overall_succeeded_count + 1))
+                any_upload_succeeded="true"
+            fi
+            
+            rm -f "$temp_archive_path"
+        done
+    fi
+
+    local overall_status="失败"
+    if [ "$overall_succeeded_count" -eq "$total_paths_to_backup" ] && [ "$total_paths_to_backup" -gt 0 ]; then
+        overall_status="全部成功"
+    elif [ "$overall_succeeded_count" -gt 0 ]; then
+        overall_status="部分成功"
+    fi
+
+    log_info "--- ${backup_type} (归档模式) 过程结束 ---"
+    
+    if [[ "$any_upload_succeeded" == "true" ]]; then
+        LAST_AUTO_BACKUP_TIMESTAMP=$(date +%s)
+        save_config
+        apply_retention_policy
+    else
+        log_warn "无成功上传，跳过保留策略。"
+    fi
+}
+
+
+perform_backup() {
+    local backup_type="$1"
+    
+    if [ ${#BACKUP_SOURCE_PATHS_ARRAY[@]} -eq 0 ]; then
+        log_error "未设置任何备份源路径。"
+        send_telegram_message "*${SCRIPT_NAME}：失败*\n原因: 未设置备份源路径。"
+        return 1
+    fi
+
+    if [[ "$BACKUP_MODE" == "sync" ]]; then
+        perform_sync_backup "$backup_type"
+    else
+        perform_archive_backup "$backup_type"
+    fi
+}
+
+
+upload_archive() {
+    local temp_archive_path="$1"
+    local archive_name="$2"
+    local source_description="$3"
+    local any_upload_succeeded_for_path="false"
+
+    local backup_file_size
+    backup_file_size=$(du -h "$temp_archive_path" | awk '{print $1}')
+    
+    local num_enabled_targets=${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}
+    log_info "压缩完成 (大小: ${backup_file_size})。准备上传到 ${num_enabled_targets} 个已启用的目标..."
+
+    local path_summary_message="*${SCRIPT_NAME}：路径归档*\n源: \`${source_description}\`\n文件: \`${archive_name}\` (${backup_file_size})\n\n*上传状态:*"
+
+    local bw_limit_arg=""
+    if [[ -n "$RCLONE_BWLIMIT" ]]; then
+        bw_limit_arg="--bwlimit ${RCLONE_BWLIMIT}"
+        log_info "上传将使用带宽限制: ${RCLONE_BWLIMIT}"
+    fi
+
+    local upload_statuses=""
+    for enabled_idx in "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}"; do
+        local rclone_target="${RCLONE_TARGETS_ARRAY[$enabled_idx]}"
+        
+        local destination_path="${rclone_target}"
+        if [[ "${destination_path: -1}" != "/" ]]; then
+            destination_path+="/"
+        fi
+
+        log_info "正在上传到 Rclone 目标: ${destination_path}"
+        if rclone copyto "$temp_archive_path" "${destination_path}${archive_name}" --progress ${bw_limit_arg}; then
+            log_info "上传到 ${rclone_target} 成功！"
+            upload_statuses+="\n- \`${rclone_target}\`: 上传成功"
+            any_upload_succeeded_for_path="true"
+
+            if [[ "$ENABLE_INTEGRITY_CHECK" == "true" ]]; then
+                log_info "正在对 ${rclone_target} 上的文件进行完整性校验..."
+                if rclone check "$temp_archive_path" "${destination_path}${archive_name}"; then
+                    log_info "校验成功！文件完整。"
+                    upload_statuses+=" (校验通过 ✔️)"
+                else
+                    log_error "校验失败！云端文件可能已损坏！"
+                    upload_statuses+=" (**校验失败 ❌**)"
+                fi
+            fi
+        else
+            log_error "上传到 ${rclone_target} 失败！"
+            upload_statuses+="\n- \`${rclone_target}\`: 失败"
+        fi
+    done
+
+    send_telegram_message "${path_summary_message}${upload_statuses}"
+    
+    if [[ "$any_upload_succeeded_for_path" == "true" ]]; then
+        return 0 # Success
+    else
+        return 1 # Failure
+    fi
+}
+
+
+manage_rclone_installation() {
+    while true; do
+        display_header
+        echo -e "${BLUE}=== 8. Rclone 安装/卸载 ===${NC}"
+        
+        if command -v rclone &> /dev/null; then
+            local rclone_version
+            rclone_version=$(rclone --version | head -n 1)
+            echo -e "当前状态: ${GREEN}已安装${NC} (版本: ${rclone_version})"
+        else
+            echo -e "当前状态: ${RED}未安装${NC}"
+        fi
+        echo ""
+
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  1. ${YELLOW}安装或更新 Rclone${NC}"
+        echo -e "  2. ${YELLOW}卸载 Rclone${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  0. ${RED}返回主菜单${NC}"
+        read -rp "请输入选项: " choice
+
+        case $choice in
+            1)
+                log_info "正在从 rclone.org 下载并执行官方安装脚本..."
+                if curl https://rclone.org/install.sh | sudo bash; then
+                    log_info "Rclone 安装/更新成功！"
+                else
+                    log_error "Rclone 安装/更新失败，请检查网络或 sudo 权限。"
+                fi
+                press_enter_to_continue
+                ;;
+            2)
+                if ! command -v rclone &> /dev/null; then
+                    log_warn "Rclone 未安装，无需卸载。"
+                    press_enter_to_continue
+                    continue
+                fi
+                read -rp "警告: 这将从系统中移除 Rclone 本体程序。本脚本将无法工作，确定吗？(y/N): " confirm
+                if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                    log_warn "正在卸载 Rclone..."
+                    sudo rm -f /usr/bin/rclone /usr/local/bin/rclone
+                    sudo rm -f /usr/local/share/man/man1/rclone.1
+                    log_info "Rclone 已卸载。"
+                else
+                    log_info "已取消卸载。"
+                fi
                 press_enter_to_continue
                 ;;
             0)
-                log_and_display "返回主菜单。" "${BLUE}"
                 break
                 ;;
             *)
-                log_and_display "${RED}无效的选项，请重新输入。${NC}"
+                log_error "无效选项。"
                 press_enter_to_continue
                 ;;
         esac
     done
 }
 
+manage_config_import_export() {
+    while true; do
+        display_header
+        echo -e "${BLUE}=== 10. [助手] 配置导入/导出 ===${NC}"
+        echo "此功能可将当前所有设置导出为便携文件，或从文件导入。"
+        echo ""
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  1. ${YELLOW}导出配置到文件${NC}"
+        echo -e "  2. ${YELLOW}从文件导入配置${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  0. ${RED}返回主菜单${NC}"
+        read -rp "请输入选项: " choice
 
-# 应用保留策略的函数
-apply_retention_policy() {
-    log_and_display "${BLUE}--- 正在应用备份保留策略 ---${NC}"
-
-    if [[ "$RETENTION_POLICY_TYPE" == "none" ]]; then
-        log_and_display "未设置保留策略，跳过清理。" "${YELLOW}"
-        return 0
-    fi
-
-    local current_timestamp=$(date +%s)
-    local total_s3_backups_found=0
-    local deleted_s3_count=0
-    local total_webdav_backups_found=0
-    local deleted_webdav_count=0
-    local total_ftp_backups_found=0
-    local deleted_ftp_count=0
-    local total_ftps_backups_found=0
-    local deleted_ftps_count=0
-    local total_sftp_backups_found=0
-    local deleted_sftp_count=0
-
-    # Function to delete a file from a specific service
-    delete_file() {
-        local service_type="$1"
-        local file_to_delete="$2"
-        local delete_status=1
-        case "$service_type" in
-            "s3")
-                export AWS_ACCESS_KEY_ID="$S3_ACCESS_KEY"
-                export AWS_SECRET_ACCESS_KEY="$S3_SECRET_KEY"
-                if command -v aws &> /dev/null; then
-                    aws s3 rm "s3://${S3_BUCKET_NAME}/${S3_BACKUP_PATH}${file_to_delete}" --endpoint-url "$S3_ENDPOINT" &> /dev/null
-                    delete_status=$?
-                elif command -v s3cmd &> /dev/null; then
-                    s3cmd del "s3://${S3_BUCKET_NAME}/${S3_BACKUP_PATH}${file_to_delete}" &> /dev/null
-                    delete_status=$?
-                fi
-                unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
-                ;;
-            "webdav")
-                curl -s -k --user "$WEBDAV_USERNAME:$WEBDAV_PASSWORD" -X DELETE "${WEBDAV_URL%/}/${WEBDAV_BACKUP_PATH}${file_to_delete}" > /dev/null
-                delete_status=$?
-                ;;
-            "ftp")
-                lftp -p "$FTP_PORT" -u "$FTP_USERNAME,$FTP_PASSWORD" "$FTP_HOST" <<EOF &>/dev/null
-set net:timeout 15
-set ftp:passive-mode true
-rm "$FTP_BACKUP_PATH$file_to_delete"
-quit
-EOF
-                delete_status=$?
-                ;;
-            "ftps")
-                lftp -p "$FTPS_PORT" -u "$FTPS_USERNAME,$FTPS_PASSWORD" "$FTPS_HOST" <<EOF &>/dev/null
-set net:timeout 15
-set ftp:passive-mode true
-set ftp:ssl-allow true
-set ftp:ssl-protect-data true
-set ssl:verify-certificate no
-rm "$FTPS_BACKUP_PATH$file_to_delete"
-quit
-EOF
-                delete_status=$?
-                ;;
-            "sftp")
-                lftp -p "$SFTP_PORT" -u "$SFTP_USERNAME,$SFTP_PASSWORD" "sftp://$SFTP_HOST" <<EOF &>/dev/null
-set net:timeout 15
-set sftp:auto-confirm yes
-rm "$SFTP_BACKUP_PATH$file_to_delete"
-quit
-EOF
-                delete_status=$?
-                ;;
-        esac
-        return "$delete_status"
-    }
-
-    # Helper function for S3 retention to list all files under the S3_BACKUP_PATH
-    get_s3_r2_all_files_for_retention() {
-        local path_prefix="$1"
-        export AWS_ACCESS_KEY_ID="$S3_ACCESS_KEY"
-        export AWS_SECRET_ACCESS_KEY="$S3_SECRET_KEY"
-        local files=()
-        local cmd_output=""
-        local cmd_status=1
-
-        # Remove leading slash if present, as S3 paths don't usually start with / in ls
-        path_prefix="${path_prefix#/}"
-
-        if command -v aws &> /dev/null; then
-            if { cmd_output=$(aws s3api list-objects-v2 --bucket "$S3_BUCKET_NAME" --prefix "$path_prefix" --query "Contents[].Key" --output text --endpoint-url "$S3_ENDPOINT" 2>&1); } then
-                cmd_status=0
-            else
-                cmd_status=$?
-                log_and_display "${RED}S3/R2 文件列表失败 (awscli)！错误: ${cmd_output}${NC}" "" "/dev/stderr"
-            fi
-            if [ "$cmd_status" -eq 0 ]; then
-                mapfile -t files <<< "$(echo "$cmd_output" | sed "s|^${path_prefix}||" )"
-            fi
-        elif command -v s3cmd &> /dev/null; then
-            if { cmd_output=$(s3cmd ls "s3://${S3_BUCKET_NAME}/${path_prefix}" 2>&1); } then
-                cmd_status=0
-            else
-                cmd_status=$?
-                log_and_display "${RED}S3/R2 文件列表失败 (s3cmd)！错误: ${cmd_output}${NC}" "" "/dev/stderr"
-            fi
-            if [ "$cmd_status" -eq 0 ]; then
-                mapfile -t files <<< "$(echo "$cmd_output" | awk '{print $4}' | sed 's|s3://'"${S3_BUCKET_NAME//./\\.}"'/'"${path_prefix//./\\.}"'\?||' )"
-            fi
-        fi
-        unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
-
-        if [ ${#files[@]} -gt 0 ]; then
-            printf '%s\n' "${files[@]}"
-        fi
-        return "$cmd_status" # Return the actual command status
-    }
-
-
-    # Generic function to process backups for a given service
-    process_service_retention() {
-        local service_type="$1" # e.g., "s3", "webdav", "ftp", "ftps", "sftp"
-        local target_path_var_name="$2" # Name of the target path variable, e.g., "S3_BACKUP_PATH"
-        local -n total_backups_found_ref="$3" # Reference to total_xxx_backups_found
-        local -n deleted_count_ref="$4" # Reference to deleted_xxx_count
-
-        local service_display_name=""
-        local target_path=""
-        local backups_array=()
-        local get_list_status=1
-
-        case "$service_type" in
-            "s3") service_display_name="S3/R2";;
-            "webdav") service_display_name="WebDAV";;
-            "ftp") service_display_name="FTP";;
-            "ftps") service_display_name="FTPS";;
-            "sftp") service_display_name="SFTP";;
-        esac
-
-        eval "target_path=\$$target_path_var_name" # Get value of target path variable
-
-        log_and_display "正在检查 ${service_display_name} 存储中的旧备份：${target_path}..."
-
-        local raw_backups_list=""
-        if [[ "$service_type" == "s3" ]]; then
-            raw_backups_list=$(get_s3_r2_all_files_for_retention "$target_path")
-            get_list_status=$?
-        elif [[ "$service_type" == "webdav" ]]; then
-            local base_webdav_url_for_retention="${WEBDAV_URL%/}"
-            local curl_output=""
-            if { curl_output=$(curl -s -L -k --user "$WEBDAV_USERNAME:$WEBDAV_PASSWORD" --request PROPFIND --header "Depth: infinity" "${base_webdav_url_for_retention}${target_path}" 2>&1); } then
-                get_list_status=0
-            else
-                get_list_status=$?
-                log_and_display "${RED}WebDAV 列出文件失败！错误: ${curl_output}${NC}" "" "/dev/stderr"
-            fi
-            # We specifically look for zip files that match the backup naming convention
-            raw_backups_list=$(echo "$curl_output" | grep -oP '<D:href>\K([^<]*[a-zA-Z0-9_-]+_[0-9]{14}\.zip)(?=</D:href>)' | sed "s|^${base_webdav_url_for_retention//./\\.}${target_path//./\\.}\|/||" | sed "s|/${target_path//./\\.}\|/||")
-        elif [[ "$service_type" == "ftp" ]]; then
-            if { raw_backups_list=$(lftp -u "$FTP_USERNAME","$FTP_PASSWORD" -p "$FTP_PORT" "$FTP_HOST" -e "set net:timeout 20; set ftp:passive-mode true; find ${target_path} -name '*_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].zip'; quit;" 2>&1); } then
-                get_list_status=0
-            else
-                get_list_status=$?
-                log_and_display "${RED}FTP 列出文件失败！错误: ${raw_backups_list}${NC}" "" "/dev/stderr"
-            fi
-            raw_backups_list=$(echo "$raw_backups_list" | sed "s|^${target_path}||")
-        elif [[ "$service_type" == "ftps" ]]; then
-            if { raw_backups_list=$(lftp -u "$FTPS_USERNAME","$FTPS_PASSWORD" -p "$FTPS_PORT" "$FTPS_HOST" -e "set net:timeout 20; set ftp:passive-mode true; set ftp:ssl-allow true; set ftp:ssl-protect-data true; set ssl:verify-certificate no; find ${target_path} -name '*_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].zip'; quit;" 2>&1); } then
-                get_list_status=0
-            else
-                get_list_status=$?
-                log_and_display "${RED}FTPS 列出文件失败！错误: ${raw_backups_list}${NC}" "" "/dev/stderr"
-            fi
-            raw_backups_list=$(echo "$raw_backups_list" | sed "s|^${target_path}||")
-        elif [[ "$service_type" == "sftp" ]]; then
-            if { raw_backups_list=$(lftp -u "$SFTP_USERNAME","$SFTP_PASSWORD" -p "$SFTP_PORT" "sftp://$SFTP_HOST" -e "set net:timeout 20; set sftp:auto-confirm yes; find ${target_path} -name '*_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].zip'; quit;" 2>&1); } then
-                get_list_status=0
-            else
-                get_list_status=$?
-                log_and_display "${RED}SFTP 列出文件失败！错误: ${raw_backups_list}${NC}" "" "/dev/stderr"
-            fi
-            raw_backups_list=$(echo "$raw_backups_list" | sed "s|^${target_path}||")
-        fi
-
-        if [ "$get_list_status" -ne 0 ]; then
-            log_and_display "${YELLOW}${service_display_name} 列表操作失败，跳过清理。${NC}"
-            return
-        fi
-
-        # Filter for the specific backup file pattern (e.g., my_file_YYYYMMDDHHMMSS.zip)
-        mapfile -t backups_array <<< "$(echo "$raw_backups_list" | grep -E '^[a-zA-Z0-9_-]+_[0-9]{14}\.zip$')"
-        
-        total_backups_found_ref=${#backups_array[@]}
-
-        if [ ${#backups_array[@]} -eq 0 ]; then
-            log_and_display "${YELLOW}${service_display_name} 存储中的指定路径 '${target_path}' 未找到备份文件，或工具未正确配置/权限不足。${NC}"
-        else
-            IFS=$'\n' backups_array=($(sort <<<"${backups_array[*]}")) # Sort by filename (which contains timestamp)
-            unset IFS
-
-            if [[ "$RETENTION_POLICY_TYPE" == "count" ]]; then
-                log_and_display "${service_display_name} 保留策略: 保留最新 ${RETENTION_VALUE} 个备份。"
-                local num_to_delete=$(( ${#backups_array[@]} - RETENTION_VALUE ))
-                if [ "$num_to_delete" -gt 0 ]; then
-                    log_and_display "${service_display_name}: 发现 ${num_to_delete} 个备份超过保留数量，将删除最旧的 ${num_to_delete} 个。" "${YELLOW}"
-                    for (( i=0; i<num_to_delete; i++ )); do
-                        local file_to_delete="${backups_array[$i]}"
-                        log_and_display "${service_display_name}: 正在删除旧备份: ${file_to_delete}" "${YELLOW}"
-                        if delete_file "$service_type" "$file_to_delete"; then
-                            deleted_count_ref=$((deleted_count_ref + 1))
-                        fi
-                    done
-                    log_and_display "${GREEN}${service_display_name} 旧备份清理完成。已删除 ${deleted_count_ref} 个文件。${NC}"
+        case $choice in
+            1)
+                local export_file
+                export_file="$(dirname "$0")/personal_backup.conf"
+                read -rp "确定要将当前配置导出到 ${export_file} 吗？(Y/n): " confirm_export
+                if [[ ! "$confirm_export" =~ ^[Nn]$ ]]; then
+                    save_config # 确保导出的是最新配置
+                    cp "$CONFIG_FILE" "$export_file"
+                    log_info "配置已成功导出到: ${export_file}"
                 else
-                    log_and_display "在 ${service_display_name} 中备份数量 (${total_backups_found_ref} 个) 未超过保留限制 (${RETENTION_VALUE} 个)，无需清理。" "${BLUE}"
+                    log_info "已取消导出。"
                 fi
-            elif [[ "$RETENTION_POLICY_TYPE" == "days" ]]; then
-                log_and_display "${service_display_name} 保留策略: 保留最近 ${RETENTION_VALUE} 天内的备份。"
-                local cutoff_timestamp=$(( current_timestamp - RETENTION_VALUE * 24 * 3600 ))
-                local files_to_delete=()
-                for backup_file in "${backups_array[@]}"; do
-                    local backup_date_str=$(echo "$backup_file" | sed -E 's/.*_([0-9]{14})\.zip/\1/')
-                    local backup_timestamp=$(date -d "${backup_date_str:0:8} ${backup_date_str:8:2}:${backup_date_str:10:2}:${backup_date_str:12:2}" +%s 2>/dev/null)
-
-                    if [[ "$backup_timestamp" -ne 0 && "$backup_timestamp" -lt "$cutoff_timestamp" ]]; then
-                        files_to_delete+=("$backup_file")
+                press_enter_to_continue
+                ;;
+            2)
+                read -rp "请输入配置文件的绝对路径: " import_file
+                if [[ -f "$import_file" ]]; then
+                    read -rp "${RED}警告：这将覆盖当前所有设置！确定要从 '${import_file}' 导入吗？(y/N): ${NC}" confirm_import
+                    if [[ "$confirm_import" =~ ^[Yy]$ ]]; then
+                        if [[ -f "$CONFIG_FILE" ]]; then
+                            cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
+                            log_warn "当前配置已备份到 ${CONFIG_FILE}.bak"
+                        fi
+                        cp "$import_file" "$CONFIG_FILE"
+                        log_info "配置导入成功！请重启脚本以使新配置生效。"
+                        press_enter_to_continue
+                        exit 0
+                    else
+                        log_info "已取消导入。"
                     fi
-                done
-
-                if [ ${#files_to_delete[@]} -gt 0 ]; then
-                    log_and_display "${service_display_name}: 发现 ${#files_to_delete[@]} 个备份超过 ${RETENTION_VALUE} 天，将进行删除。" "${YELLOW}"
-                    for file_to_delete in "${files_to_delete[@]}"; do
-                        local delete_timestamp=$(echo "$file_to_delete" | sed -E 's/.*_([0-9]{14})\.zip/\1/')
-                        local display_delete_date=$(date -d "${delete_timestamp:0:8} ${delete_timestamp:8:2}:${delete_timestamp:10:2}:${delete_timestamp:12:2}" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)
-                        log_and_display "${service_display_name}: 正在删除旧备份: ${file_to_delete} (创建于 ${display_delete_date})" "${YELLOW}"
-                        if delete_file "$service_type" "$file_to_delete"; then
-                            deleted_count_ref=$((deleted_count_ref + 1))
-                        fi
-                    done
-                    log_and_display "${GREEN}${service_display_name} 旧备份清理完成。已删除 ${deleted_count_ref} 个文件。${NC}"
                 else
-                    log_and_display "在 ${service_display_name} 中没有超过 ${RETENTION_VALUE} 天的备份，无需清理。" "${BLUE}"
+                    log_error "文件 '${import_file}' 不存在。"
                 fi
-            fi
-        fi
-    }
-
-    # Call process_service_retention for each enabled target
-    if [[ "$BACKUP_TARGET_S3" == "true" ]]; then
-        if [[ -n "$S3_ACCESS_KEY" && -n "$S3_SECRET_KEY" && -n "$S3_ENDPOINT" && -n "$S3_BUCKET_NAME" && -n "$S3_BACKUP_PATH" ]]; then
-            process_service_retention "s3" "S3_BACKUP_PATH" total_s3_backups_found deleted_s3_count
-        else
-            log_and_display "${YELLOW}S3/R2 已启用为备份目标但配置不完整，跳过 S3/R2 备份清理。${NC}"
-        fi
-    fi
-
-    if [[ "$BACKUP_TARGET_WEBDAV" == "true" ]]; then
-        if [[ -n "$WEBDAV_URL" && -n "$WEBDAV_USERNAME" && -n "$WEBDAV_PASSWORD" && -n "$WEBDAV_BACKUP_PATH" ]]; then
-            process_service_retention "webdav" "WEBDAV_BACKUP_PATH" total_webdav_backups_found deleted_webdav_count
-        else
-            log_and_display "${YELLOW}WebDAV 已启用为备份目标但配置不完整，跳过 WebDAV 备份清理。${NC}"
-        fi
-    fi
-
-    if [[ "$BACKUP_TARGET_FTP" == "true" ]]; then
-        if [[ -n "$FTP_HOST" && -n "$FTP_USERNAME" && -n "$FTP_PASSWORD" && -n "$FTP_BACKUP_PATH" ]]; then
-            process_service_retention "ftp" "FTP_BACKUP_PATH" total_ftp_backups_found deleted_ftp_count
-        else
-            log_and_display "${YELLOW}FTP 已启用为备份目标但配置不完整，跳过 FTP 备份清理。${NC}"
-        fi
-    fi
-
-    if [[ "$BACKUP_TARGET_FTPS" == "true" ]]; then
-        if [[ -n "$FTPS_HOST" && -n "$FTPS_USERNAME" && -n "$FTPS_PASSWORD" && -n "$FTPS_BACKUP_PATH" ]]; then
-            process_service_retention "ftps" "FTPS_BACKUP_PATH" total_ftps_backups_found deleted_ftps_count
-        else
-            log_and_display "${YELLOW}FTPS 已启用为备份目标但配置不完整，跳过 FTPS 备份清理。${NC}"
-        fi
-    fi
-
-    if [[ "$BACKUP_TARGET_SFTP" == "true" ]]; then
-        if [[ -n "$SFTP_HOST" && -n "$SFTP_USERNAME" && -n "$SFTP_BACKUP_PATH" ]]; then
-            process_service_retention "sftp" "SFTP_BACKUP_PATH" total_sftp_backups_found deleted_sftp_count
-        else
-            log_and_display "${YELLOW}SFTP 已启用为备份目标但配置不完整，跳过 SFTP 备份清理。${NC}"
-        fi
-    fi
-
-    local retention_summary
-    retention_summary="*个人自用数据备份：保留策略完成*"
-    retention_summary+=$'\n'"保留策略执行完毕。"
-    retention_summary+=$'\n'"S3/R2: 找到 ${total_s3_backups_found} 个，删除了 ${deleted_s3_count} 个。"
-    retention_summary+=$'\n'"WebDAV: 找到 ${total_webdav_backups_found} 个，删除了 ${deleted_webdav_count} 个。"
-    retention_summary+=$'\n'"FTP: 找到 ${total_ftp_backups_found} 个，删除了 ${deleted_ftp_count} 个。"
-    retention_summary+=$'\n'"FTPS: 找到 ${total_ftps_backups_found} 个，删除了 ${deleted_ftps_count} 个。"
-    retention_summary+=$'\n'"SFTP: 找到 ${total_sftp_backups_found} 个，删除了 ${deleted_sftp_count} 个。"
-    send_telegram_message "${retention_summary}"
-    log_and_display "${BLUE}--- 备份保留策略应用结束 ---${NC}"
+                press_enter_to_continue
+                ;;
+            0) break ;;
+            *) log_error "无效选项。"; press_enter_to_continue ;;
+        esac
+    done
 }
 
-
-# ================================================================
-# ===         [修改后] 执行备份上传的核心逻辑                  ===
-# === 核心改动：调整了 Telegram 报告的格式，使每个上传目标的信息 ===
-# ===         各占一行，观感更清晰。                         ===
-# ================================================================
-perform_backup() {
-    local backup_type="$1"
-    local readable_time=$(date '+%Y-%m-%d %H:%M:%S')
-    local overall_status="失败"
-    local overall_succeeded_count=0
-    local total_paths_to_backup=${#BACKUP_SOURCE_PATHS_ARRAY[@]}
-
-    log_and_display "${BLUE}--- ${backup_type} 过程开始 ---${NC}"
-
-    local initial_message
-    initial_message="*个人自用数据备份：开始 (${backup_type})*"
-    initial_message+=$'\n'"时间: ${readable_time}"
-    initial_message+=$'\n'"将备份 ${total_paths_to_backup} 个路径。"
-    send_telegram_message "${initial_message}"
-
-    if [ ${#BACKUP_SOURCE_PATHS_ARRAY[@]} -eq 0 ]; then
-        log_and_display "${RED}错误：没有设置任何备份源路径。请先通过 '3. 自定义备份路径' 添加路径。${NC}"
-        local error_msg
-        error_msg="*个人自用数据备份：失败*"
-        error_msg+=$'\n'"原因: 未设置备份源路径。"
-        send_telegram_message "$error_msg"
-        return 1
-    fi
-
-    # 遍历每个备份源路径
-    for i in "${!BACKUP_SOURCE_PATHS_ARRAY[@]}"; do
-        local current_backup_path="${BACKUP_SOURCE_PATHS_ARRAY[$i]}"
-        local path_display_name=$(basename "$current_backup_path") # 用于显示友好的路径名
-        local timestamp=$(date +%Y%m%d%H%M%S)
-
-        # 清理路径名，使其适合作为文件名 (替换非字母数字下划线连字符为下划线)
-        local sanitized_path_name=$(echo "$path_display_name" | sed 's/[^a-zA-Z0-9_-]/_/g')
-        # 确保文件名不会以点开头，或者有连续的点
-        sanitized_path_name=$(echo "$sanitized_path_name" | sed 's/^\.//; s/\.\./_/g')
-        # 如果处理后为空，则使用通用名加索引
-        if [[ -z "$sanitized_path_name" ]]; then
-            sanitized_path_name="backup_item_${i}"
-        fi
-
-        local archive_name="${sanitized_path_name}_${timestamp}.zip"
-        local temp_archive_path="${TEMP_DIR}/${archive_name}"
-        local backup_file_size="未知"
-        local current_path_upload_status="失败" # 记录当前路径的上传状态
-        local any_upload_succeeded_for_path="false" # Track if any upload succeeded for this specific path
-
-        log_and_display "${BLUE}--- 正在处理路径 $((i+1))/${total_paths_to_backup}: ${current_backup_path} ---${NC}"
-
-        if [[ ! -d "$current_backup_path" && ! -f "$current_backup_path" ]]; then
-            log_and_display "${RED}错误：路径 '$current_backup_path' 无效或不存在，跳过此路径备份。${NC}"
-            local path_error_msg
-            path_error_msg="*个人自用数据备份：路径失败*"
-            path_error_msg+=$'\n'"路径: \`${current_backup_path}\`"
-            path_error_msg+=$'\n'"原因: 路径无效或不存在。"
-            send_telegram_message "$path_error_msg"
-            continue # 跳过当前路径，继续下一个
-        fi
-
-        # --- 压缩文件 ---
-        log_and_display "正在压缩路径 '$current_backup_path' 到文件 '$archive_name'..."
-        local zip_command_status=1 # 默认为失败
-        local zip_output="" # Capture all output (stdout and stderr)
-
-        if [[ -d "$current_backup_path" ]]; then
-            # 压缩目录，只包含目录内的内容，不包含父目录本身
-            zip_output=$( (cd "$(dirname "$current_backup_path")" && zip -r "$temp_archive_path" "$(basename "$current_backup_path")") 2>&1 )
-            zip_command_status=$?
-        elif [[ -f "$current_backup_path" ]]; then
-            # 压缩单个文件
-            zip_output=$(zip "$temp_archive_path" "$current_backup_path" 2>&1)
-            zip_command_status=$?
-        fi
-
-        if [ "$zip_command_status" -eq 0 ]; then
-            log_and_display "${GREEN}文件压缩成功！${NC}"
-            if [[ -f "$temp_archive_path" ]]; then
-                backup_file_size=$(du -h "$temp_archive_path" | awk '{print $1}')
-            else
-                backup_file_size="未知 (压缩文件未生成)"
-                log_and_display "${RED}警告：压缩成功但未找到生成的临时文件：$temp_archive_path${NC}"
-            fi
-        else
-            log_and_display "${RED}文件压缩失败！请检查路径权限或磁盘空间。错误码: ${zip_command_status}${NC}"
-            local zip_error_msg
-            zip_error_msg="*个人自用数据备份：压缩失败*"
-            zip_error_msg+=$'\n'"路径: \`${current_backup_path}\`"
-            zip_error_msg+=$'\n'"文件: \`${archive_name}\`"
-            zip_error_msg+=$'\n'"原因: 压缩失败，错误码: ${zip_command_status}"
-            zip_error_msg+=$'\n'"详细错误: \`${zip_output}\`"
-            send_telegram_message "$zip_error_msg"
-            rm -f "$temp_archive_path" 2>/dev/null # 尝试清理失败的临时文件
-            continue # 跳过当前路径的上传，继续下一个
-        fi
-
-        # Store upload statuses for current path
-        local s3_this_upload_status="未尝试"
-        local webdav_this_upload_status="未尝试"
-        local ftp_this_upload_status="未尝试"
-        local ftps_this_upload_status="未尝试"
-        local sftp_this_upload_status="未尝试"
-
-
-        # --- 上传到 S3/R2 ---
-        if [[ "$BACKUP_TARGET_S3" == "true" ]]; then
-            if [[ -n "$S3_ACCESS_KEY" && -n "$S3_SECRET_KEY" && -n "$S3_ENDPOINT" && -n "$S3_BUCKET_NAME" && -n "$S3_BACKUP_PATH" ]]; then
-                log_and_display "正在尝试上传到 S3/R2 存储桶：${S3_BUCKET_NAME}/${S3_BACKUP_PATH}${archive_name}..."
-                local s3_upload_output=""
-                local s3_upload_status_code=1
-
-                export AWS_ACCESS_KEY_ID="$S3_ACCESS_KEY"
-                export AWS_SECRET_ACCESS_KEY="$S3_SECRET_KEY"
-
-                if command -v aws &> /dev/null; then
-                    if { s3_upload_output=$(aws s3 cp "$temp_archive_path" "s3://${S3_BUCKET_NAME}/${S3_BACKUP_PATH}${archive_name}" --endpoint-url "$S3_ENDPOINT" 2>&1); } then
-                        s3_upload_status_code=0
-                    else
-                        s3_upload_status_code=$?
-                    fi
-                elif command -v s3cmd &> /dev/null; then
-                    if { s3_upload_output=$(s3cmd put "$temp_archive_path" "s3://${S3_BUCKET_NAME}/${S3_BACKUP_PATH}${archive_name}" 2>&1); } then
-                        s3_upload_status_code=0
-                    else
-                        s3_upload_status_code=$?
-                    fi
-                fi
-                unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
-
-                if [ "$s3_upload_status_code" -eq 0 ]; then
-                    log_and_display "${GREEN}S3/R2 上传成功！${NC}"
-                    s3_this_upload_status="成功"
-                    any_upload_succeeded_for_path="true"
-                else
-                    log_and_display "${RED}S3/R2 上传失败！错误信息: ${s3_upload_output}${NC}"
-                    s3_this_upload_status="失败"
-                fi
-            else
-                log_and_display "${RED}S3/R2 已设置为备份目标，但配置不完整。跳过 S3/R2 上传。${NC}"
-                s3_this_upload_status="跳过 (配置不完整)"
-            fi
-        else
-            log_and_display "${YELLOW}S3/R2 未设置为备份目标，跳过 S3/R2 上传。${NC}"
-            s3_this_upload_status="禁用"
-        fi
-
-        # --- 上传到 WebDAV ---
-        if [[ "$BACKUP_TARGET_WEBDAV" == "true" ]]; then
-            if [[ -n "$WEBDAV_URL" && -n "$WEBDAV_USERNAME" && -n "$WEBDAV_PASSWORD" && -n "$WEBDAV_BACKUP_PATH" ]]; then
-                log_and_display "正在尝试上传到 WebDAV 服务器：${WEBDAV_URL%/}/${WEBDAV_BACKUP_PATH}${archive_name}..."
-                local webdav_upload_output=""
-                local webdav_upload_status_code=1
-
-                if command -v curl &> /dev/null; then
-                    if { webdav_upload_output=$(curl -k --user "$WEBDAV_USERNAME:$WEBDAV_PASSWORD" --upload-file "$temp_archive_path" "${WEBDAV_URL%/}/${WEBDAV_BACKUP_PATH}${archive_name}" --fail --no-progress-meter 2>&1); } then
-                        webdav_upload_status_code=0
-                    else
-                        webdav_upload_status_code=$?
-                    fi
-                fi
-
-                if [ "$webdav_upload_status_code" -eq 0 ]; then
-                    log_and_display "${GREEN}WebDAV 上传成功！${NC}"
-                    webdav_this_upload_status="成功"
-                    any_upload_succeeded_for_path="true"
-                else
-                    log_and_display "${RED}WebDAV 上传失败！错误信息: ${webdav_upload_output}${NC}"
-                    webdav_this_upload_status="失败"
-                fi
-            else
-                log_and_display "${RED}WebDAV 已设置为备份目标，但配置不完整。跳过 WebDAV 上传。${NC}"
-                webdav_this_upload_status="跳过 (配置不完整)"
-            fi
-        else
-            log_and_display "${YELLOW}WebDAV 未设置为备份目标，跳过 WebDAV 上传。${NC}"
-            webdav_this_upload_status="禁用"
-        fi
-
-        # --- FTP 上传 ---
-        if [[ "$BACKUP_TARGET_FTP" == "true" ]]; then
-            if [[ -n "$FTP_HOST" && -n "$FTP_USERNAME" && -n "$FTP_PASSWORD" && -n "$FTP_BACKUP_PATH" ]]; then
-                log_and_display "正在尝试上传到 FTP 服务器：${FTP_HOST}:${FTP_PORT}${FTP_BACKUP_PATH}${archive_name}..."
-                local ftp_upload_output=""
-                local ftp_upload_status_code=1
-
-                if { ftp_upload_output=$(lftp -p "$FTP_PORT" -u "$FTP_USERNAME,$FTP_PASSWORD" "$FTP_HOST" <<EOF
-set net:timeout 300
-set ftp:passive-mode true
-mkdir -p "$FTP_BACKUP_PATH"
-put -O "$FTP_BACKUP_PATH" "$temp_archive_path"
-quit
-EOF
-                2>&1); }; then
-                    ftp_upload_status_code=0
-                else
-                    ftp_upload_status_code=$?
-                fi
-
-                if [ "$ftp_upload_status_code" -eq 0 ]; then
-                    log_and_display "${GREEN}FTP 上传成功！${NC}"
-                    ftp_this_upload_status="成功"
-                    any_upload_succeeded_for_path="true"
-                else
-                    log_and_display "${RED}FTP 上传失败！请检查配置或网络连接。错误信息: ${ftp_upload_output}${NC}"
-                    ftp_this_upload_status="失败"
-                fi
-            else
-                log_and_display "${RED}FTP 已设置为备份目标，但配置不完整。跳过 FTP 上传。${NC}"
-                ftp_this_upload_status="跳过 (配置不完整)"
-            fi
-        else
-            log_and_display "${YELLOW}FTP 未设置为备份目标，跳过 FTP 上传。${NC}"
-            ftp_this_upload_status="禁用"
-        fi
-
-        # --- FTPS 上传 ---
-        if [[ "$BACKUP_TARGET_FTPS" == "true" ]]; then
-            if [[ -n "$FTPS_HOST" && -n "$FTPS_USERNAME" && -n "$FTPS_PASSWORD" && -n "$FTPS_BACKUP_PATH" ]]; then
-                log_and_display "正在尝试上传到 FTPS 服务器：${FTPS_HOST}:${FTPS_PORT}${FTPS_BACKUP_PATH}${archive_name}..."
-                local ftps_upload_output=""
-                local ftps_upload_status_code=1
-
-                if { ftps_upload_output=$(lftp -p "$FTPS_PORT" -u "$FTPS_USERNAME,$FTPS_PASSWORD" "$FTPS_HOST" <<EOF
-set net:timeout 300
-set ftp:passive-mode true
-set ftp:ssl-allow true
-set ftp:ssl-protect-data true
-set ssl:verify-certificate no
-mkdir -p "$FTPS_BACKUP_PATH"
-put -O "$FTPS_BACKUP_PATH" "$temp_archive_path"
-quit
-EOF
-                2>&1); }; then
-                    ftps_upload_status_code=0
-                else
-                    ftps_upload_status_code=$?
-                fi
-
-                if [ "$ftps_upload_status_code" -eq 0 ]; then
-                    log_and_display "${GREEN}FTPS 上传成功！${NC}"
-                    ftps_this_upload_status="成功"
-                    any_upload_succeeded_for_path="true"
-                else
-                    log_and_display "${RED}FTPS 上传失败！请检查配置或网络连接。错误信息: ${ftps_upload_output}${NC}"
-                    ftps_this_upload_status="失败"
-                fi
-            else
-                log_and_display "${RED}FTPS 已设置为备份目标，但配置不完整。跳过 FTPS 上传。${NC}"
-                ftps_this_upload_status="跳过 (配置不完整)"
-            fi
-        else
-            log_and_display "${YELLOW}FTPS 未设置为备份目标，跳过 FTPS 上传。${NC}"
-            ftps_this_upload_status="禁用"
-        fi
-
-        # --- SFTP 上传, 使用 lftp ---
-        if [[ "$BACKUP_TARGET_SFTP" == "true" ]]; then
-            if [[ -n "$SFTP_HOST" && -n "$SFTP_USERNAME" && -n "$SFTP_BACKUP_PATH" ]]; then
-                log_and_display "正在尝试上传到 SFTP 服务器：${SFTP_USERNAME}@${SFTP_HOST}:${SFTP_PORT}${SFTP_BACKUP_PATH}${archive_name}..."
-                local sftp_upload_output=""
-                local sftp_upload_status_code=1
-
-                if { sftp_upload_output=$(lftp -p "$SFTP_PORT" -u "$SFTP_USERNAME,$SFTP_PASSWORD" "sftp://$SFTP_HOST" <<EOF
-set net:timeout 300
-set sftp:auto-confirm yes
-mkdir -p "$SFTP_BACKUP_PATH"
-put -O "$SFTP_BACKUP_PATH" "$temp_archive_path"
-quit
-EOF
-                2>&1); }; then
-                    sftp_upload_status_code=0
-                else
-                    sftp_upload_status_code=$?
-                fi
-
-                if [ "$sftp_upload_status_code" -eq 0 ]; then
-                    log_and_display "${GREEN}SFTP 上传成功！${NC}"
-                    sftp_this_upload_status="成功"
-                    any_upload_succeeded_for_path="true"
-                else
-                    log_and_display "${RED}SFTP 上传失败！请检查配置或网络连接。错误信息: ${sftp_upload_output}${NC}"
-                    sftp_this_upload_status="失败"
-                fi
-            else
-                log_and_display "${RED}SFTP 已设置为备份目标，但配置不完整。跳过 SFTP 上传。${NC}"
-                sftp_this_upload_status="跳过 (配置不完整)"
-            fi
-        else
-            log_and_display "${YELLOW}SFTP 未设置为备份目标，跳过 SFTP 上传。${NC}"
-            sftp_this_upload_status="禁用"
-        fi
-
-        # 记录当前路径的整体上传状态
-        if [[ "$any_upload_succeeded_for_path" == "true" ]]; then
-            overall_succeeded_count=$((overall_succeeded_count + 1))
-            current_path_upload_status="成功"
-        else
-            current_path_upload_status="失败"
-        fi
-
-        # --- 格式化并发送 Telegram 消息 ---
-        local path_summary_message
-        path_summary_message="*个人自用数据备份：路径完成 (${current_path_upload_status})*"
-        path_summary_message+=$'\n'"路径: \`${current_backup_path}\`"
-        path_summary_message+=$'\n'"备份文件: \`${archive_name}\`"
-        path_summary_message+=$'\n'"文件大小: ${backup_file_size}"
-        path_summary_message+=$'\n\n'"*上传状态:*"
-        
-        path_summary_message+=$'\n'"S3/R2: ${s3_this_upload_status}"
-        if [[ "$BACKUP_TARGET_S3" == "true" && "$s3_this_upload_status" != "禁用" && "$s3_this_upload_status" != "跳过 (配置不完整)" ]]; then
-             path_summary_message+=$'\n'"  - 目标: \`${S3_BUCKET_NAME}${S3_BACKUP_PATH}\`"
-        fi
-        
-        path_summary_message+=$'\n'"WebDAV: ${webdav_this_upload_status}"
-        if [[ "$BACKUP_TARGET_WEBDAV" == "true" && "$webdav_this_upload_status" != "禁用" && "$webdav_this_upload_status" != "跳过 (配置不完整)" ]]; then
-             path_summary_message+=$'\n'"  - 目标: \`${WEBDAV_URL%/}${WEBDAV_BACKUP_PATH}\`"
-        fi
-        
-        path_summary_message+=$'\n'"FTP: ${ftp_this_upload_status}"
-        if [[ "$BACKUP_TARGET_FTP" == "true" && "$ftp_this_upload_status" != "禁用" && "$ftp_this_upload_status" != "跳过 (配置不完整)" ]]; then
-             path_summary_message+=$'\n'"  - 目标: \`${FTP_HOST}:${FTP_PORT}${FTP_BACKUP_PATH}\`"
-        fi
-
-        path_summary_message+=$'\n'"FTPS: ${ftps_this_upload_status}"
-        if [[ "$BACKUP_TARGET_FTPS" == "true" && "$ftps_this_upload_status" != "禁用" && "$ftps_this_upload_status" != "跳过 (配置不完整)" ]]; then
-             path_summary_message+=$'\n'"  - 目标: \`${FTPS_HOST}:${FTPS_PORT}${FTPS_BACKUP_PATH}\`"
-        fi
-        
-        path_summary_message+=$'\n'"SFTP: ${sftp_this_upload_status}"
-        if [[ "$BACKUP_TARGET_SFTP" == "true" && "$sftp_this_upload_status" != "禁用" && "$sftp_this_upload_status" != "跳过 (配置不完整)" ]]; then
-             path_summary_message+=$'\n'"  - 目标: \`${SFTP_HOST}:${SFTP_PORT}${SFTP_BACKUP_PATH}\`"
-        fi
-        
-        send_telegram_message "${path_summary_message}"
-
-        # 清理当前路径的临时压缩文件
-        if [[ -f "$temp_archive_path" ]]; then
-            log_and_display "正在清理临时压缩文件：$temp_archive_path"
-            rm -f "$temp_archive_path"
-            if [ $? -eq 0 ]; then
-                log_and_display "${GREEN}临时文件清理完成。${NC}"
-            else
-                log_and_display "${RED}临时文件清理失败。${NC}"
-            fi
-        fi
-    done # 结束所有路径的循环
-
-    # 根据所有路径的备份结果确定整体状态
-    if [ "$overall_succeeded_count" -eq "$total_paths_to_backup" ] && [ "$total_paths_to_backup" -gt 0 ]; then
-        overall_status="全部成功"
-    elif [ "$overall_succeeded_count" -gt 0 ]; then
-        overall_status="部分成功"
-    elif [ "$total_paths_to_backup" -eq 0 ]; then
-        overall_status="未执行 (无备份路径)"
-    else
-        overall_status="全部失败"
-    fi
-
-    log_and_display "${BLUE}--- ${backup_type} 过程结束 ---${NC}"
-
-    # 如果是自动备份，更新上次自动备份时间戳
-    if [[ "$backup_type" == "自动备份 (Cron)" ]]; then
-        LAST_AUTO_BACKUP_TIMESTAMP=$(date +%s)
-        save_config # 保存更新后的时间戳 (这也会保存当前凭证)
-        log_and_display "已更新上次自动备份时间戳：$(date -d @$LAST_AUTO_BACKUP_TIMESTAMP '+%Y-%m-%d %H:%M:%S')" "${BLUE}"
-    fi
-
-    # 发送最终的整体 Telegram 通知
-    local final_overall_message
-    final_overall_message="*个人自用数据备份：总览 (${overall_status})*"
-    final_overall_message+=$'\n'"时间: ${readable_time}"
-    final_overall_message+=$'\n'"类型: ${backup_type}"
-    final_overall_message+=$'\n'"总路径数: ${total_paths_to_backup}"
-    final_overall_message+=$'\n'"成功备份路径数: ${overall_succeeded_count}"
-    send_telegram_message "${final_overall_message}"
-
-    # 只有在至少一个上传尝试成功后才应用保留策略
-    if [[ "$overall_succeeded_count" -gt 0 ]]; then
-        apply_retention_policy
-    else
-        log_and_display "${YELLOW}由于没有成功的备份上传，跳过保留策略的执行。${NC}"
-    fi
-}
-
-
-# 99. 卸载脚本
-uninstall_script() {
-    display_header
-    echo -e "${RED}=== 99. 卸载脚本 ===${NC}"
-    log_and_display "${RED}警告：您确定要卸载脚本吗？这将删除所有脚本文件、配置文件和日志文件。（y/N）${NC}"
-    read -rp "请确认 (y/N): " confirm
-
-    if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        log_and_display "${RED}开始卸载脚本...${NC}"
-        local script_path="$(readlink -f "$0")" # 获取脚本的真实路径
-
-        log_and_display "删除脚本文件：$script_path"
-        rm -f "$script_path" 2>/dev/null
-
-        if [[ -f "$CONFIG_FILE" ]]; then
-            log_and_display "删除配置文件：$CONFIG_FILE"
-            rm -f "$CONFIG_FILE" 2>/dev/null
-        fi
-
-        if [[ -d "$CONFIG_DIR" ]] && [ -z "$(ls -A "$CONFIG_DIR")" ]; then
-            log_and_display "删除空配置目录：$CONFIG_DIR"
-            rmdir "$CONFIG_DIR" 2>/dev/null
-        fi
-
+# [NEW] 日志与维护菜单
+system_maintenance_menu() {
+    while true; do
+        display_header
+        echo -e "${BLUE}=== 11. 日志与维护 ===${NC}"
+        echo ""
+        local log_info_str="(文件不存在)"
         if [[ -f "$LOG_FILE" ]]; then
-            log_and_display "删除日志文件：$LOG_FILE"
-            rm -f "$LOG_FILE" 2>/dev/null
+            local log_size
+            log_size=$(du -h "$LOG_FILE" 2>/dev/null | awk '{print $1}')
+            log_info_str="(大小: ${log_size})"
         fi
 
-        if [[ -d "$LOG_DIR" ]] && [ -z "$(ls -A "$LOG_DIR")" ]; then
-            log_and_display "删除空日志目录：$LOG_DIR"
-            rmdir "$LOG_DIR" 2>/dev/null
-        fi
+        local level_names=("" "DEBUG" "INFO" "WARN" "ERROR")
+        local console_level_name=${level_names[$CONSOLE_LOG_LEVEL]}
+        local file_level_name=${level_names[$FILE_LOG_LEVEL]}
 
-        log_and_display "${YELLOW}提示：如果此脚本是通过别名或放置在 PATH 中的文件启动的，您可能需要手动删除它们。${NC}"
-        log_and_display "${GREEN}脚本卸载完成。${NC}"
-        exit 0
+        echo -e "  1. ${YELLOW}设置日志级别${NC} (终端: ${console_level_name}, 文件: ${file_level_name})"
+        echo -e "  2. ${YELLOW}查看日志文件${NC} ${log_info_str}"
+        echo ""
+        echo -e "  0. ${RED}返回主菜单${NC}"
+        read -rp "请输入选项: " choice
+
+        case $choice in
+            1) manage_log_settings ;;
+            2)
+                if [[ -f "$LOG_FILE" ]]; then
+                    less "$LOG_FILE"
+                else
+                    log_warn "日志文件不存在。"
+                    press_enter_to_continue
+                fi
+                ;;
+            0) break ;;
+            *) log_error "无效选项。"; press_enter_to_continue ;;
+        esac
+    done
+}
+
+# [NEW] 管理日志级别的子菜单
+manage_log_settings() {
+    while true; do
+        display_header
+        echo -e "${BLUE}--- 设置日志级别 ---${NC}"
+
+        local level_names=("" "DEBUG" "INFO" "WARN" "ERROR")
+        local console_level_name=${level_names[$CONSOLE_LOG_LEVEL]}
+        local file_level_name=${level_names[$FILE_LOG_LEVEL]}
+
+        echo -e "当前终端日志级别: ${GREEN}${console_level_name}${NC}"
+        echo -e "当前文件日志级别: ${GREEN}${file_level_name}${NC}"
+        echo ""
+        echo "日志级别说明:"
+        echo "  - DEBUG: 最详细，用于排错"
+        echo "  - INFO : 显示主要流程信息 (默认)"
+        echo "  - WARN : 只显示警告和错误"
+        echo "  - ERROR: 只显示错误"
+        echo ""
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  1. ${YELLOW}设置终端日志级别${NC}"
+        echo -e "  2. ${YELLOW}设置文件日志级别${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  0. ${RED}返回${NC}"
+        read -rp "请输入选项: " choice
+
+        case $choice in
+            1) set_log_level "console" ;;
+            2) set_log_level "file" ;;
+            0) break ;;
+            *) log_error "无效选项。"; press_enter_to_continue ;;
+        esac
+    done
+}
+
+# [NEW] 设置具体日志级别的函数
+set_log_level() {
+    local target="$1" # "console" or "file"
+    
+    local current_level_val
+    if [[ "$target" == "console" ]]; then
+        current_level_val=$CONSOLE_LOG_LEVEL
     else
-        log_and_display "取消卸载。" "${BLUE}"
+        current_level_val=$FILE_LOG_LEVEL
+    fi
+    
+    echo "请为 ${target} 选择新的日志级别 [当前: ${current_level_val}]:"
+    echo "  1. DEBUG"
+    echo "  2. INFO"
+    echo "  3. WARN"
+    echo "  4. ERROR"
+    read -rp "请输入选项 (1-4): " level_choice
+    
+    if [[ "$level_choice" =~ ^[1-4]$ ]]; then
+        if [[ "$target" == "console" ]]; then
+            CONSOLE_LOG_LEVEL=$level_choice
+        else
+            FILE_LOG_LEVEL=$level_choice
+        fi
+        save_config
+        log_info "${target} 日志级别已更新。"
+    else
+        log_error "无效输入。"
     fi
     press_enter_to_continue
 }
 
-# --- 主菜单 ---
+
+uninstall_script() {
+    display_header
+    echo -e "${RED}=== 99. 卸载脚本 ===${NC}"
+    read -rp "警告：这将删除所有脚本文件、配置文件和日志文件。确定吗？(y/N): " confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        log_warn "开始卸载..."
+        rm -f "$CONFIG_FILE" 2>/dev/null && log_info "删除配置文件: $CONFIG_FILE"
+        rmdir "$CONFIG_DIR" 2>/dev/null && log_info "删除配置目录: $CONFIG_DIR"
+        rm -f "$LOG_FILE" 2>/dev/null && log_info "删除日志文件: $LOG_FILE"
+        rm -f "${LOG_FILE}".*.rotated 2>/dev/null && log_info "删除轮转日志"
+        rmdir "$LOG_DIR" 2>/dev/null && log_info "删除日志目录: $LOG_DIR"
+        log_warn "删除脚本文件: $(readlink -f "$0")" && rm -f "$(readlink -f "$0")"
+        echo -e "${GREEN}卸载完成。${NC}"
+        exit 0
+    else
+        log_info "取消卸载。"
+    fi
+    press_enter_to_continue
+}
+
 show_main_menu() {
     display_header
-    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 功能选项 ━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  1. ${YELLOW}自动备份设定${NC} (当前间隔: ${AUTO_BACKUP_INTERVAL_DAYS} 天)${NC}"
-    echo -e "  2. ${YELLOW}手动备份${NC}"
-    echo -e "  3. ${YELLOW}自定义备份路径${NC} (当前数量: ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个)${NC}" # 显示路径数量
-    echo -e "  4. ${YELLOW}压缩包格式${NC} (当前支持: ZIP)${NC}"
-    echo -e "  5. ${YELLOW}云存储设定${NC} (支持: S3/R2, WebDAV, FTP, FTPS, SFTP)${NC}"
-    echo -e "  6. ${YELLOW}消息通知设定${NC} (Telegram)${NC}"
+
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━ 状态总览 ━━━━━━━━━━━━━━━━━━━${NC}"
+    local last_backup_str="从未"
+    if [[ "$LAST_AUTO_BACKUP_TIMESTAMP" -ne 0 ]]; then
+        last_backup_str=$(date -d "@$LAST_AUTO_BACKUP_TIMESTAMP" '+%Y-%m-%d %H:%M:%S')
+    fi
+    echo -e "上次备份: ${last_backup_str}"
     
-    # 动态显示当前的保留策略
-    local retention_status_text
-    case "$RETENTION_POLICY_TYPE" in
-        "none")
-            retention_status_text="已禁用"
-            ;;
-        "count")
-            retention_status_text="保留 ${RETENTION_VALUE} 个"
-            ;;
-        "days")
-            retention_status_text="保留 ${RETENTION_VALUE} 天"
-            ;;
-        *)
-            retention_status_text="未设置"
-            ;;
-    esac
-    echo -e "  7. ${YELLOW}设置备份保留策略${NC} (云端: ${retention_status_text})${NC}"
+    local next_backup_str="取决于间隔设置"
+    if [[ "$LAST_AUTO_BACKUP_TIMESTAMP" -ne 0 ]]; then
+        local next_ts=$((LAST_AUTO_BACKUP_TIMESTAMP + AUTO_BACKUP_INTERVAL_DAYS * 86400))
+        next_backup_str=$(date -d "@$next_ts" '+%Y-%m-%d %H:%M:%S')
+    fi
+    echo -e "下次预估: ${next_backup_str}"
+    
+    local mode_text="归档模式"
+    if [[ "$BACKUP_MODE" == "sync" ]]; then
+        mode_text="同步模式"
+    fi
+    echo -e "备份模式: ${GREEN}${mode_text}${NC}   备份源: ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个  已启用目标: ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} 个"
+
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 功能选项 ━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  1. ${YELLOW}自动备份与计划任务${NC} (间隔: ${AUTO_BACKUP_INTERVAL_DAYS} 天)"
+    echo -e "  2. ${YELLOW}手动备份${NC}"
+    echo -e "  3. ${YELLOW}自定义备份路径与模式${NC}"
+    
+    local format_text="$COMPRESSION_FORMAT"
+    if [[ "$COMPRESSION_FORMAT" == "zip" && -n "$ZIP_PASSWORD" ]]; then
+        format_text+=" (有密码)"
+    fi
+    echo -e "  4. ${YELLOW}压缩包格式与选项${NC} (当前: ${format_text})"
+    echo -e "  5. ${YELLOW}云存储设定${NC} (Rclone)"
+
+    local telegram_status_text="已禁用"
+    if [[ "$TELEGRAM_ENABLED" == "true" ]]; then
+        telegram_status_text="已启用"
+    fi
+    echo -e "  6. ${YELLOW}消息通知设定${NC} (Telegram, 当前: ${telegram_status_text})"
+
+    local retention_status_text="已禁用"
+    if [[ "$RETENTION_POLICY_TYPE" == "count" ]]; then
+        retention_status_text="保留 ${RETENTION_VALUE} 个"
+    elif [[ "$RETENTION_POLICY_TYPE" == "days" ]]; then
+        retention_status_text="保留 ${RETENTION_VALUE} 天"
+    fi
+    echo -e "  7. ${YELLOW}设置备份保留策略${NC} (当前: ${retention_status_text})"
+
+    local rclone_version_text="(未安装)"
+    if command -v rclone &> /dev/null; then
+        local rclone_version
+        rclone_version=$(rclone --version | head -n 1)
+        rclone_version_text="(${rclone_version})"
+    fi
+    echo -e "  8. ${YELLOW}Rclone 安装/卸载${NC} ${rclone_version_text}"
+    
+    echo -e "  9. ${YELLOW}从云端恢复到本地${NC} (仅适用于归档模式)"
+    echo -e "  10. ${YELLOW}[助手] 配置导入/导出${NC}"
+    echo -e "  11. ${YELLOW}日志与维护${NC}"
 
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "  0. ${RED}退出脚本${NC}"
@@ -3117,106 +1807,78 @@ show_main_menu() {
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 }
 
-# 处理菜单选择
 process_menu_choice() {
-    local choice
     read -rp "请输入选项: " choice
-    log_and_display "用户选择: $choice"
-
     case $choice in
-        1) set_auto_backup_interval ;;
+        1) manage_auto_backup_menu ;;
         2) manual_backup ;;
-        3) set_backup_path ;; # 调用新的多路径管理函数
-        4) display_compression_info ;;
+        3) set_backup_path_and_mode ;;
+        4) manage_compression_settings ;;
         5) set_cloud_storage ;;
         6) set_telegram_notification ;;
         7) set_retention_policy ;;
-        0)
-            log_and_display "${GREEN}感谢使用，再见！${NC}"
-            exit 0
-            ;;
+        8) manage_rclone_installation ;;
+        9) restore_backup ;;
+        10) manage_config_import_export ;;
+        11) system_maintenance_menu ;;
+        0) echo -e "${GREEN}感谢使用！${NC}"; exit 0 ;;
         99) uninstall_script ;;
-        *)
-            log_and_display "${RED}无效的选项，请重新输入。${NC}"
-            press_enter_to_continue
-            ;;
+        *) log_error "无效选项。"; press_enter_to_continue ;;
     esac
 }
 
-# 检查是否应该运行自动备份
 check_auto_backup() {
-    load_config # 确保加载最新配置
-
+    # Cron模式也需要加载配置来确定日志级别等
+    load_config
+    rotate_log_if_needed
+    acquire_lock # 在加载配置后获取锁，这样日志才能正常工作
+    
     local current_timestamp=$(date +%s)
-    local interval_seconds=$(( AUTO_BACKUP_INTERVAL_DAYS * 24 * 3600 )) # 将天数转换为秒
+    local interval_seconds=$(( AUTO_BACKUP_INTERVAL_DAYS * 24 * 3600 ))
 
-    # 检查是否有至少一个备份路径
     if [ ${#BACKUP_SOURCE_PATHS_ARRAY[@]} -eq 0 ]; then
-        log_and_display "${RED}自动备份失败：没有设置任何备份源路径。请通过主菜单设置。${NC}"
-        local error_msg
-        error_msg="*个人自用数据备份：自动备份失败*"
-        error_msg+=$'\n'"原因: 未设置备份源路径。"
-        send_telegram_message "$error_msg"
+        log_error "自动备份失败：未设置备份源。"
+        send_telegram_message "*${SCRIPT_NAME}：自动备份失败*\n原因: 未设置备份源。"
+        return 1
+    fi
+    if [ ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} -eq 0 ]; then
+        log_error "自动备份失败：未启用 Rclone 目标。"
+        send_telegram_message "*${SCRIPT_NAME}：自动备份失败*\n原因: 未启用 Rclone 目标。"
         return 1
     fi
 
-    # 检查是否有至少一个启用的备份目标
-    local any_target_enabled="false"
-    if [[ "$BACKUP_TARGET_S3" == "true" && -n "$S3_ACCESS_KEY" && -n "$S3_SECRET_KEY" && -n "$S3_ENDPOINT" && -n "$S3_BUCKET_NAME" && -n "$S3_BACKUP_PATH" ]]; then any_target_enabled="true"; fi
-    if [[ "$BACKUP_TARGET_WEBDAV" == "true" && -n "$WEBDAV_URL" && -n "$WEBDAV_USERNAME" && -n "$WEBDAV_PASSWORD" && -n "$WEBDAV_BACKUP_PATH" ]]; then any_target_enabled="true"; fi
-    if [[ "$BACKUP_TARGET_FTP" == "true" && -n "$FTP_HOST" && -n "$FTP_USERNAME" && -n "$FTP_PASSWORD" && -n "$FTP_BACKUP_PATH" ]]; then any_target_enabled="true"; fi
-    if [[ "$BACKUP_TARGET_FTPS" == "true" && -n "$FTPS_HOST" && -n "$FTPS_USERNAME" && -n "$FTPS_PASSWORD" && -n "$FTPS_BACKUP_PATH" ]]; then any_target_enabled="true"; fi
-    if [[ "$BACKUP_TARGET_SFTP" == "true" && -n "$SFTP_HOST" && -n "$SFTP_USERNAME" && -n "$SFTP_BACKUP_PATH" ]]; then any_target_enabled="true"; fi
-
-
-    if [[ "$any_target_enabled" == "false" ]]; then
-        log_and_display "${RED}自动备份失败：没有启用或配置完整的云存储目标。请通过 '5. 云存储设定' 进行配置。${NC}"
-        local error_msg
-        error_msg="*个人自用数据备份：自动备份失败*"
-        error_msg+=$'\n'"原因: 未启用或配置完整的云存储目标。"
-        send_telegram_message "$error_msg"
-        return 1
-    fi
-
-
-    if [[ "$LAST_AUTO_BACKUP_TIMESTAMP" -eq 0 ]]; then
-        log_and_display "首次自动备份，或上次自动备份时间未记录，立即执行。" "${YELLOW}"
-        perform_backup "自动备份 (Cron)"
-    elif (( current_timestamp - LAST_AUTO_BACKUP_TIMESTAMP >= interval_seconds )); then
-        log_and_display "距离上次自动备份已超过 ${AUTO_BACKUP_INTERVAL_DAYS} 天 (${interval_seconds} 秒)，执行自动备份。" "${BLUE}"
+    if [[ "$LAST_AUTO_BACKUP_TIMESTAMP" -eq 0 || $(( current_timestamp - LAST_AUTO_BACKUP_TIMESTAMP >= interval_seconds )) ]]; then
+        log_info "执行自动备份..."
         perform_backup "自动备份 (Cron)"
     else
-        local next_backup_time=$(( LAST_AUTO_BACKUP_TIMESTAMP + interval_seconds ))
-        local remaining_seconds=$(( next_backup_time - current_timestamp ))
-        local remaining_days=$(( remaining_seconds / 86400 ))
-        local remaining_hours=$(( (remaining_seconds % 86400) / 3600 ))
-        log_and_display "未到自动备份时间。距离下次备份还有约 ${remaining_days} 天 ${remaining_hours} 小时。" "${YELLOW}"
+        log_info "未到自动备份时间。"
     fi
 }
 
-# --- 脚本入口点 ---
 main() {
-    # 创建一个安全的临时目录，用于存放压缩文件
-    TEMP_DIR=$(mktemp -d -t personal_backup_XXXXXX)
+    # [修改] 在脚本开始时立即调用初始化函数，创建所有必需的目录
+    # 这会覆盖所有执行路径（交互式和 cron）
+    initialize_directories
+
+    TEMP_DIR=$(mktemp -d -t personal_backup_rclone_XXXXXX)
     if [ ! -d "$TEMP_DIR" ]; then
-        log_and_display "${RED}错误：无法创建临时目录。请检查权限或磁盘空间。${NC}"
+        # 此时日志系统还未完全初始化，使用 echo
+        echo -e "${RED}[ERROR] 无法创建临时目录。${NC}"
         exit 1
     fi
-    log_and_display "临时目录已创建: $TEMP_DIR" "${BLUE}"
-
-
-    load_config # 脚本启动时加载配置
-
-    # 如果直接从 cron 任务调用带有特定参数
+    
     if [[ "$1" == "check_auto_backup" ]]; then
-        log_and_display "由 Cron 任务触发自动备份检查。" "${BLUE}"
+        # cron 模式下，不进入交互菜单
         check_auto_backup
         exit 0
     fi
+    
+    # 交互模式
+    load_config
+    rotate_log_if_needed
+    acquire_lock
 
-    # 在交互模式下检查依赖项 (仅当不是 cron 任务时)
     if ! check_dependencies; then
-        log_and_display "${RED}脚本无法运行，因为缺少必要的依赖项。请按照提示安装。${NC}"
         exit 1
     fi
 
@@ -3226,5 +1888,700 @@ main() {
     done
 }
 
-# 执行主函数
+# ================================================================
+# ===           RCLONE 云存储管理函数 (无需修改)               ===
+# ================================================================
+
+prompt_and_add_target() {
+    local remote_name="$1"
+    local source_of_creation="$2"
+
+    read -rp "您想现在就为此新远程端设置一个备份目标路径吗? (Y/n): " confirm_add_target
+    if [[ ! "$confirm_add_target" =~ ^[Nn]$ ]]; then
+        log_info "正在为远程端 '${remote_name}' 选择路径..."
+        if choose_rclone_path "$remote_name"; then
+            local remote_path="$CHOSEN_RCLONE_PATH"
+            RCLONE_TARGETS_ARRAY+=("${remote_name}:${remote_path}")
+            RCLONE_TARGETS_METADATA_ARRAY+=("${source_of_creation}")
+            save_config
+            log_info "已成功添加并保存备份目标: ${remote_name}:${remote_path}"
+        else
+            log_warn "已取消为 '${remote_name}' 添加备份目标。您可以稍后在“查看/管理目标”菜单中添加。"
+        fi
+    fi
+}
+
+get_remote_name() {
+    local prompt_message="$1"
+    read -rp "为这个新的远程端起一个名字 (例如: ${prompt_message}): " remote_name
+    if [[ -z "$remote_name" || "$remote_name" =~ [[:space:]] ]]; then
+        log_error "错误: 远程端名称不能为空或包含空格。"
+        return 1
+    fi
+    REPLY="$remote_name"
+    return 0
+}
+
+create_rclone_s3_remote() {
+    display_header
+    echo -e "${BLUE}--- 创建 S3 兼容远程端 ---${NC}"
+    get_remote_name "myr2" || { press_enter_to_continue; return 1; }
+    local remote_name=$REPLY
+
+    echo "请选择您的 S3 提供商:"
+    echo "1. Cloudflare R2"
+    echo "2. Amazon Web Services (AWS) S3"
+    echo "3. MinIO"
+    echo "4. 其他 (手动输入)"
+    read -rp "请输入选项: " provider_choice
+
+    local provider=""
+    local endpoint=""
+
+    case "$provider_choice" in
+        1) provider="Cloudflare"; read -rp "请输入 Cloudflare R2 Endpoint URL (例如 https://<account_id>.r2.cloudflarestorage.com): " endpoint ;;
+        2) provider="AWS" ;;
+        3) provider="Minio"; read -rp "请输入 MinIO Endpoint URL (例如 http://192.168.1.10:9000): " endpoint ;;
+        4) read -rp "请输入提供商代码 (例如 Ceph, DigitalOcean, Wasabi): " provider; read -rp "请输入 Endpoint URL (如果需要): " endpoint ;;
+        *) log_error "无效选项。"; press_enter_to_continue; return 1;
+    esac
+
+    read -rp "请输入 Access Key ID: " access_key_id
+    read -s -rp "请输入 Secret Access Key: " secret_access_key
+    echo ""
+
+    log_info "正在创建 Rclone 远程端: ${remote_name}..."
+
+    local rclone_create_cmd
+    rclone_create_cmd=(rclone config create "$remote_name" s3 provider "$provider" access_key_id "$access_key_id" secret_access_key "$secret_access_key")
+    if [[ -n "$endpoint" ]]; then
+        rclone_create_cmd+=(endpoint "$endpoint")
+    fi
+
+    if "${rclone_create_cmd[@]}"; then
+        log_info "远程端 '${remote_name}' 创建成功！"
+        prompt_and_add_target "$remote_name" "由助手创建"
+    else
+        log_error "远程端创建失败！请检查您的输入或 Rclone 的错误提示。"
+    fi
+    press_enter_to_continue
+}
+
+create_rclone_b2_remote() {
+    display_header
+    echo -e "${BLUE}--- 创建 Backblaze B2 远程端 ---${NC}"
+    get_remote_name "b2_backup" || { press_enter_to_continue; return 1; }
+    local remote_name=$REPLY
+
+    read -rp "请输入 B2 Account ID 或 Application Key ID: " account_id
+    read -s -rp "请输入 B2 Application Key: " app_key
+    echo ""
+
+    log_info "正在创建 Rclone 远程端: ${remote_name}..."
+    if rclone config create "$remote_name" b2 account "$account_id" key "$app_key"; then
+        log_info "远程端 '${remote_name}' 创建成功！"
+        prompt_and_add_target "$remote_name" "由助手创建"
+    else
+        log_error "远程端创建失败！"
+    fi
+    press_enter_to_continue
+}
+
+create_rclone_azureblob_remote() {
+    display_header
+    echo -e "${BLUE}--- 创建 Microsoft Azure Blob Storage 远程端 ---${NC}"
+    get_remote_name "myazure" || { press_enter_to_continue; return 1; }
+    local remote_name=$REPLY
+
+    read -rp "请输入 Azure Storage Account Name: " account_name
+    read -s -rp "请输入 Azure Storage Account Key: " account_key
+    echo ""
+
+    log_info "正在创建 Rclone 远程端: ${remote_name}..."
+    if rclone config create "$remote_name" azureblob account "$account_name" key "$account_key"; then
+        log_info "远程端 '${remote_name}' 创建成功！"
+        prompt_and_add_target "$remote_name" "由助手创建"
+    else
+        log_error "远程端创建失败！"
+    fi
+    press_enter_to_continue
+}
+
+create_rclone_mega_remote() {
+    display_header
+    echo -e "${BLUE}--- 创建 Mega.nz 远程端 ---${NC}"
+    get_remote_name "mymega" || { press_enter_to_continue; return 1; }
+    local remote_name=$REPLY
+
+    read -rp "请输入 Mega 用户名 (邮箱): " user
+    read -s -rp "请输入 Mega 密码: " password
+    echo ""
+    local obscured_pass=$(rclone obscure "$password")
+
+    log_info "正在创建 Rclone 远程端: ${remote_name}..."
+    if rclone config create "$remote_name" mega user "$user" pass "$obscured_pass"; then
+        log_info "远程端 '${remote_name}' 创建成功！"
+        prompt_and_add_target "$remote_name" "由助手创建"
+    else
+        log_error "远程端创建失败！"
+    fi
+    press_enter_to_continue
+}
+
+create_rclone_pcloud_remote() {
+    display_header
+    echo -e "${BLUE}--- 创建 pCloud 远程端 ---${NC}"
+    get_remote_name "mypcloud" || { press_enter_to_continue; return 1; }
+    local remote_name=$REPLY
+
+    read -rp "请输入 pCloud 用户名 (邮箱): " user
+    read -s -rp "请输入 pCloud 密码: " password
+    echo ""
+    local obscured_pass=$(rclone obscure "$password")
+
+    log_info "正在创建 Rclone 远程端: ${remote_name}..."
+    log_warn "Rclone 将尝试使用您的用户名和密码获取授权令牌..."
+
+    if rclone config create "$remote_name" pcloud username "$user" password "$obscured_pass"; then
+        log_info "远程端 '${remote_name}' 创建成功！"
+        prompt_and_add_target "$remote_name" "由助手创建"
+    else
+        log_error "远程端创建失败！可能是密码错误或需要双因素认证。"
+    fi
+    press_enter_to_continue
+}
+
+create_rclone_webdav_remote() {
+    display_header
+    echo -e "${BLUE}--- 创建 WebDAV 远程端 ---${NC}"
+    get_remote_name "mydav" || { press_enter_to_continue; return 1; }
+    local remote_name=$REPLY
+
+    read -rp "请输入 WebDAV URL (例如 https://dav.box.com/dav): " url
+    read -rp "请输入用户名: " user
+    read -s -rp "请输入密码: " password
+    echo ""
+    local obscured_pass=$(rclone obscure "$password")
+
+    log_info "正在创建 Rclone 远程端: ${remote_name}..."
+    if rclone config create "$remote_name" webdav url "$url" user "$user" pass "$obscured_pass"; then
+        log_info "远程端 '${remote_name}' 创建成功！"
+        prompt_and_add_target "$remote_name" "由助手创建"
+    else
+        log_error "远程端创建失败！"
+    fi
+    press_enter_to_continue
+}
+
+create_rclone_sftp_remote() {
+    display_header
+    echo -e "${BLUE}--- 创建 SFTP 远程端 ---${NC}"
+    get_remote_name "myserver" || { press_enter_to_continue; return 1; }
+    local remote_name=$REPLY
+
+    read -rp "请输入主机名或 IP 地址: " host
+    read -rp "请输入用户名: " user
+    read -rp "请输入端口号 [默认 22]: " port
+    port=${port:-22}
+
+    read -rp "使用密码(p)还是 SSH 密钥文件(k)进行认证? (p/k): " auth_choice
+    local pass_obscured=""
+    local key_file=""
+
+    if [[ "$auth_choice" == "p" ]]; then
+        read -s -rp "请输入密码: " password
+        echo ""
+        pass_obscured=$(rclone obscure "$password")
+    elif [[ "$auth_choice" == "k" ]]; then
+        read -rp "请输入 SSH 私钥文件的绝对路径 (例如 /home/user/.ssh/id_rsa): " key_file
+        if [[ ! -f "$key_file" ]]; then
+            log_error "错误: 密钥文件不存在。"; press_enter_to_continue; return 1;
+        fi
+    else
+        log_error "无效选项。"; press_enter_to_continue; return 1;
+    fi
+
+    log_info "正在创建 Rclone 远程端: ${remote_name}..."
+
+    local rclone_create_cmd
+    rclone_create_cmd=(rclone config create "$remote_name" sftp host "$host" user "$user" port "$port")
+    if [[ -n "$pass_obscured" ]]; then
+        rclone_create_cmd+=(pass "$pass_obscured")
+    elif [[ -n "$key_file" ]]; then
+        rclone_create_cmd+=(key_file "$key_file")
+    fi
+
+    if "${rclone_create_cmd[@]}"; then
+        log_info "远程端 '${remote_name}' 创建成功！"
+        prompt_and_add_target "$remote_name" "由助手创建"
+        log_warn "提示: 首次连接 SFTP 服务器时，Rclone 可能需要您确认主机的密钥指纹。"
+    else
+        log_error "远程端创建失败！"
+    fi
+    press_enter_to_continue
+}
+
+create_rclone_ftp_remote() {
+    display_header
+    echo -e "${BLUE}--- 创建 FTP 远程端 ---${NC}"
+    get_remote_name "myftp" || { press_enter_to_continue; return 1; }
+    local remote_name=$REPLY
+
+    read -rp "请输入主机名或 IP 地址: " host
+    read -rp "请输入用户名: " user
+    read -s -rp "请输入密码: " password
+    echo ""
+    local obscured_pass=$(rclone obscure "$password")
+    read -rp "请输入端口号 [默认 21]: " port
+    port=${port:-21}
+
+    log_info "正在创建 Rclone 远程端: ${remote_name}..."
+    if rclone config create "$remote_name" ftp host "$host" user "$user" pass "$obscured_pass" port "$port"; then
+        log_info "远程端 '${remote_name}' 创建成功！"
+        prompt_and_add_target "$remote_name" "由助手创建"
+    else
+        log_error "远程端创建失败！"
+    fi
+    press_enter_to_continue
+}
+
+create_rclone_crypt_remote() {
+    display_header
+    echo -e "${BLUE}--- 创建 Crypt 加密远程端 ---${NC}"
+    echo -e "${YELLOW}Crypt 会加密您上传到另一个远程端的文件名和内容。${NC}"
+    get_remote_name "my_encrypted_remote" || { press_enter_to_continue; return 1; }
+    local remote_name=$REPLY
+
+    echo ""
+    log_info "可用的远程端列表："
+    rclone listremotes
+    echo ""
+    read -rp "请输入您要加密的目标远程端路径 (例如: myr2:my_encrypted_bucket): " target_remote
+
+    echo -e "${YELLOW}您需要设置两个密码，第二个是盐值，用于进一步增强安全性。请务必牢记！${NC}"
+    read -s -rp "请输入密码 (password): " pass1
+    echo ""
+    read -s -rp "请再次输入密码进行确认: " pass1_confirm
+    echo ""
+    if [[ "$pass1" != "$pass1_confirm" ]]; then
+        log_error "两次输入的密码不匹配！"; press_enter_to_continue; return 1;
+    fi
+
+    read -s -rp "请输入盐值密码 (salt/password2)，可以与上一个不同: " pass2
+    echo ""
+    read -s -rp "请再次输入盐值密码进行确认: " pass2_confirm
+    echo ""
+    if [[ "$pass2" != "$pass2_confirm" ]]; then
+        log_error "两次输入的盐值密码不匹配！"; press_enter_to_continue; return 1;
+    fi
+
+    local obscured_pass1=$(rclone obscure "$pass1")
+    local obscured_pass2=$(rclone obscure "$pass2")
+
+    log_info "正在创建 Rclone 远程端: ${remote_name}..."
+    if rclone config create "$remote_name" crypt remote "$target_remote" password "$obscured_pass1" password2 "$obscured_pass2"; then
+        log_info "加密远程端 '${remote_name}' 创建成功！"
+        prompt_and_add_target "$remote_name" "由助手创建"
+        log_info "现在您可以像使用普通远程端一样使用 '${remote_name}:'，所有数据都会在后台自动加解密。"
+    else
+        log_error "远程端创建失败！"
+    fi
+    press_enter_to_continue
+}
+
+create_rclone_alias_remote() {
+    display_header
+    echo -e "${BLUE}--- 创建 Alias 别名远程端 ---${NC}"
+    echo -e "${YELLOW}Alias 可以为另一个远程端的深层路径创建一个简短的别名。${NC}"
+    get_remote_name "my_shortcut" || { press_enter_to_continue; return 1; }
+    local remote_name=$REPLY
+
+    echo ""
+    log_info "可用的远程端列表："
+    rclone listremotes
+    echo ""
+    read -rp "请输入您要为其创建别名的目标远程端路径 (例如: myr2:path/to/my/files): " target_remote
+
+    log_info "正在创建 Rclone 远程端: ${remote_name}..."
+    if rclone config create "$remote_name" alias remote "$target_remote"; then
+        log_info "别名远程端 '${remote_name}' 创建成功！"
+        prompt_and_add_target "$remote_name" "由助手创建"
+        log_info "现在 '${remote_name}:' 就等同于 '${target_remote}'。"
+    else
+        log_error "远程端创建失败！"
+    fi
+    press_enter_to_continue
+}
+
+create_rclone_remote_wizard() {
+    while true; do
+        display_header
+        echo -e "${BLUE}=== [助手] 创建新的 Rclone 远程端 ===${NC}"
+        echo "请选择您要创建的云存储类型："
+        echo ""
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 对象存储/云盘 ━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  1. ${YELLOW}S3 兼容存储 (如 R2, AWS S3, MinIO)${NC}"
+        echo -e "  2. ${YELLOW}Backblaze B2${NC}"
+        echo -e "  3. ${YELLOW}Microsoft Azure Blob Storage${NC}"
+        echo -e "  4. ${YELLOW}Mega.nz${NC}"
+        echo -e "  5. ${YELLOW}pCloud${NC}"
+        echo ""
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━ 传统协议 ━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  6. ${YELLOW}WebDAV${NC}"
+        echo -e "  7. ${YELLOW}SFTP${NC}"
+        echo -e "  8. ${YELLOW}FTP${NC}"
+        echo ""
+        echo -e "${BLUE}━━━━━━━━━━━━━━ 功能性远程端 (包装器) ━━━━━━━━━━━━━━${NC}"
+        echo -e "  9. ${YELLOW}Crypt (加密一个现有远程端)${NC}"
+        echo -e "  10. ${YELLOW}Alias (为一个远程路径创建别名)${NC}"
+        echo ""
+        echo "对于 Google Drive, Dropbox 等需要浏览器授权的类型,"
+        echo "请在终端中运行 'rclone config' 命令进行配置。"
+        echo ""
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  0. ${RED}返回上一级菜单${NC}"
+        read -rp "请输入选项: " choice
+
+        case "$choice" in
+            1) create_rclone_s3_remote ;;
+            2) create_rclone_b2_remote ;;
+            3) create_rclone_azureblob_remote ;;
+            4) create_rclone_mega_remote ;;
+            5) create_rclone_pcloud_remote ;;
+            6) create_rclone_webdav_remote ;;
+            7) create_rclone_sftp_remote ;;
+            8) create_rclone_ftp_remote ;;
+            9) create_rclone_crypt_remote ;;
+            10) create_rclone_alias_remote ;;
+            0) break ;;
+            *) log_error "无效选项。"; press_enter_to_continue ;;
+        esac
+    done
+}
+
+check_rclone_remote_exists() {
+    local remote_name="$1"
+    if rclone listremotes | grep -q "^${remote_name}:"; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+get_rclone_direct_contents() {
+    local rclone_target="$1"
+    log_debug "正在获取 Rclone 目标 '${rclone_target}' 的内容..."
+
+    local contents=()
+    local folders_list
+    folders_list=$(rclone lsf --dirs-only "${rclone_target}" 2>/dev/null || true)
+    local files_list
+    files_list=$(rclone lsf --files-only "${rclone_target}" 2>/dev/null || true)
+
+    if [[ -n "$folders_list" ]]; then
+        while IFS= read -r folder; do
+            contents+=("${folder%/} (文件夹)")
+        done <<< "$folders_list"
+    fi
+    if [[ -n "$files_list" ]]; then
+        while IFS= read -r file; do
+            contents+=("$file (文件)")
+        done <<< "$files_list"
+    fi
+
+    IFS=$'\n' contents=($(sort <<<"${contents[*]}"))
+    unset IFS
+    printf '%s\n' "${contents[@]}"
+    return 0
+}
+
+choose_rclone_path() {
+    local remote_name="$1"
+    local current_remote_path="/"
+    local final_selected_path=""
+
+    while true; do
+        display_header
+        echo -e "${BLUE}=== 设置 Rclone 备份目标路径 (${remote_name}) ===${NC}"
+        echo -e "当前浏览路径: ${YELLOW}${remote_name}:${current_remote_path}${NC}\n"
+
+        local remote_contents_array=()
+        local remote_contents_str
+        remote_contents_str=$(get_rclone_direct_contents "${remote_name}:${current_remote_path}")
+        if [[ -n "$remote_contents_str" ]]; then
+            mapfile -t remote_contents_array <<< "$remote_contents_str"
+        fi
+
+        if [ ${#remote_contents_array[@]} -gt 0 ]; then
+            for i in "${!remote_contents_array[@]}"; do
+                echo "  $((i+1)). ${remote_contents_array[$i]}"
+            done
+        else
+            echo "当前路径下无内容。"
+        fi
+
+        echo ""
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+        echo "  (输入上方序号以进入文件夹)"
+        if [[ "$current_remote_path" != "/" ]]; then
+            echo -e "  ${YELLOW}m${NC} - 返回上一级目录"
+        fi
+        echo -e "  ${YELLOW}k${NC} - 将当前路径 '${current_remote_path}' 设为目标"
+        echo -e "  ${YELLOW}a${NC} - 手动输入新路径"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  ${RED}x${NC} - 取消并返回"
+        read -rp "请输入您的选择 (数字或字母): " choice
+
+        case "$choice" in
+            "m" | "M" )
+                if [[ "$current_remote_path" != "/" ]]; then
+                    local parent_dir
+                    parent_dir=$(dirname "${current_remote_path%/}")
+                    if [[ "$parent_dir" != "/" ]]; then
+                        current_remote_path="${parent_dir}/"
+                    else
+                        current_remote_path="/"
+                    fi
+                fi
+                ;;
+            [0-9]* )
+                if [ "$choice" -ge 1 ] && [ "$choice" -le ${#remote_contents_array[@]} ]; then
+                    local chosen_item="${remote_contents_array[$((choice-1))]}"
+                    if echo "$chosen_item" | grep -q " (文件夹)$"; then
+                        local chosen_folder
+                        chosen_folder=$(echo "$chosen_item" | sed 's/\ (文件夹)$//')
+                        if [[ "$current_remote_path" == "/" ]]; then
+                            current_remote_path="/${chosen_folder}/"
+                        else
+                            current_remote_path="${current_remote_path%/}/${chosen_folder}/"
+                        fi
+                    else
+                        log_warn "不能进入文件。"; press_enter_to_continue
+                    fi
+                else
+                    log_error "无效序号。"; press_enter_to_continue
+                fi
+                ;;
+            [kK] )
+                final_selected_path="$current_remote_path"
+                break
+                ;;
+            [aA] )
+                read -rp "请输入新的目标路径 (e.g., /backups/path/): " new_path_input
+                local new_path="$new_path_input"
+                if [[ "${new_path:0:1}" != "/" ]]; then
+                    new_path="/${new_path}"
+                fi
+                new_path=$(echo "$new_path" | sed 's#//#/#g')
+                final_selected_path="$new_path"
+                break
+                ;;
+            [xX] ) return 1 ;;
+            * ) log_error "无效输入。"; press_enter_to_continue ;;
+        esac
+    done
+
+    CHOSEN_RCLONE_PATH="$final_selected_path"
+    return 0
+}
+
+view_and_manage_rclone_targets() {
+    local needs_saving="false"
+    while true; do
+        display_header
+        echo -e "${BLUE}=== 查看、管理和启用备份目标 ===${NC}"
+
+        if [ ${#RCLONE_TARGETS_ARRAY[@]} -eq 0 ]; then
+            log_warn "当前没有配置任何 Rclone 目标。"
+        else
+            echo "已配置的 Rclone 目标列表:"
+            for i in "${!RCLONE_TARGETS_ARRAY[@]}"; do
+                local is_enabled="false"
+                for enabled_idx in "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}"; do
+                    if [[ "$i" -eq "$enabled_idx" ]]; then
+                        is_enabled="true"; break;
+                    fi
+                done
+
+                local metadata="${RCLONE_TARGETS_METADATA_ARRAY[$i]}"
+                echo -n "$((i+1)). ${RCLONE_TARGETS_ARRAY[$i]} "
+                if [[ -n "$metadata" ]]; then
+                    echo -n -e "(${BLUE}${metadata}${NC}) "
+                fi
+
+                if [[ "$is_enabled" == "true" ]]; then
+                    echo -e "[${GREEN}已启用${NC}]"
+                else
+                    echo -e "[${YELLOW}已禁用${NC}]"
+                fi
+            done
+        fi
+
+        echo ""
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  a - ${YELLOW}添加新目标${NC}"
+        echo -e "  d - ${YELLOW}删除目标${NC}"
+        echo -e "  m - ${YELLOW}修改目标路径${NC}"
+        echo -e "  t - ${YELLOW}切换启用/禁用状态${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  0 - ${RED}保存并返回${NC}"
+        read -rp "请输入选项: " choice
+
+        case "$choice" in
+            a|A)
+                read -rp "请输入您已通过 'rclone config' 或助手配置好的远程端名称: " remote_name
+                if ! check_rclone_remote_exists "$remote_name"; then
+                    log_error "错误: Rclone 远程端 '${remote_name}' 不存在！"
+                elif choose_rclone_path "$remote_name"; then
+                    local remote_path="$CHOSEN_RCLONE_PATH"
+                    RCLONE_TARGETS_ARRAY+=("${remote_name}:${remote_path}")
+                    RCLONE_TARGETS_METADATA_ARRAY+=("手动添加")
+                    needs_saving="true"
+                    log_info "已成功添加目标: ${remote_name}:${remote_path}"
+                else
+                    log_warn "已取消添加目标。"
+                fi
+                press_enter_to_continue
+                ;;
+
+            d|D)
+                if [ ${#RCLONE_TARGETS_ARRAY[@]} -eq 0 ]; then log_warn "没有可删除的目标。"; press_enter_to_continue; continue; fi
+                read -rp "请输入要删除的目标序号: " index
+                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le ${#RCLONE_TARGETS_ARRAY[@]} ]; then
+                    local deleted_index=$((index - 1))
+                    read -rp "确定要删除目标 '${RCLONE_TARGETS_ARRAY[$deleted_index]}' 吗? (y/N): " confirm
+                    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                        unset 'RCLONE_TARGETS_ARRAY[$deleted_index]'
+                        unset 'RCLONE_TARGETS_METADATA_ARRAY[$deleted_index]'
+                        RCLONE_TARGETS_ARRAY=("${RCLONE_TARGETS_ARRAY[@]}")
+                        RCLONE_TARGETS_METADATA_ARRAY=("${RCLONE_TARGETS_METADATA_ARRAY[@]}")
+
+                        local new_enabled_indices=()
+                        for enabled_idx in "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}"; do
+                            if (( enabled_idx < deleted_index )); then new_enabled_indices+=("$enabled_idx");
+                            elif (( enabled_idx > deleted_index )); then new_enabled_indices+=("$((enabled_idx - 1))");
+                            fi
+                        done
+                        ENABLED_RCLONE_TARGET_INDICES_ARRAY=("${new_enabled_indices[@]}")
+                        needs_saving="true"
+                        log_info "目标已删除。"
+                    fi
+                else
+                    log_error "无效序号。"
+                fi
+                press_enter_to_continue
+                ;;
+
+            m|M)
+                if [ ${#RCLONE_TARGETS_ARRAY[@]} -eq 0 ]; then log_warn "没有可修改的目标。"; press_enter_to_continue; continue; fi
+                read -rp "请输入要修改路径的目标序号: " index
+                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le ${#RCLONE_TARGETS_ARRAY[@]} ]; then
+                    local mod_index=$((index - 1))
+                    local target_to_modify="${RCLONE_TARGETS_ARRAY[$mod_index]}"
+                    local remote_name="${target_to_modify%%:*}"
+
+                    log_info "正在为远程端 '${remote_name}' 重新选择路径..."
+                    if choose_rclone_path "$remote_name"; then
+                        local new_path="$CHOSEN_RCLONE_PATH"
+                        RCLONE_TARGETS_ARRAY[$mod_index]="${remote_name}:${new_path}"
+                        needs_saving="true"
+                        log_info "目标已修改为: ${remote_name}:${new_path}"
+                    else
+                        log_warn "已取消修改。"
+                    fi
+                else
+                    log_error "无效序号。"
+                fi
+                press_enter_to_continue
+                ;;
+
+            t|T)
+                if [ ${#RCLONE_TARGETS_ARRAY[@]} -eq 0 ]; then log_warn "没有可切换的目标。"; press_enter_to_continue; continue; fi
+                read -rp "请输入要切换状态的目标序号: " index
+                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le ${#RCLONE_TARGETS_ARRAY[@]} ]; then
+                    local choice_idx=$((index - 1))
+                    local found_in_enabled=-1; local index_in_enabled_array=-1
+                    for i in "${!ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}"; do
+                        if [[ "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[$i]}" -eq "$choice_idx" ]]; then
+                            found_in_enabled=1; index_in_enabled_array=$i; break
+                        fi
+                    done
+                    if [[ "$found_in_enabled" -eq 1 ]]; then
+                        unset 'ENABLED_RCLONE_TARGET_INDICES_ARRAY[$index_in_enabled_array]'
+                        ENABLED_RCLONE_TARGET_INDICES_ARRAY=("${ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}")
+                        log_warn "目标已 禁用。"
+                    else
+                        ENABLED_RCLONE_TARGET_INDICES_ARRAY+=("$choice_idx")
+                        log_info "目标已 启用。"
+                    fi
+                    needs_saving="true"
+                else
+                    log_error "无效序号。"
+                fi
+                press_enter_to_continue
+                ;;
+
+            0)
+                if [[ "$needs_saving" == "true" ]]; then
+                    save_config
+                fi
+                break
+                ;;
+            *) log_error "无效选项。"; press_enter_to_continue ;;
+        esac
+    done
+}
+
+test_rclone_remotes() {
+    while true; do
+        display_header
+        echo -e "${BLUE}=== 测试 Rclone 远程端连接 ===${NC}"
+
+        local remotes_list=()
+        mapfile -t remotes_list < <(rclone listremotes | sed 's/://' || true)
+
+        if [ ${#remotes_list[@]} -eq 0 ]; then
+            log_warn "未发现任何已配置的 Rclone 远程端。"
+            log_info "请先使用 '[助手] 创建新的 Rclone 远程端' 或 'rclone config' 进行配置。"
+            press_enter_to_continue
+            break
+        fi
+
+        echo "发现以下 Rclone 远程端:"
+        for i in "${!remotes_list[@]}"; do
+            echo " $((i+1)). ${remotes_list[$i]}"
+        done
+        echo ""
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  0. ${RED}返回${NC}"
+        read -rp "请选择要测试连接的远程端序号 (0 返回): " choice
+
+        if [[ "$choice" -eq 0 ]]; then break; fi
+
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#remotes_list[@]} ]; then
+            local remote_to_test="${remotes_list[$((choice-1))]}"
+            log_warn "正在测试 '${remote_to_test}'..."
+
+            if rclone lsjson --max-depth 1 "${remote_to_test}:" >/dev/null 2>&1; then
+                log_info "连接测试成功！ '${remote_to_test}' 可用。"
+                
+                echo -e "${GREEN}--- 详细信息 (部分后端可能不支持) ---${NC}"
+                if ! rclone about "${remote_to_test}:"; then
+                    echo "无法获取详细的存储空间信息。"
+                fi
+                echo -e "${GREEN}-------------------------------------------${NC}"
+
+            else
+                log_error "连接测试失败！"
+                log_warn "请检查远程端配置 ('rclone config') 或网络连接。"
+            fi
+        else
+            log_error "无效序号。"
+        fi
+        press_enter_to_continue
+    done
+}
+
+
+# --- 脚本入口点调用 ---
 main "$@"
