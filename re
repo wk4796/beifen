@@ -2,7 +2,7 @@
 set -e # Exit immediately if a command exits with a non-zero status.
 
 # 脚本全局配置
-SCRIPT_NAME="个人自用数据备份 (Rclone 最终版)"
+SCRIPT_NAME="个人自用数据备份 (Rclone)"
 # 使用 XDG Base Directory Specification
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/personal_backup_rclone"
 LOG_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/personal_backup_rclone"
@@ -1499,6 +1499,67 @@ perform_backup() {
     fi
 }
 
+# [NEW] Rclone 安装/卸载管理
+manage_rclone_installation() {
+    while true; do
+        display_header
+        echo -e "${BLUE}=== 8. Rclone 安装/卸载 ===${NC}"
+        
+        if command -v rclone &> /dev/null; then
+            local rclone_version
+            rclone_version=$(rclone --version | head -n 1)
+            echo -e "当前状态: ${GREEN}已安装${NC} (版本: ${rclone_version})"
+        else
+            echo -e "当前状态: ${RED}未安装${NC}"
+        fi
+        echo ""
+
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  1. ${YELLOW}安装或更新 Rclone${NC}"
+        echo -e "  2. ${YELLOW}卸载 Rclone${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  0. ${RED}返回主菜单${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        read -rp "请输入选项: " choice
+
+        case $choice in
+            1)
+                log_and_display "正在从 rclone.org 下载并执行官方安装脚本..." "${BLUE}"
+                if curl https://rclone.org/install.sh | sudo bash; then
+                    log_and_display "${GREEN}Rclone 安装/更新成功！${NC}"
+                else
+                    log_and_display "${RED}Rclone 安装/更新失败，请检查网络或 sudo 权限。${NC}"
+                fi
+                press_enter_to_continue
+                ;;
+            2)
+                if ! command -v rclone &> /dev/null; then
+                    log_and_display "${YELLOW}Rclone 未安装，无需卸载。${NC}"
+                    press_enter_to_continue
+                    continue
+                fi
+                read -rp "警告: 这将从系统中移除 Rclone 本体程序。本脚本将无法工作，确定吗？(y/N): " confirm
+                if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                    log_and_display "正在卸载 Rclone..."
+                    sudo rm -f /usr/bin/rclone /usr/local/bin/rclone
+                    sudo rm -f /usr/local/share/man/man1/rclone.1
+                    log_and_display "${GREEN}Rclone 已卸载。${NC}"
+                else
+                    log_and_display "已取消卸载。" "${BLUE}"
+                fi
+                press_enter_to_continue
+                ;;
+            0)
+                break
+                ;;
+            *)
+                log_and_display "${RED}无效选项。${NC}"
+                press_enter_to_continue
+                ;;
+        esac
+    done
+}
+
 # 99. 卸载脚本
 uninstall_script() {
     display_header
@@ -1529,12 +1590,12 @@ show_main_menu() {
     echo -e "  4. ${YELLOW}压缩包格式${NC} (ZIP)"
     echo -e "  5. ${YELLOW}云存储设定${NC} (Rclone)"
 
-    # [MODIFIED] 在主菜单中显示 Telegram 的启用/禁用状态
+    # [MODIFIED] 统一括号内文字颜色
     local telegram_status_text
     if [[ "$TELEGRAM_ENABLED" == "true" ]]; then
-        telegram_status_text="${GREEN}已启用${NC}"
+        telegram_status_text="已启用"
     else
-        telegram_status_text="${YELLOW}已禁用${NC}"
+        telegram_status_text="已禁用"
     fi
     echo -e "  6. ${YELLOW}消息通知设定${NC} (Telegram, 当前: ${telegram_status_text})"
 
@@ -1545,6 +1606,18 @@ show_main_menu() {
         retention_status_text="保留 ${RETENTION_VALUE} 天"
     fi
     echo -e "  7. ${YELLOW}设置备份保留策略${NC} (当前: ${retention_status_text})"
+
+    # [MODIFIED] 统一括号内文字颜色
+    local rclone_version_text
+    if command -v rclone &> /dev/null; then
+        local rclone_version
+        rclone_version=$(rclone --version | head -n 1)
+        rclone_version_text="(${rclone_version})"
+    else
+        rclone_version_text="(未安装)"
+    fi
+    echo -e "  8. ${YELLOW}Rclone 安装/卸载${NC} ${rclone_version_text}"
+    
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "  0. ${RED}退出脚本${NC}"
     echo -e "  99. ${RED}卸载脚本${NC}"
@@ -1562,6 +1635,7 @@ process_menu_choice() {
         5) set_cloud_storage ;;
         6) set_telegram_notification ;;
         7) set_retention_policy ;;
+        8) manage_rclone_installation ;; # [NEW]
         0) log_and_display "${GREEN}感谢使用！${NC}"; exit 0 ;;
         99) uninstall_script ;;
         *) log_and_display "${RED}无效选项。${NC}"; press_enter_to_continue ;;
