@@ -2,7 +2,7 @@
 set -e # Exit immediately if a command exits with a non-zero status.
 
 # 脚本全局配置
-SCRIPT_NAME="个人自用数据备份 (Rclone 版)"
+SCRIPT_NAME="个人自用数据备份 (Rclone 最终版)"
 # 使用 XDG Base Directory Specification
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/personal_backup_rclone"
 LOG_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/personal_backup_rclone"
@@ -212,7 +212,7 @@ send_telegram_message() {
     fi
 }
 
-# 1. 设置自动备份间隔 (逻辑不变)
+# 1. 设置自动备份间隔
 set_auto_backup_interval() {
     display_header
     echo -e "${BLUE}=== 1. 自动备份设定 ===${NC}"
@@ -228,7 +228,7 @@ set_auto_backup_interval() {
     press_enter_to_continue
 }
 
-# 2. 手动备份 (逻辑不变)
+# 2. 手动备份
 manual_backup() {
     display_header
     echo -e "${BLUE}=== 2. 手动备份 ===${NC}"
@@ -241,125 +241,104 @@ manual_backup() {
     press_enter_to_continue
 }
 
-# 3. 自定义备份路径 (逻辑不变)
-set_backup_path() {
-    # 此处省略了原脚本中 add_backup_path, view_and_manage_backup_paths 的代码
-    # 因为它们与云存储无关，可以直接复用。为保持简洁，这里不重复粘贴。
-    # 请将您原脚本中的 `set_backup_path` 及其子函数 `add_backup_path`, `view_and_manage_backup_paths` 粘贴到这里。
-    # -------------------------------------------------------------
-    # --- 将原脚本中 "3. 自定义备份路径" 的所有相关函数粘贴在此处 ---
-    # -------------------------------------------------------------
-    # --- 修改后的 3. 自定义备份路径 ---
-    add_backup_path() {
-        display_header
-        echo -e "${BLUE}=== 添加备份路径 ===${NC}"
-        read -rp "请输入要备份的文件或文件夹的绝对路径（例如 /home/user/mydata 或 /etc/nginx/nginx.conf）: " path_input
+# 3. 自定义备份路径
+add_backup_path() {
+    display_header
+    echo -e "${BLUE}=== 添加备份路径 ===${NC}"
+    read -rp "请输入要备份的文件或文件夹的绝对路径: " path_input
 
-        local resolved_path
-        resolved_path=$(realpath -q "$path_input" 2>/dev/null)
+    local resolved_path
+    resolved_path=$(realpath -q "$path_input" 2>/dev/null)
 
-        if [[ -z "$resolved_path" ]]; then
-            log_and_display "${RED}错误：输入的路径无效或不存在。${NC}"
-        elif [[ ! -d "$resolved_path" && ! -f "$resolved_path" ]]; then
-            log_and_display "${RED}错误：输入的路径 '$resolved_path' 不存在或不是有效的文件/目录。${NC}"
-        else
-            local found=false
-            for p in "${BACKUP_SOURCE_PATHS_ARRAY[@]}"; do
-                if [[ "$p" == "$resolved_path" ]]; then
-                    found=true
-                    break
-                fi
-            done
-
-            if "$found"; then
-                log_and_display "${YELLOW}该路径 '$resolved_path' 已存在于备份列表中。${NC}"
-            else
-                BACKUP_SOURCE_PATHS_ARRAY+=("$resolved_path")
-                save_config
-                log_and_display "${GREEN}备份路径 '$resolved_path' 已成功添加。${NC}"
-            fi
-        fi
-        press_enter_to_continue
-    }
-
-    view_and_manage_backup_paths() {
-        while true; do
-            display_header
-            echo -e "${BLUE}=== 查看/管理备份路径 ===${NC}"
-            if [ ${#BACKUP_SOURCE_PATHS_ARRAY[@]} -eq 0 ]; then
-                log_and_display "${YELLOW}当前没有设置任何备份路径。${NC}"
-                press_enter_to_continue
+    if [[ -z "$resolved_path" ]]; then
+        log_and_display "${RED}错误：输入的路径无效或不存在。${NC}"
+    elif [[ ! -d "$resolved_path" && ! -f "$resolved_path" ]]; then
+        log_and_display "${RED}错误：输入的路径 '$resolved_path' 不是有效的文件/目录。${NC}"
+    else
+        local found=false
+        for p in "${BACKUP_SOURCE_PATHS_ARRAY[@]}"; do
+            if [[ "$p" == "$resolved_path" ]]; then
+                found=true
                 break
             fi
-
-            echo "当前备份路径列表:"
-            for i in "${!BACKUP_SOURCE_PATHS_ARRAY[@]}"; do
-                echo "  $((i+1)). ${BACKUP_SOURCE_PATHS_ARRAY[$i]}"
-            done
-            echo ""
-            echo "1. 修改现有路径"
-            echo "2. 删除路径"
-            echo "0. 返回自定义备份路径菜单"
-            echo -e "${BLUE}------------------------------------------------${NC}"
-            read -rp "请输入选项: " sub_choice
-
-            case $sub_choice in
-                1) # 修改路径
-                    read -rp "请输入要修改的路径序号: " path_index
-                    if [[ "$path_index" =~ ^[0-9]+$ ]] && [ "$path_index" -ge 1 ] && [ "$path_index" -le ${#BACKUP_SOURCE_PATHS_ARRAY[@]} ]; then
-                        local current_path="${BACKUP_SOURCE_PATHS_ARRAY[$((path_index-1))]}"
-                        read -rp "您正在修改路径 '${current_path}'。请输入新的绝对路径: " new_path_input
-
-                        local resolved_new_path
-                        resolved_new_path=$(realpath -q "$new_path_input" 2>/dev/null)
-
-                        if [[ -z "$resolved_new_path" ]]; then
-                            log_and_display "${RED}错误：输入的路径无效或不存在。${NC}"
-                        elif [[ ! -d "$resolved_new_path" && ! -f "$resolved_new_path" ]]; then
-                            log_and_display "${RED}错误：输入的路径 '$resolved_new_path' 不存在或不是有效的文件/目录。${NC}"
-                        else
-                            if [[ -d "$resolved_new_path" ]]; then
-                                resolved_new_path="${resolved_new_path%/}"
-                            fi
-                            BACKUP_SOURCE_PATHS_ARRAY[$((path_index-1))]="$resolved_new_path"
-                            save_config
-                            log_and_display "${GREEN}路径已成功修改为：${resolved_new_path}${NC}"
-                        fi
-                    else
-                        log_and_display "${RED}无效的路径序号。${NC}"
-                    fi
-                    press_enter_to_continue
-                    ;;
-                2) # 删除路径
-                    read -rp "请输入要删除的路径序号: " path_index
-                    if [[ "$path_index" =~ ^[0-9]+$ ]] && [ "$path_index" -ge 1 ] && [ "$path_index" -le ${#BACKUP_SOURCE_PATHS_ARRAY[@]} ]; then
-                        log_and_display "${YELLOW}警告：您确定要删除路径 '${BACKUP_SOURCE_PATHS_ARRAY[$((path_index-1))]}'吗？(y/N)${NC}"
-                        read -rp "请确认: " confirm_delete
-                        if [[ "$confirm_delete" =~ ^[Yy]$ ]]; then
-                            unset 'BACKUP_SOURCE_PATHS_ARRAY[$((path_index-1))]'
-                            BACKUP_SOURCE_PATHS_ARRAY=("${BACKUP_SOURCE_PATHS_ARRAY[@]}") # 重新索引数组
-                            save_config
-                            log_and_display "${GREEN}路径已成功删除。${NC}"
-                        else
-                            log_and_display "取消删除路径。" "${BLUE}"
-                        fi
-                    else
-                        log_and_display "${RED}无效的路径序号。${NC}"
-                    fi
-                    press_enter_to_continue
-                    ;;
-                0)
-                    break
-                    ;;
-                *)
-                    log_and_display "${RED}无效的选项，请重新输入。${NC}"
-                    press_enter_to_continue
-                    ;;
-            esac
         done
-    }
 
-    # 3. 自定义备份路径主函数
+        if "$found"; then
+            log_and_display "${YELLOW}该路径 '$resolved_path' 已存在。${NC}"
+        else
+            BACKUP_SOURCE_PATHS_ARRAY+=("$resolved_path")
+            save_config
+            log_and_display "${GREEN}备份路径 '$resolved_path' 已添加。${NC}"
+        fi
+    fi
+    press_enter_to_continue
+}
+
+view_and_manage_backup_paths() {
+    while true; do
+        display_header
+        echo -e "${BLUE}=== 查看/管理备份路径 ===${NC}"
+        if [ ${#BACKUP_SOURCE_PATHS_ARRAY[@]} -eq 0 ]; then
+            log_and_display "${YELLOW}当前没有设置任何备份路径。${NC}"
+            press_enter_to_continue
+            break
+        fi
+
+        echo "当前备份路径列表:"
+        for i in "${!BACKUP_SOURCE_PATHS_ARRAY[@]}"; do
+            echo "  $((i+1)). ${BACKUP_SOURCE_PATHS_ARRAY[$i]}"
+        done
+        echo ""
+        echo "1. 修改现有路径"
+        echo "2. 删除路径"
+        echo "0. 返回"
+        echo -e "${BLUE}------------------------------------------------${NC}"
+        read -rp "请输入选项: " sub_choice
+
+        case $sub_choice in
+            1) # 修改
+                read -rp "请输入要修改的路径序号: " path_index
+                if [[ "$path_index" =~ ^[0-9]+$ ]] && [ "$path_index" -ge 1 ] && [ "$path_index" -le ${#BACKUP_SOURCE_PATHS_ARRAY[@]} ]; then
+                    local current_path="${BACKUP_SOURCE_PATHS_ARRAY[$((path_index-1))]}"
+                    read -rp "修改路径 '${current_path}'。请输入新路径: " new_path_input
+
+                    local resolved_new_path
+                    resolved_new_path=$(realpath -q "$new_path_input" 2>/dev/null)
+
+                    if [[ -z "$resolved_new_path" || (! -d "$resolved_new_path" && ! -f "$resolved_new_path") ]]; then
+                        log_and_display "${RED}错误：新路径无效或不存在。${NC}"
+                    else
+                        BACKUP_SOURCE_PATHS_ARRAY[$((path_index-1))]="$resolved_new_path"
+                        save_config
+                        log_and_display "${GREEN}路径已修改。${NC}"
+                    fi
+                else
+                    log_and_display "${RED}无效序号。${NC}"
+                fi
+                press_enter_to_continue
+                ;;
+            2) # 删除
+                read -rp "请输入要删除的路径序号: " path_index
+                if [[ "$path_index" =~ ^[0-9]+$ ]] && [ "$path_index" -ge 1 ] && [ "$path_index" -le ${#BACKUP_SOURCE_PATHS_ARRAY[@]} ]; then
+                    read -rp "确定要删除路径 '${BACKUP_SOURCE_PATHS_ARRAY[$((path_index-1))]}'吗？(y/N): " confirm
+                    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                        unset 'BACKUP_SOURCE_PATHS_ARRAY[$((path_index-1))]'
+                        BACKUP_SOURCE_PATHS_ARRAY=("${BACKUP_SOURCE_PATHS_ARRAY[@]}")
+                        save_config
+                        log_and_display "${GREEN}路径已删除。${NC}"
+                    fi
+                else
+                    log_and_display "${RED}无效序号。${NC}"
+                fi
+                press_enter_to_continue
+                ;;
+            0) break ;;
+            *) log_and_display "${RED}无效选项。${NC}"; press_enter_to_continue ;;
+        esac
+    done
+}
+
+set_backup_path() {
     while true; do
         display_header
         echo -e "${BLUE}=== 3. 自定义备份路径 ===${NC}"
@@ -374,19 +353,14 @@ set_backup_path() {
         case $choice in
             1) add_backup_path ;;
             2) view_and_manage_backup_paths ;;
-            0)
-                break
-                ;;
-            *)
-                log_and_display "${RED}无效的选项，请重新输入。${NC}"
-                press_enter_to_continue
-                ;;
+            0) break ;;
+            *) log_and_display "${RED}无效选项。${NC}"; press_enter_to_continue ;;
         esac
     done
 }
 
 
-# 4. 压缩格式信息 (逻辑不变)
+# 4. 压缩格式信息
 display_compression_info() {
     display_header
     echo -e "${BLUE}=== 4. 压缩包格式 ===${NC}"
@@ -395,7 +369,165 @@ display_compression_info() {
 }
 
 # ================================================================
-# ===         [RCLONE] 云存储设定 (新)                       ===
+# ===         在脚本内创建 Rclone 远程端                     ===
+# ================================================================
+
+# 创建 S3 兼容远程端的函数
+create_rclone_s3_remote() {
+    display_header
+    echo -e "${BLUE}--- 创建 S3 兼容远程端 ---${NC}"
+    read -rp "为这个新的远程端起一个名字 (例如: myr2, aws_backup): " remote_name
+    if [[ -z "$remote_name" || "$remote_name" =~ [[:space:]] ]]; then
+        log_and_display "${RED}错误: 远程端名称不能为空或包含空格。${NC}"; press_enter_to_continue; return 1;
+    fi
+
+    echo "请选择您的 S3 提供商:"
+    echo "1. Cloudflare R2"
+    echo "2. Amazon Web Services (AWS) S3"
+    echo "3. MinIO"
+    echo "4. 其他 (手动输入)"
+    read -rp "请输入选项: " provider_choice
+
+    local provider=""
+    local endpoint=""
+
+    case "$provider_choice" in
+        1) provider="Cloudflare"; read -rp "请输入 Cloudflare R2 Endpoint URL (例如 https://<account_id>.r2.cloudflarestorage.com): " endpoint ;;
+        2) provider="AWS" ;;
+        3) provider="Minio"; read -rp "请输入 MinIO Endpoint URL (例如 http://192.168.1.10:9000): " endpoint ;;
+        4) read -rp "请输入提供商代码 (例如 Ceph, DigitalOcean, Wasabi): " provider; read -rp "请输入 Endpoint URL (如果需要): " endpoint ;;
+        *) log_and_display "${RED}无效选项。${NC}"; press_enter_to_continue; return 1;
+    esac
+
+    read -rp "请输入 Access Key ID: " access_key_id
+    read -s -rp "请输入 Secret Access Key: " secret_access_key
+    echo ""
+
+    log_and_display "正在创建 Rclone 远程端: ${remote_name}..." "${BLUE}"
+    
+    local rclone_create_cmd
+    rclone_create_cmd=(rclone config create "$remote_name" s3 provider "$provider" access_key_id "$access_key_id" secret_access_key "$secret_access_key")
+    if [[ -n "$endpoint" ]]; then
+        rclone_create_cmd+=(endpoint "$endpoint")
+    fi
+
+    if "${rclone_create_cmd[@]}"; then
+        log_and_display "${GREEN}远程端 '${remote_name}' 创建成功！${NC}"
+        log_and_display "${YELLOW}Rclone 会自动将凭证存储在 $HOME/.config/rclone/rclone.conf 中。${NC}"
+    else
+        log_and_display "${RED}远程端创建失败！请检查您的输入或 Rclone 的错误提示。${NC}"
+    fi
+    press_enter_to_continue
+}
+
+# 创建 WebDAV 远程端的函数
+create_rclone_webdav_remote() {
+    display_header
+    echo -e "${BLUE}--- 创建 WebDAV 远程端 ---${NC}"
+    read -rp "为这个新的远程端起一个名字 (例如: mydav): " remote_name
+    if [[ -z "$remote_name" || "$remote_name" =~ [[:space:]] ]]; then
+        log_and_display "${RED}错误: 远程端名称不能为空或包含空格。${NC}"; press_enter_to_continue; return 1;
+    fi
+
+    read -rp "请输入 WebDAV URL (例如 https://dav.box.com/dav): " url
+    read -rp "请输入用户名: " user
+    read -s -rp "请输入密码: " password
+    echo ""
+
+    # 使用 rclone obscure 来加密密码，增强安全性
+    local obscured_pass
+    obscured_pass=$(rclone obscure "$password")
+
+    log_and_display "正在创建 Rclone 远程端: ${remote_name}..." "${BLUE}"
+    if rclone config create "$remote_name" webdav url "$url" user "$user" pass "$obscured_pass"; then
+        log_and_display "${GREEN}远程端 '${remote_name}' 创建成功！${NC}"
+    else
+        log_and_display "${RED}远程端创建失败！${NC}"
+    fi
+    press_enter_to_continue
+}
+
+# 创建 SFTP 远程端的函数
+create_rclone_sftp_remote() {
+    display_header
+    echo -e "${BLUE}--- 创建 SFTP 远程端 ---${NC}"
+    read -rp "为这个新的远程端起一个名字 (例如: myserver): " remote_name
+    if [[ -z "$remote_name" || "$remote_name" =~ [[:space:]] ]]; then
+        log_and_display "${RED}错误: 远程端名称不能为空或包含空格。${NC}"; press_enter_to_continue; return 1;
+    fi
+
+    read -rp "请输入主机名或 IP 地址: " host
+    read -rp "请输入用户名: " user
+    read -rp "请输入端口号 [默认 22]: " port
+    port=${port:-22}
+    
+    read -rp "使用密码(p)还是 SSH 密钥文件(k)进行认证? (p/k): " auth_choice
+    local pass_obscured=""
+    local key_file=""
+
+    if [[ "$auth_choice" == "p" ]]; then
+        read -s -rp "请输入密码: " password
+        echo ""
+        pass_obscured=$(rclone obscure "$password")
+    elif [[ "$auth_choice" == "k" ]]; then
+        read -rp "请输入 SSH 私钥文件的绝对路径 (例如 /home/user/.ssh/id_rsa): " key_file
+        if [[ ! -f "$key_file" ]]; then
+            log_and_display "${RED}错误: 密钥文件不存在。${NC}"; press_enter_to_continue; return 1;
+        fi
+    else
+        log_and_display "${RED}无效选项。${NC}"; press_enter_to_continue; return 1;
+    fi
+    
+    log_and_display "正在创建 Rclone 远程端: ${remote_name}..." "${BLUE}"
+    
+    local rclone_create_cmd
+    rclone_create_cmd=(rclone config create "$remote_name" sftp host "$host" user "$user" port "$port")
+    if [[ -n "$pass_obscured" ]]; then
+        rclone_create_cmd+=(pass "$pass_obscured")
+    elif [[ -n "$key_file" ]]; then
+        rclone_create_cmd+=(key_file "$key_file")
+    fi
+    
+    if "${rclone_create_cmd[@]}"; then
+        log_and_display "${GREEN}远程端 '${remote_name}' 创建成功！${NC}"
+        log_and_display "${YELLOW}提示: 首次连接 SFTP 服务器时，Rclone 可能需要您确认主机的密钥指纹。${NC}"
+    else
+        log_and_display "${RED}远程端创建失败！${NC}"
+    fi
+    press_enter_to_continue
+}
+
+# 创建远程端的总向导
+create_rclone_remote_wizard() {
+    while true; do
+        display_header
+        echo -e "${BLUE}=== [助手] 在脚本内创建新的 Rclone 远程端 ===${NC}"
+        echo "请选择您要创建的云存储类型："
+        echo ""
+        echo "1. S3 兼容存储 (如 Cloudflare R2, AWS S3, MinIO 等)"
+        echo "2. WebDAV"
+        echo "3. SFTP"
+        echo ""
+        echo "对于 Google Drive, Dropbox 等需要浏览器授权的类型,"
+        echo "请使用 'rclone config' 命令进行配置。"
+        echo ""
+        echo "0. 返回上一级菜单"
+        echo -e "${BLUE}---------------------------------------------------${NC}"
+        read -rp "请输入选项: " choice
+
+        case "$choice" in
+            1) create_rclone_s3_remote ;;
+            2) create_rclone_webdav_remote ;;
+            3) create_rclone_sftp_remote ;;
+            0) break ;;
+            *) log_and_display "${RED}无效选项。${NC}"; press_enter_to_continue ;;
+        esac
+    done
+}
+
+
+# ================================================================
+# ===         RCLONE 云存储管理函数                          ===
 # ================================================================
 
 # 检查 Rclone 远程端是否存在
@@ -508,7 +640,8 @@ choose_rclone_path() {
         esac
     done
 
-    WEBDAV_BACKUP_PATH="$final_selected_path" # 使用一个临时全局变量来返回路径
+    # 使用一个已知不会冲突的变量名来返回路径
+    CHOSEN_RCLONE_PATH="$final_selected_path"
     return 0
 }
 
@@ -516,7 +649,7 @@ choose_rclone_path() {
 manage_rclone_targets() {
     while true; do
         display_header
-        echo -e "${BLUE}=== 管理 Rclone 备份目标 ===${NC}"
+        echo -e "${BLUE}=== 管理已配置的 Rclone 备份目标 ===${NC}"
         if [ ${#RCLONE_TARGETS_ARRAY[@]} -eq 0 ]; then
             log_and_display "${YELLOW}当前没有配置任何 Rclone 目标。${NC}"
         else
@@ -526,7 +659,7 @@ manage_rclone_targets() {
             done
         fi
         echo ""
-        echo "1. 添加新的 Rclone 目标"
+        echo "1. 添加新的 Rclone 目标 (基于已有的远程端)"
         echo "2. 删除一个 Rclone 目标"
         echo "0. 返回"
         echo -e "${BLUE}------------------------------------------------${NC}"
@@ -534,16 +667,16 @@ manage_rclone_targets() {
 
         case "$choice" in
             1) # 添加
-                read -rp "请输入您已通过 'rclone config' 配置好的远程端名称: " remote_name
+                read -rp "请输入您已通过 'rclone config' 或助手配置好的远程端名称: " remote_name
                 if ! check_rclone_remote_exists "$remote_name"; then
                     log_and_display "${RED}错误: Rclone 远程端 '${remote_name}' 不存在！${NC}"
-                    log_and_display "${YELLOW}请先运行 'rclone config' 创建它。${NC}"
+                    log_and_display "${YELLOW}请先运行 'rclone config' 或使用助手创建它。${NC}"
                     press_enter_to_continue
                     continue
                 fi
                 
                 if choose_rclone_path "$remote_name"; then
-                    local remote_path="$WEBDAV_BACKUP_PATH" # 从临时变量获取路径
+                    local remote_path="$CHOSEN_RCLONE_PATH" # 从临时变量获取路径
                     RCLONE_TARGETS_ARRAY+=("${remote_name}:${remote_path}")
                     save_config
                     log_and_display "${GREEN}已成功添加目标: ${remote_name}:${remote_path}${NC}"
@@ -563,14 +696,15 @@ manage_rclone_targets() {
                     local target_to_delete="${RCLONE_TARGETS_ARRAY[$((index-1))]}"
                     read -rp "确定要删除目标 '${target_to_delete}' 吗? (y/N): " confirm
                     if [[ "$confirm" =~ ^[Yy]$ ]]; then
-                        unset 'RCLONE_TARGETS_ARRAY[$((index-1))]'
+                        local deleted_index=$((index - 1))
+                        unset 'RCLONE_TARGETS_ARRAY[$deleted_index]'
                         RCLONE_TARGETS_ARRAY=("${RCLONE_TARGETS_ARRAY[@]}")
-                        # 同时从启用列表中移除
+                        
                         local new_enabled_indices=()
                         for enabled_idx in "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}"; do
-                            if (( enabled_idx < index - 1 )); then
+                            if (( enabled_idx < deleted_index )); then
                                 new_enabled_indices+=("$enabled_idx")
-                            elif (( enabled_idx > index - 1 )); then
+                            elif (( enabled_idx > deleted_index )); then
                                 new_enabled_indices+=("$((enabled_idx - 1))")
                             fi
                         done
@@ -660,10 +794,12 @@ set_cloud_storage() {
     while true; do
         display_header
         echo -e "${BLUE}=== 5. 云存储设定 (Rclone) ===${NC}"
-        echo -e "${YELLOW}请确保您已通过 'rclone config' 命令配置好了您的云存储。${NC}"
+        echo -e "${YELLOW}方法一 (推荐): 在终端运行 'rclone config' 配置所有类型的云存储。${NC}"
+        echo -e "${YELLOW}方法二 (助手): 在脚本内为 S3/WebDAV/SFTP 等类型创建配置。${NC}"
         echo ""
         echo "1. 选择启用的云备份目标 (当前启用 ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} 个)"
-        echo "2. 管理 Rclone 备份目标 (当前配置 ${#RCLONE_TARGETS_ARRAY[@]} 个)"
+        echo "2. 管理已配置的 Rclone 备份目标 (共 ${#RCLONE_TARGETS_ARRAY[@]} 个)"
+        echo -e "3. ${GREEN}[助手] 在脚本内创建新的 Rclone 远程端${NC}"
         echo "0. 返回主菜单"
         echo -e "${BLUE}------------------------------------------------${NC}"
         read -rp "请输入选项: " choice
@@ -671,6 +807,7 @@ set_cloud_storage() {
         case $choice in
             1) select_backup_targets ;;
             2) manage_rclone_targets ;;
+            3) create_rclone_remote_wizard ;;
             0) break ;;
             *) log_and_display "${RED}无效选项。${NC}"; press_enter_to_continue ;;
         esac
@@ -678,7 +815,7 @@ set_cloud_storage() {
 }
 
 
-# 6. 设置 Telegram 通知设定 (逻辑不变)
+# 6. 设置 Telegram 通知设定
 set_telegram_notification() {
     display_header
     echo -e "${BLUE}=== 6. 消息通知设定 (Telegram) ===${NC}"
@@ -694,12 +831,8 @@ set_telegram_notification() {
     press_enter_to_continue
 }
 
-# 7. 设置备份保留策略 (逻辑不变，实现会改变)
+# 7. 设置备份保留策略
 set_retention_policy() {
-    # 此处省略了原脚本中 `set_retention_policy` 的菜单代码
-    # 因为它与云存储的实现无关，可以直接复用。
-    # 请将您原脚本中的 `set_retention_policy` 函数粘贴到这里。
-    # ---
     while true; do
         display_header
         echo -e "${BLUE}=== 7. 设置备份保留策略 (云端) ===${NC}"
@@ -711,8 +844,8 @@ set_retention_policy() {
             *)       echo -e "  ${YELLOW}未知策略或未设置${NC}" ;;
         esac
         echo ""
-        echo "1. 设置按数量保留 (例如：保留最新的 5 个备份)"
-        echo "2. 设置按天数保留 (例如：保留最近 30 天内的备份)"
+        echo "1. 设置按数量保留 (例如：保留最新的 5 个)"
+        echo "2. 设置按天数保留 (例如：保留最近 30 天)"
         echo "3. 关闭保留策略"
         echo "0. 返回主菜单"
         echo -e "${BLUE}------------------------------------------------${NC}"
@@ -725,9 +858,9 @@ set_retention_policy() {
                     RETENTION_POLICY_TYPE="count"
                     RETENTION_VALUE="$value_input"
                     save_config
-                    log_and_display "${GREEN}已设置保留最新 ${RETENTION_VALUE} 个备份的策略。${NC}"
+                    log_and_display "${GREEN}已设置保留最新 ${RETENTION_VALUE} 个备份。${NC}"
                 else
-                    log_and_display "${RED}输入无效，请输入一个大于等于 1 的整数。${NC}"
+                    log_and_display "${RED}输入无效。${NC}"
                 fi
                 press_enter_to_continue
                 ;;
@@ -737,9 +870,9 @@ set_retention_policy() {
                     RETENTION_POLICY_TYPE="days"
                     RETENTION_VALUE="$value_input"
                     save_config
-                    log_and_display "${GREEN}已设置保留最近 ${RETENTION_VALUE} 天内的备份策略。${NC}"
+                    log_and_display "${GREEN}已设置保留最近 ${RETENTION_VALUE} 天。${NC}"
                 else
-                    log_and_display "${RED}输入无效，请输入一个大于等于 1 的整数。${NC}"
+                    log_and_display "${RED}输入无效。${NC}"
                 fi
                 press_enter_to_continue
                 ;;
@@ -750,19 +883,14 @@ set_retention_policy() {
                 log_and_display "${GREEN}已关闭备份保留策略。${NC}"
                 press_enter_to_continue
                 ;;
-            0)
-                break
-                ;;
-            *)
-                log_and_display "${RED}无效的选项，请重新输入。${NC}"
-                press_enter_to_continue
-                ;;
+            0) break ;;
+            *) log_and_display "${RED}无效选项。${NC}"; press_enter_to_continue ;;
         esac
     done
 }
 
 
-# [RCLONE] 应用保留策略
+# 应用保留策略
 apply_retention_policy() {
     log_and_display "${BLUE}--- 正在应用备份保留策略 (Rclone) ---${NC}"
 
@@ -771,7 +899,7 @@ apply_retention_policy() {
         return 0
     fi
 
-    local retention_summary="*个人自用数据备份：保留策略完成*"
+    local retention_summary="*${SCRIPT_NAME}：保留策略完成*"
     retention_summary+=$'\n'"保留策略执行完毕。"
 
     for enabled_idx in "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}"; do
@@ -779,14 +907,12 @@ apply_retention_policy() {
         log_and_display "正在为目标 ${rclone_target} 应用保留策略..."
 
         local backups_list
-        # 获取文件名和修改时间戳
         backups_list=$(rclone lsf --format "p;T" "${rclone_target}" | grep -E '_[0-9]{14}\.zip;')
         if [[ -z "$backups_list" ]]; then
             log_and_display "在 ${rclone_target} 中未找到备份文件，跳过。" "${YELLOW}"
             continue
         fi
         
-        # 按时间排序 (旧的在前)
         local sorted_backups
         sorted_backups=$(echo "$backups_list" | sort -t ';' -k 2)
 
@@ -799,7 +925,7 @@ apply_retention_policy() {
         if [[ "$RETENTION_POLICY_TYPE" == "count" ]]; then
             local num_to_delete=$(( total_found - RETENTION_VALUE ))
             if [ "$num_to_delete" -gt 0 ]; then
-                log_and_display "发现 ${num_to_delete} 个备份超过保留数量，将删除最旧的..." "${YELLOW}"
+                log_and_display "发现 ${num_to_delete} 个旧备份，将删除..." "${YELLOW}"
                 for (( i=0; i<num_to_delete; i++ )); do
                     local file_path_to_delete
                     file_path_to_delete=$(echo "${backups_to_process[$i]}" | cut -d ';' -f 1)
@@ -814,11 +940,9 @@ apply_retention_policy() {
             local cutoff_timestamp=$(( current_timestamp - RETENTION_VALUE * 24 * 3600 ))
             log_and_display "将删除 ${RETENTION_VALUE} 天前的备份..." "${YELLOW}"
             for item in "${backups_to_process[@]}"; do
-                local file_path
+                local file_path file_date file_timestamp
                 file_path=$(echo "$item" | cut -d ';' -f 1)
-                local file_date
                 file_date=$(echo "$item" | cut -d ';' -f 2 | cut -d 'T' -f 1)
-                local file_timestamp
                 file_timestamp=$(date -d "$file_date" +%s)
 
                 if [[ "$file_timestamp" -lt "$cutoff_timestamp" ]]; then
@@ -830,12 +954,12 @@ apply_retention_policy() {
             done
         fi
         log_and_display "${GREEN}${rclone_target} 清理完成，删除 ${deleted_count} 个文件。${NC}"
-        retention_summary+=$'\n'"${rclone_target}: 找到 ${total_found} 个，删除了 ${deleted_count} 个。"
+        retention_summary+=$'\n'"- ${rclone_target}: 找到 ${total_found} 个, 删除 ${deleted_count} 个。"
     done
     send_telegram_message "${retention_summary}"
 }
 
-# [RCLONE] 执行备份上传的核心逻辑
+# 执行备份上传的核心逻辑
 perform_backup() {
     local backup_type="$1"
     local readable_time=$(date '+%Y-%m-%d %H:%M:%S')
@@ -886,7 +1010,7 @@ perform_backup() {
         
         local backup_file_size
         backup_file_size=$(du -h "$temp_archive_path" | awk '{print $1}')
-        local path_summary_message="*${SCRIPT_NAME}：路径完成*\n路径: \`${current_backup_path}\`\n文件: \`${archive_name}\` (${backup_file_size})\n\n*上传状态:*"
+        local path_summary_message="*${SCRIPT_NAME}：路径处理*\n路径: \`${current_backup_path}\`\n文件: \`${archive_name}\` (${backup_file_size})\n\n*上传状态:*"
 
         local upload_statuses=""
         for enabled_idx in "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}"; do
@@ -894,21 +1018,21 @@ perform_backup() {
             log_and_display "正在上传到 Rclone 目标: ${rclone_target}"
             if rclone copyto "$temp_archive_path" "${rclone_target}${archive_name}" --progress; then
                 log_and_display "${GREEN}上传到 ${rclone_target} 成功！${NC}"
-                upload_statuses+="\n- ${rclone_target}: 成功"
+                upload_statuses+="\n- \`${rclone_target}\`: 成功"
                 any_upload_succeeded_for_path="true"
             else
                 log_and_display "${RED}上传到 ${rclone_target} 失败！${NC}"
-                upload_statuses+="\n- ${rclone_target}: 失败"
+                upload_statuses+="\n- \`${rclone_target}\`: 失败"
             fi
         done
         
-        path_summary_message+="${upload_statuses}"
         if [[ "$any_upload_succeeded_for_path" == "true" ]]; then
             overall_succeeded_count=$((overall_succeeded_count + 1))
-            path_summary_message=${path_summary_message/\*路径完成/\*路径完成 (成功)\*}
+            path_summary_message=${path_summary_message/\*路径处理/\*路径处理 (成功)\*}
         else
-            path_summary_message=${path_summary_message/\*路径完成/\*路径完成 (失败)\*}
+            path_summary_message=${path_summary_message/\*路径处理/\*路径处理 (失败)\*}
         fi
+        path_summary_message+="${upload_statuses}"
         send_telegram_message "$path_summary_message"
 
         rm -f "$temp_archive_path"
@@ -936,7 +1060,7 @@ perform_backup() {
     fi
 }
 
-# 99. 卸载脚本 (逻辑不变)
+# 99. 卸载脚本
 uninstall_script() {
     display_header
     echo -e "${RED}=== 99. 卸载脚本 ===${NC}"
@@ -965,13 +1089,13 @@ show_main_menu() {
     echo -e "  3. ${YELLOW}自定义备份路径${NC} (数量: ${#BACKUP_SOURCE_PATHS_ARRAY[@]})"
     echo -e "  4. ${YELLOW}压缩包格式${NC} (ZIP)"
     echo -e "  5. ${YELLOW}云存储设定 (Rclone)${NC}"
+    echo -e "  6. ${YELLOW}消息通知设定 (Telegram)${NC}"
     local retention_status_text="已禁用"
     if [[ "$RETENTION_POLICY_TYPE" == "count" ]]; then
         retention_status_text="保留 ${RETENTION_VALUE} 个"
     elif [[ "$RETENTION_POLICY_TYPE" == "days" ]]; then
         retention_status_text="保留 ${RETENTION_VALUE} 天"
     fi
-    echo -e "  6. ${YELLOW}消息通知设定 (Telegram)${NC}"
     echo -e "  7. ${YELLOW}设置备份保留策略${NC} (当前: ${retention_status_text})"
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "  0. ${RED}退出脚本${NC}"
