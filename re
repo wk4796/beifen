@@ -18,7 +18,7 @@ LAST_AUTO_BACKUP_TIMESTAMP=0 # 上次自动备份的 Unix 时间戳
 
 # 备份保留策略默认值
 RETENTION_POLICY_TYPE="none" # "none", "count", "days"
-RETENTION_VALUE=0            # 要保留的备份数量或天数
+RETENTION_VALUE=0           # 要保留的备份数量或天数
 
 # --- Rclone 配置 ---
 # 数组，用于存储格式为 "remote_name:remote/path" 的 Rclone 目标
@@ -66,7 +66,7 @@ clear_screen() {
 display_header() {
     clear_screen
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}      $SCRIPT_NAME      ${NC}"
+    echo -e "${GREEN}      $SCRIPT_NAME       ${NC}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 }
@@ -369,17 +369,28 @@ display_compression_info() {
 }
 
 # ================================================================
-# ===         在脚本内创建 Rclone 远程端                     ===
+# ===         在脚本内创建 Rclone 远程端 (增强版)              ===
 # ================================================================
+
+# 通用函数: 获取远程端名称
+get_remote_name() {
+    local prompt_message="$1"
+    read -rp "为这个新的远程端起一个名字 (例如: ${prompt_message}): " remote_name
+    if [[ -z "$remote_name" || "$remote_name" =~ [[:space:]] ]]; then
+        log_and_display "${RED}错误: 远程端名称不能为空或包含空格。${NC}"
+        return 1
+    fi
+    # 将结果存储在全局变量中以便调用者使用
+    REPLY="$remote_name"
+    return 0
+}
 
 # 创建 S3 兼容远程端的函数
 create_rclone_s3_remote() {
     display_header
     echo -e "${BLUE}--- 创建 S3 兼容远程端 ---${NC}"
-    read -rp "为这个新的远程端起一个名字 (例如: myr2, aws_backup): " remote_name
-    if [[ -z "$remote_name" || "$remote_name" =~ [[:space:]] ]]; then
-        log_and_display "${RED}错误: 远程端名称不能为空或包含空格。${NC}"; press_enter_to_continue; return 1;
-    fi
+    get_remote_name "myr2" || { press_enter_to_continue; return 1; }
+    local remote_name=$REPLY
 
     echo "请选择您的 S3 提供商:"
     echo "1. Cloudflare R2"
@@ -420,23 +431,102 @@ create_rclone_s3_remote() {
     press_enter_to_continue
 }
 
+# 创建 Backblaze B2 远程端的函数
+create_rclone_b2_remote() {
+    display_header
+    echo -e "${BLUE}--- 创建 Backblaze B2 远程端 ---${NC}"
+    get_remote_name "b2_backup" || { press_enter_to_continue; return 1; }
+    local remote_name=$REPLY
+
+    read -rp "请输入 B2 Account ID 或 Application Key ID: " account_id
+    read -s -rp "请输入 B2 Application Key: " app_key
+    echo ""
+
+    log_and_display "正在创建 Rclone 远程端: ${remote_name}..." "${BLUE}"
+    if rclone config create "$remote_name" b2 account "$account_id" key "$app_key"; then
+        log_and_display "${GREEN}远程端 '${remote_name}' 创建成功！${NC}"
+    else
+        log_and_display "${RED}远程端创建失败！${NC}"
+    fi
+    press_enter_to_continue
+}
+
+# 创建 Azure Blob 远程端的函数
+create_rclone_azureblob_remote() {
+    display_header
+    echo -e "${BLUE}--- 创建 Microsoft Azure Blob Storage 远程端 ---${NC}"
+    get_remote_name "myazure" || { press_enter_to_continue; return 1; }
+    local remote_name=$REPLY
+
+    read -rp "请输入 Azure Storage Account Name: " account_name
+    read -s -rp "请输入 Azure Storage Account Key: " account_key
+    echo ""
+
+    log_and_display "正在创建 Rclone 远程端: ${remote_name}..." "${BLUE}"
+    if rclone config create "$remote_name" azureblob account "$account_name" key "$account_key"; then
+        log_and_display "${GREEN}远程端 '${remote_name}' 创建成功！${NC}"
+    else
+        log_and_display "${RED}远程端创建失败！${NC}"
+    fi
+    press_enter_to_continue
+}
+
+# 创建 Mega 远程端的函数
+create_rclone_mega_remote() {
+    display_header
+    echo -e "${BLUE}--- 创建 Mega.nz 远程端 ---${NC}"
+    get_remote_name "mymega" || { press_enter_to_continue; return 1; }
+    local remote_name=$REPLY
+
+    read -rp "请输入 Mega 用户名 (邮箱): " user
+    read -s -rp "请输入 Mega 密码: " password
+    echo ""
+    local obscured_pass=$(rclone obscure "$password")
+
+    log_and_display "正在创建 Rclone 远程端: ${remote_name}..." "${BLUE}"
+    if rclone config create "$remote_name" mega user "$user" pass "$obscured_pass"; then
+        log_and_display "${GREEN}远程端 '${remote_name}' 创建成功！${NC}"
+    else
+        log_and_display "${RED}远程端创建失败！${NC}"
+    fi
+    press_enter_to_continue
+}
+
+# 创建 pCloud 远程端的函数
+create_rclone_pcloud_remote() {
+    display_header
+    echo -e "${BLUE}--- 创建 pCloud 远程端 ---${NC}"
+    get_remote_name "mypcloud" || { press_enter_to_continue; return 1; }
+    local remote_name=$REPLY
+
+    read -rp "请输入 pCloud 用户名 (邮箱): " user
+    read -s -rp "请输入 pCloud 密码: " password
+    echo ""
+    local obscured_pass=$(rclone obscure "$password")
+
+    log_and_display "正在创建 Rclone 远程端: ${remote_name}..." "${BLUE}"
+    log_and_display "${YELLOW}Rclone 将尝试使用您的用户名和密码获取授权令牌...${NC}"
+
+    if rclone config create "$remote_name" pcloud username "$user" password "$obscured_pass"; then
+        log_and_display "${GREEN}远程端 '${remote_name}' 创建成功！${NC}"
+    else
+        log_and_display "${RED}远程端创建失败！可能是密码错误或需要双因素认证。${NC}"
+    fi
+    press_enter_to_continue
+}
+
 # 创建 WebDAV 远程端的函数
 create_rclone_webdav_remote() {
     display_header
     echo -e "${BLUE}--- 创建 WebDAV 远程端 ---${NC}"
-    read -rp "为这个新的远程端起一个名字 (例如: mydav): " remote_name
-    if [[ -z "$remote_name" || "$remote_name" =~ [[:space:]] ]]; then
-        log_and_display "${RED}错误: 远程端名称不能为空或包含空格。${NC}"; press_enter_to_continue; return 1;
-    fi
+    get_remote_name "mydav" || { press_enter_to_continue; return 1; }
+    local remote_name=$REPLY
 
     read -rp "请输入 WebDAV URL (例如 https://dav.box.com/dav): " url
     read -rp "请输入用户名: " user
     read -s -rp "请输入密码: " password
     echo ""
-
-    # 使用 rclone obscure 来加密密码，增强安全性
-    local obscured_pass
-    obscured_pass=$(rclone obscure "$password")
+    local obscured_pass=$(rclone obscure "$password")
 
     log_and_display "正在创建 Rclone 远程端: ${remote_name}..." "${BLUE}"
     if rclone config create "$remote_name" webdav url "$url" user "$user" pass "$obscured_pass"; then
@@ -451,10 +541,8 @@ create_rclone_webdav_remote() {
 create_rclone_sftp_remote() {
     display_header
     echo -e "${BLUE}--- 创建 SFTP 远程端 ---${NC}"
-    read -rp "为这个新的远程端起一个名字 (例如: myserver): " remote_name
-    if [[ -z "$remote_name" || "$remote_name" =~ [[:space:]] ]]; then
-        log_and_display "${RED}错误: 远程端名称不能为空或包含空格。${NC}"; press_enter_to_continue; return 1;
-    fi
+    get_remote_name "myserver" || { press_enter_to_continue; return 1; }
+    local remote_name=$REPLY
 
     read -rp "请输入主机名或 IP 地址: " host
     read -rp "请输入用户名: " user
@@ -497,6 +585,98 @@ create_rclone_sftp_remote() {
     press_enter_to_continue
 }
 
+# 创建 FTP 远程端的函数
+create_rclone_ftp_remote() {
+    display_header
+    echo -e "${BLUE}--- 创建 FTP 远程端 ---${NC}"
+    get_remote_name "myftp" || { press_enter_to_continue; return 1; }
+    local remote_name=$REPLY
+
+    read -rp "请输入主机名或 IP 地址: " host
+    read -rp "请输入用户名: " user
+    read -s -rp "请输入密码: " password
+    echo ""
+    local obscured_pass=$(rclone obscure "$password")
+    read -rp "请输入端口号 [默认 21]: " port
+    port=${port:-21}
+
+    log_and_display "正在创建 Rclone 远程端: ${remote_name}..." "${BLUE}"
+    if rclone config create "$remote_name" ftp host "$host" user "$user" pass "$obscured_pass" port "$port"; then
+        log_and_display "${GREEN}远程端 '${remote_name}' 创建成功！${NC}"
+    else
+        log_and_display "${RED}远程端创建失败！${NC}"
+    fi
+    press_enter_to_continue
+}
+
+# 创建 Crypt 远程端的函数
+create_rclone_crypt_remote() {
+    display_header
+    echo -e "${BLUE}--- 创建 Crypt 加密远程端 ---${NC}"
+    echo -e "${YELLOW}Crypt 会加密您上传到另一个远程端的文件名和内容。${NC}"
+    get_remote_name "my_encrypted_remote" || { press_enter_to_continue; return 1; }
+    local remote_name=$REPLY
+
+    echo ""
+    log_and_display "可用的远程端列表："
+    rclone listremotes
+    echo ""
+    read -rp "请输入您要加密的目标远程端路径 (例如: myr2:my_encrypted_bucket): " target_remote
+
+    echo -e "${YELLOW}您需要设置两个密码，第二个是盐值，用于进一步增强安全性。请务必牢记！${NC}"
+    read -s -rp "请输入密码 (password): " pass1
+    echo ""
+    read -s -rp "请再次输入密码进行确认: " pass1_confirm
+    echo ""
+    if [[ "$pass1" != "$pass1_confirm" ]]; then
+        log_and_display "${RED}两次输入的密码不匹配！${NC}"; press_enter_to_continue; return 1;
+    fi
+
+    read -s -rp "请输入盐值密码 (salt/password2)，可以与上一个不同: " pass2
+    echo ""
+    read -s -rp "请再次输入盐值密码进行确认: " pass2_confirm
+    echo ""
+    if [[ "$pass2" != "$pass2_confirm" ]]; then
+        log_and_display "${RED}两次输入的盐值密码不匹配！${NC}"; press_enter_to_continue; return 1;
+    fi
+
+    local obscured_pass1=$(rclone obscure "$pass1")
+    local obscured_pass2=$(rclone obscure "$pass2")
+
+    log_and_display "正在创建 Rclone 远程端: ${remote_name}..." "${BLUE}"
+    if rclone config create "$remote_name" crypt remote "$target_remote" password "$obscured_pass1" password2 "$obscured_pass2"; then
+        log_and_display "${GREEN}加密远程端 '${remote_name}' 创建成功！${NC}"
+        log_and_display "现在您可以像使用普通远程端一样使用 '${remote_name}:'，所有数据都会在后台自动加解密。"
+    else
+        log_and_display "${RED}远程端创建失败！${NC}"
+    fi
+    press_enter_to_continue
+}
+
+# 创建 Alias 远程端的函数
+create_rclone_alias_remote() {
+    display_header
+    echo -e "${BLUE}--- 创建 Alias 别名远程端 ---${NC}"
+    echo -e "${YELLOW}Alias 可以为另一个远程端的深层路径创建一个简短的别名。${NC}"
+    get_remote_name "my_shortcut" || { press_enter_to_continue; return 1; }
+    local remote_name=$REPLY
+
+    echo ""
+    log_and_display "可用的远程端列表："
+    rclone listremotes
+    echo ""
+    read -rp "请输入您要为其创建别名的目标远程端路径 (例如: myr2:path/to/my/files): " target_remote
+
+    log_and_display "正在创建 Rclone 远程端: ${remote_name}..." "${BLUE}"
+    if rclone config create "$remote_name" alias remote "$target_remote"; then
+        log_and_display "${GREEN}别名远程端 '${remote_name}' 创建成功！${NC}"
+        log_and_display "现在 '${remote_name}:' 就等同于 '${target_remote}'。"
+    else
+        log_and_display "${RED}远程端创建失败！${NC}"
+    fi
+    press_enter_to_continue
+}
+
 # 创建远程端的总向导
 create_rclone_remote_wizard() {
     while true; do
@@ -504,21 +684,40 @@ create_rclone_remote_wizard() {
         echo -e "${BLUE}=== [助手] 在脚本内创建新的 Rclone 远程端 ===${NC}"
         echo "请选择您要创建的云存储类型："
         echo ""
-        echo "1. S3 兼容存储 (如 Cloudflare R2, AWS S3, MinIO 等)"
-        echo "2. WebDAV"
-        echo "3. SFTP"
+        echo -e "${GREEN}--- 对象存储/云盘 ---${NC}"
+        echo " 1. S3 兼容存储 (如 Cloudflare R2, AWS S3, MinIO 等)"
+        echo " 2. Backblaze B2"
+        echo " 3. Microsoft Azure Blob Storage"
+        echo " 4. Mega.nz"
+        echo " 5. pCloud"
+        echo ""
+        echo -e "${GREEN}--- 传统协议 ---${NC}"
+        echo " 6. WebDAV"
+        echo " 7. SFTP"
+        echo " 8. FTP"
+        echo ""
+        echo -e "${GREEN}--- 功能性远程端 (包装器) ---${NC}"
+        echo " 9. Crypt (加密一个现有远程端)"
+        echo " 10. Alias (为一个远程路径创建别名)"
         echo ""
         echo "对于 Google Drive, Dropbox 等需要浏览器授权的类型,"
-        echo "请使用 'rclone config' 命令进行配置。"
+        echo "请在终端中运行 'rclone config' 命令进行配置。"
         echo ""
-        echo "0. 返回上一级菜单"
+        echo " 0. 返回上一级菜单"
         echo -e "${BLUE}---------------------------------------------------${NC}"
         read -rp "请输入选项: " choice
 
         case "$choice" in
             1) create_rclone_s3_remote ;;
-            2) create_rclone_webdav_remote ;;
-            3) create_rclone_sftp_remote ;;
+            2) create_rclone_b2_remote ;;
+            3) create_rclone_azureblob_remote ;;
+            4) create_rclone_mega_remote ;;
+            5) create_rclone_pcloud_remote ;;
+            6) create_rclone_webdav_remote ;;
+            7) create_rclone_sftp_remote ;;
+            8) create_rclone_ftp_remote ;;
+            9) create_rclone_crypt_remote ;;
+            10) create_rclone_alias_remote ;;
             0) break ;;
             *) log_and_display "${RED}无效选项。${NC}"; press_enter_to_continue ;;
         esac
@@ -527,7 +726,7 @@ create_rclone_remote_wizard() {
 
 
 # ================================================================
-# ===         RCLONE 云存储管理函数                          ===
+# ===         RCLONE 云存储管理函数 (优化版)                 ===
 # ================================================================
 
 # 检查 Rclone 远程端是否存在
@@ -645,71 +844,75 @@ choose_rclone_path() {
     return 0
 }
 
-# 管理 Rclone 备份目标
-manage_rclone_targets() {
+# [新] 查看、管理和启用备份目标
+view_and_manage_rclone_targets() {
+    local needs_saving="false"
     while true; do
         display_header
-        echo -e "${BLUE}=== 管理已配置的 Rclone 备份目标 ===${NC}"
+        echo -e "${BLUE}=== 查看、管理和启用备份目标 ===${NC}"
+        
         if [ ${#RCLONE_TARGETS_ARRAY[@]} -eq 0 ]; then
             log_and_display "${YELLOW}当前没有配置任何 Rclone 目标。${NC}"
         else
-            echo "已配置的 Rclone 目标:"
+            echo "已配置的 Rclone 目标列表:"
             for i in "${!RCLONE_TARGETS_ARRAY[@]}"; do
-                echo "  $((i+1)). ${RCLONE_TARGETS_ARRAY[$i]}"
+                local is_enabled="false"
+                for enabled_idx in "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}"; do
+                    if [[ "$i" -eq "$enabled_idx" ]]; then
+                        is_enabled="true"; break;
+                    fi
+                done
+                
+                echo -n "$((i+1)). ${RCLONE_TARGETS_ARRAY[$i]} "
+                if [[ "$is_enabled" == "true" ]]; then
+                    echo -e "[${GREEN}已启用${NC}]"
+                else
+                    echo -e "[${YELLOW}已禁用${NC}]"
+                fi
             done
         fi
-        echo ""
-        echo "1. 添加新的 Rclone 目标 (基于已有的远程端)"
-        echo "2. 删除一个 Rclone 目标"
-        echo "0. 返回"
+        
+        echo -e "${BLUE}------------------------------------------------${NC}"
+        echo " a - 添加新目标      d - 删除目标      m - 修改目标路径"
+        echo " t - 切换启用/禁用状态"
+        echo " 0 - 保存并返回"
         echo -e "${BLUE}------------------------------------------------${NC}"
         read -rp "请输入选项: " choice
 
         case "$choice" in
-            1) # 添加
+            a|A) # 添加
                 read -rp "请输入您已通过 'rclone config' 或助手配置好的远程端名称: " remote_name
                 if ! check_rclone_remote_exists "$remote_name"; then
                     log_and_display "${RED}错误: Rclone 远程端 '${remote_name}' 不存在！${NC}"
-                    log_and_display "${YELLOW}请先运行 'rclone config' 或使用助手创建它。${NC}"
-                    press_enter_to_continue
-                    continue
-                fi
-                
-                if choose_rclone_path "$remote_name"; then
-                    local remote_path="$CHOSEN_RCLONE_PATH" # 从临时变量获取路径
+                elif choose_rclone_path "$remote_name"; then
+                    local remote_path="$CHOSEN_RCLONE_PATH"
                     RCLONE_TARGETS_ARRAY+=("${remote_name}:${remote_path}")
-                    save_config
+                    needs_saving="true"
                     log_and_display "${GREEN}已成功添加目标: ${remote_name}:${remote_path}${NC}"
                 else
                     log_and_display "${YELLOW}已取消添加目标。${NC}"
                 fi
                 press_enter_to_continue
                 ;;
-            2) # 删除
-                if [ ${#RCLONE_TARGETS_ARRAY[@]} -eq 0 ]; then
-                    log_and_display "${YELLOW}没有可删除的目标。${NC}"
-                    press_enter_to_continue
-                    continue
-                fi
+
+            d|D) # 删除
+                if [ ${#RCLONE_TARGETS_ARRAY[@]} -eq 0 ]; then log_and_display "${YELLOW}没有可删除的目标。${NC}"; press_enter_to_continue; continue; fi
                 read -rp "请输入要删除的目标序号: " index
                 if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le ${#RCLONE_TARGETS_ARRAY[@]} ]; then
-                    local target_to_delete="${RCLONE_TARGETS_ARRAY[$((index-1))]}"
-                    read -rp "确定要删除目标 '${target_to_delete}' 吗? (y/N): " confirm
+                    local deleted_index=$((index - 1))
+                    read -rp "确定要删除目标 '${RCLONE_TARGETS_ARRAY[$deleted_index]}' 吗? (y/N): " confirm
                     if [[ "$confirm" =~ ^[Yy]$ ]]; then
-                        local deleted_index=$((index - 1))
                         unset 'RCLONE_TARGETS_ARRAY[$deleted_index]'
                         RCLONE_TARGETS_ARRAY=("${RCLONE_TARGETS_ARRAY[@]}")
                         
                         local new_enabled_indices=()
                         for enabled_idx in "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}"; do
-                            if (( enabled_idx < deleted_index )); then
-                                new_enabled_indices+=("$enabled_idx")
-                            elif (( enabled_idx > deleted_index )); then
-                                new_enabled_indices+=("$((enabled_idx - 1))")
+                            if (( enabled_idx < deleted_index )); then new_enabled_indices+=("$enabled_idx");
+                            elif (( enabled_idx > deleted_index )); then new_enabled_indices+=("$((enabled_idx - 1))");
                             fi
                         done
                         ENABLED_RCLONE_TARGET_INDICES_ARRAY=("${new_enabled_indices[@]}")
-                        save_config
+                        needs_saving="true"
                         log_and_display "${GREEN}目标已删除。${NC}"
                     fi
                 else
@@ -717,103 +920,141 @@ manage_rclone_targets() {
                 fi
                 press_enter_to_continue
                 ;;
-            0) break ;;
+                
+            m|M) # 修改
+                if [ ${#RCLONE_TARGETS_ARRAY[@]} -eq 0 ]; then log_and_display "${YELLOW}没有可修改的目标。${NC}"; press_enter_to_continue; continue; fi
+                read -rp "请输入要修改路径的目标序号: " index
+                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le ${#RCLONE_TARGETS_ARRAY[@]} ]; then
+                    local mod_index=$((index - 1))
+                    local target_to_modify="${RCLONE_TARGETS_ARRAY[$mod_index]}"
+                    local remote_name="${target_to_modify%%:*}"
+                    
+                    log_and_display "正在为远程端 '${remote_name}' 重新选择路径..."
+                    if choose_rclone_path "$remote_name"; then
+                        local new_path="$CHOSEN_RCLONE_PATH"
+                        RCLONE_TARGETS_ARRAY[$mod_index]="${remote_name}:${new_path}"
+                        needs_saving="true"
+                        log_and_display "${GREEN}目标已修改为: ${remote_name}:${new_path}${NC}"
+                    else
+                         log_and_display "${YELLOW}已取消修改。${NC}"
+                    fi
+                else
+                    log_and_display "${RED}无效序号。${NC}"
+                fi
+                press_enter_to_continue
+                ;;
+
+            t|T) # 切换状态
+                if [ ${#RCLONE_TARGETS_ARRAY[@]} -eq 0 ]; then log_and_display "${YELLOW}没有可切换的目标。${NC}"; press_enter_to_continue; continue; fi
+                read -rp "请输入要切换状态的目标序号: " index
+                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le ${#RCLONE_TARGETS_ARRAY[@]} ]; then
+                    local choice_idx=$((index - 1))
+                    local found_in_enabled=-1; local index_in_enabled_array=-1
+                    for i in "${!ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}"; do
+                        if [[ "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[$i]}" -eq "$choice_idx" ]]; then
+                            found_in_enabled=1; index_in_enabled_array=$i; break
+                        fi
+                    done
+                    if [[ "$found_in_enabled" -eq 1 ]]; then # 禁用
+                        unset 'ENABLED_RCLONE_TARGET_INDICES_ARRAY[$index_in_enabled_array]'
+                        ENABLED_RCLONE_TARGET_INDICES_ARRAY=("${ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}")
+                        log_and_display "目标已 ${YELLOW}禁用${NC}。"
+                    else # 启用
+                        ENABLED_RCLONE_TARGET_INDICES_ARRAY+=("$choice_idx")
+                        log_and_display "目标已 ${GREEN}启用${NC}。"
+                    fi
+                    needs_saving="true"
+                else
+                    log_and_display "${RED}无效序号。${NC}"
+                fi
+                press_enter_to_continue
+                ;;
+
+            0)
+                if [[ "$needs_saving" == "true" ]]; then
+                    save_config
+                    log_and_display "设置已保存。" "${BLUE}"
+                fi
+                break
+                ;;
             *) log_and_display "${RED}无效选项。${NC}"; press_enter_to_continue ;;
         esac
     done
 }
 
-# 选择启用的 Rclone 备份目标
-select_backup_targets() {
+# [新] 测试 Rclone 远程端连接
+test_rclone_remotes() {
     while true; do
         display_header
-        echo -e "${BLUE}=== 选择启用的云备份目标 (Rclone) ===${NC}"
-        echo "输入序号来切换目标的 [启用/禁用] 状态。"
+        echo -e "${BLUE}=== 测试 Rclone 远程端连接 ===${NC}"
         
-        if [ ${#RCLONE_TARGETS_ARRAY[@]} -eq 0 ]; then
-            log_and_display "${YELLOW}请先在 '管理 Rclone 备份目标' 菜单中添加目标。${NC}"
+        local remotes_list=()
+        mapfile -t remotes_list < <(rclone listremotes | sed 's/://')
+
+        if [ ${#remotes_list[@]} -eq 0 ]; then
+            log_and_display "${YELLOW}未发现任何已配置的 Rclone 远程端。${NC}"
+            log_and_display "请先使用 '创建新的 Rclone 远程端' 或 'rclone config' 进行配置。"
             press_enter_to_continue
             break
         fi
 
-        for i in "${!RCLONE_TARGETS_ARRAY[@]}"; do
-            local is_enabled="false"
-            for enabled_idx in "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}"; do
-                if [[ "$i" -eq "$enabled_idx" ]]; then
-                    is_enabled="true"; break;
-                fi
-            done
-            
-            echo -n "$((i+1)). ${RCLONE_TARGETS_ARRAY[$i]} (当前: "
-            if [[ "$is_enabled" == "true" ]]; then
-                echo -e "${GREEN}启用${NC})"
-            else
-                echo -e "${YELLOW}禁用${NC})"
-            fi
+        echo "发现以下 Rclone 远程端:"
+        for i in "${!remotes_list[@]}"; do
+            echo " $((i+1)). ${remotes_list[$i]}"
         done
-
         echo ""
-        echo "0. 保存并返回"
+        echo " 0. 返回"
         echo -e "${BLUE}------------------------------------------------${NC}"
-        read -rp "请输入要切换状态的目标序号 (0 保存并退出): " choice
+        read -rp "请选择要测试连接的远程端序号 (0 返回): " choice
 
-        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#RCLONE_TARGETS_ARRAY[@]} ]; then
-            local choice_idx=$((choice - 1))
-            local found_in_enabled=-1
-            local index_in_enabled_array=-1
-            for i in "${!ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}"; do
-                if [[ "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[$i]}" -eq "$choice_idx" ]]; then
-                    found_in_enabled=1
-                    index_in_enabled_array=$i
-                    break
-                fi
-            done
+        if [[ "$choice" -eq 0 ]]; then break; fi
 
-            if [[ "$found_in_enabled" -eq 1 ]]; then # 禁用
-                unset 'ENABLED_RCLONE_TARGET_INDICES_ARRAY[$index_in_enabled_array]'
-                ENABLED_RCLONE_TARGET_INDICES_ARRAY=("${ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}")
-                log_and_display "目标已 ${YELLOW}禁用${NC}。"
-            else # 启用
-                ENABLED_RCLONE_TARGET_INDICES_ARRAY+=("$choice_idx")
-                log_and_display "目标已 ${GREEN}启用${NC}。"
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#remotes_list[@]} ]; then
+            local remote_to_test="${remotes_list[$((choice-1))]}"
+            log_and_display "正在测试 '${remote_to_test}'..." "${YELLOW}"
+            
+            if rclone about "${remote_to_test}:" >/dev/null 2>&1; then
+                log_and_display "连接测试成功！ '${remote_to_test}' 可用。" "${GREEN}"
+                echo -e "${GREEN}--- Rclone About Info ---${NC}"
+                rclone about "${remote_to_test}:"
+                echo -e "${GREEN}-------------------------${NC}"
+            else
+                log_and_display "连接测试失败！" "${RED}"
+                log_and_display "请检查远程端配置 ('rclone config') 或网络连接。"
             fi
-            press_enter_to_continue
-        elif [[ "$choice" == "0" ]]; then
-            save_config
-            log_and_display "备份目标设置已保存。" "${BLUE}"
-            break
         else
-            log_and_display "${RED}无效选项。${NC}"; press_enter_to_continue
+            log_and_display "${RED}无效序号。${NC}"
         fi
+        press_enter_to_continue
     done
 }
 
-
-# 5. 云存储设定 (Rclone 主菜单)
+# 5. 云存储设定 (Rclone 主菜单 - 优化版)
 set_cloud_storage() {
     while true; do
         display_header
         echo -e "${BLUE}=== 5. 云存储设定 (Rclone) ===${NC}"
-        echo -e "${YELLOW}方法一 (推荐): 在终端运行 'rclone config' 配置所有类型的云存储。${NC}"
-        echo -e "${YELLOW}方法二 (助手): 在脚本内为 S3/WebDAV/SFTP 等类型创建配置。${NC}"
         echo ""
-        echo "1. 选择启用的云备份目标 (当前启用 ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} 个)"
-        echo "2. 管理已配置的 Rclone 备份目标 (共 ${#RCLONE_TARGETS_ARRAY[@]} 个)"
-        echo -e "3. ${GREEN}[助手] 在脚本内创建新的 Rclone 远程端${NC}"
-        echo "0. 返回主菜单"
+        echo " 1. 查看、管理和启用备份目标"
+        echo " 2. [助手] 创建新的 Rclone 远程端"
+        echo " 3. 测试 Rclone 远程端连接"
+        echo ""
+        echo -e "${YELLOW}提示: '备份目标' 是 '远程端' 加上具体路径 (例如 mydrive:/backups)。${NC}"
+        echo "      '远程端' 是您在 Rclone 中的云存储账户配置。"
+        echo ""
+        echo " 0. 返回主菜单"
         echo -e "${BLUE}------------------------------------------------${NC}"
         read -rp "请输入选项: " choice
 
         case $choice in
-            1) select_backup_targets ;;
-            2) manage_rclone_targets ;;
-            3) create_rclone_remote_wizard ;;
+            1) view_and_manage_rclone_targets ;;
+            2) create_rclone_remote_wizard ;;
+            3) test_rclone_remotes ;;
             0) break ;;
             *) log_and_display "${RED}无效选项。${NC}"; press_enter_to_continue ;;
         esac
     done
 }
-
 
 # 6. 设置 Telegram 通知设定
 set_telegram_notification() {
@@ -1088,8 +1329,8 @@ show_main_menu() {
     echo -e "  2. ${YELLOW}手动备份${NC}"
     echo -e "  3. ${YELLOW}自定义备份路径${NC} (数量: ${#BACKUP_SOURCE_PATHS_ARRAY[@]})"
     echo -e "  4. ${YELLOW}压缩包格式${NC} (ZIP)"
-    echo -e "  5. ${YELLOW}云存储设定 (Rclone)${NC}"
-    echo -e "  6. ${YELLOW}消息通知设定 (Telegram)${NC}"
+    echo -e "  5. ${YELLOW}云存储设定${NC} (Rclone)"
+    echo -e "  6. ${YELLOW}消息通知设定${NC} (Telegram)"
     local retention_status_text="已禁用"
     if [[ "$RETENTION_POLICY_TYPE" == "count" ]]; then
         retention_status_text="保留 ${RETENTION_VALUE} 个"
