@@ -3038,7 +3038,25 @@ show_main_menu() {
     echo -e "  4. ${YELLOW}压缩包格式${NC} (当前支持: ZIP)${NC}"
     echo -e "  5. ${YELLOW}云存储设定${NC} (支持: S3/R2, WebDAV, FTP, FTPS, SFTP)${NC}"
     echo -e "  6. ${YELLOW}消息通知设定${NC} (Telegram)${NC}"
-    echo -e "  7. ${YELLOW}设置备份保留策略${NC} (云端)${NC}"
+    
+    # 动态显示当前的保留策略
+    local retention_status_text
+    case "$RETENTION_POLICY_TYPE" in
+        "none")
+            retention_status_text="已禁用"
+            ;;
+        "count")
+            retention_status_text="保留 ${RETENTION_VALUE} 个"
+            ;;
+        "days")
+            retention_status_text="保留 ${RETENTION_VALUE} 天"
+            ;;
+        *)
+            retention_status_text="未设置"
+            ;;
+    esac
+    echo -e "  7. ${YELLOW}设置备份保留策略${NC} (云端: ${retention_status_text})${NC}"
+
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "  0. ${RED}退出脚本${NC}"
     echo -e "  99. ${RED}卸载脚本${NC}"
