@@ -132,6 +132,13 @@ press_enter_to_continue() {
     clear_screen
 }
 
+# NEW: URL解码函数
+# 参数 1: URL编码的字符串
+url_decode() {
+    local url_encoded="${1//+/ }"
+    printf '%b' "${url_encoded//%/\\x}"
+}
+
 # --- 配置保存和加载 ---
 
 # 保存配置到文件
@@ -164,7 +171,7 @@ save_config() {
         echo "WEBDAV_URL=\"$WEBDAV_URL\""
         echo "WEBDAV_USERNAME=\"$WEBDAV_USERNAME\""
         echo "WEBDAV_PASSWORD=\"$WEBDAV_PASSWORD\""
-        echo "WEBDAV_BACKUP_PATH=\"$WEBDAV_BACKUP_PATH\"" # 保存 WebDAV 备份路径
+        echo "WEBDAV_BACKUP_PATH=\"$WEBDAV_BACKUP_PATH\"" # 保存 WebDAV 备份的目标路径
 
         # --- FTP/FTPS/SFTP 配置保存 ---
         echo "FTP_HOST=\"$FTP_HOST\""
@@ -227,7 +234,7 @@ load_config() {
 
         # 将字符串解析回数组
         if [[ -n "$BACKUP_SOURCE_PATHS_STRING" ]]; then
-            IFS=';;' read -r -a BACKUP_SOURCE_PATHS_ARRAY <<< "$BACKUP_SOURCE_PATHS_STRING"
+            IFS=';;'; read -r -a BACKUP_SOURCE_PATHS_ARRAY <<< "$BACKUP_SOURCE_PATHS_STRING"
         else
             BACKUP_SOURCE_PATHS_ARRAY=()
         fi
@@ -257,6 +264,7 @@ check_dependencies() {
     command -v zip &> /dev/null || missing_deps+=("zip")
     # 检查 realpath 命令是否存在，用于规范化路径
     command -v realpath &> /dev/null || missing_deps+=("realpath")
+    command -v basename &> /dev/null || missing_deps+=("basename") # WebDAV解析需要
 
     # 仅当 S3/R2 凭证在配置中设置时才检查 S3/R2 依赖项
     if [[ -n "$S3_ACCESS_KEY" && -n "$S3_SECRET_KEY" && -n "$S3_ENDPOINT" && -n "$S3_BUCKET_NAME" ]]; then
@@ -269,6 +277,7 @@ check_dependencies() {
     # 仅当 WebDAV 凭证在配置中设置时才检查 WebDAV 依赖项
     if [[ -n "$WEBDAV_URL" && -n "$WEBDAV_USERNAME" && -n "$WEBDAV_PASSWORD" ]]; then
         command -v curl &> /dev/null || missing_deps+=("curl (用于WebDAV)")
+        command -v xmllint &> /dev/null || missing_deps+=("xmllint (用于WebDAV, 通常在 libxml2-utils 或 libxml2 包中)")
     fi
     
     # 统一检查 lftp，因为它现在处理 FTP, FTPS 和 SFTP
@@ -286,8 +295,8 @@ check_dependencies() {
 
     if [ ${#missing_deps[@]} -gt 0 ]; then
         log_and_display "${RED}检测到以下依赖项缺失，请安装后重试：${missing_deps[*]}${NC}"
-        log_and_display "例如 (Debian/Ubuntu): sudo apt update && sudo apt install zip awscli curl jq realpath lftp" "${YELLOW}"
-        log_and_display "例如 (CentOS/RHEL): sudo yum install zip awscli curl jq realpath lftp" "${YELLOW}"
+        log_and_display "例如 (Debian/Ubuntu): sudo apt update && sudo apt install zip awscli curl jq realpath lftp libxml2-utils" "${YELLOW}"
+        log_and_display "例如 (CentOS/RHEL): sudo yum install zip awscli curl jq realpath lftp libxml2" "${YELLOW}"
         press_enter_to_continue
         return 1
     fi
@@ -326,7 +335,7 @@ send_telegram_message() {
         -d "parse_mode=Markdown" > /dev/null; then
         log_and_display "${GREEN}Telegram 消息发送成功。${NC}" "" "/dev/stderr"
     else
-        log_and_display "${RED}Telegram 消息发送失败！请检查 Bot Token 和 Chat ID，或网络连接。${NC}" "" "/dev/stderr"
+        log_and_display "${RED}Telegram 消息发送失败！请检查配置、凭证和网络连接。${NC}" "" "/dev/stderr"
     fi
 }
 
@@ -556,7 +565,7 @@ test_s3_r2_connection() {
     unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
 
     if [ "$test_status" -eq 0 ]; then
-        # NEW: Check for API error even on exit 0
+        # MODIFIED: Check for API error even on exit 0
         if echo "$test_output" | grep -q 'Error'; then
              log_and_display "${RED}S3/R2 连接失败！服务器返回错误。请检查配置、凭证和网络连接。错误信息: ${test_output}${NC}" "" "/dev/stderr"
              return 1
@@ -607,7 +616,7 @@ get_s3_r2_direct_contents() {
             fi
 
             if [ "$cmd_status" -eq 0 ]; then
-                # --- NEW: Check for API-level errors in the JSON response ---
+                # --- MODIFIED: Check for API-level errors in the JSON response ---
                 if [[ $(echo "$cmd_output" | jq 'has("Error")') == "true" && $(echo "$cmd_output" | jq '.Error | select(. != null)') != "null" ]]; then
                     local error_code=$(echo "$cmd_output" | jq -r '.Error.Code')
                     local error_message=$(echo "$cmd_output" | jq -r '.Error.Message')
@@ -670,58 +679,61 @@ test_webdav_connection() {
     fi
 }
 
-# Helper function to list direct sub-folders AND files for WebDAV under a given URL
-# Parameter 1: The current full URL of the parent directory to list (e.g., "http://your.webdav.server/path/to/parent/")
-# Returns: List of content names (e.g., "myfolder (文件夹)", "myfile.txt (文件)") to stdout on success, empty list and non-zero exit on failure.
+# MODIFIED: Added URL decoding and robust parent filtering using xmllint
 get_webdav_direct_contents() {
-    local current_full_url="${1%/}/" # Ensure trailing slash for PROPFIND
-    
-    if ! test_webdav_connection; then # Re-test connection for safety
-        log_and_display "${RED}WebDAV 连接失败，无法获取子文件夹或文件列表。${NC}" "" "/dev/stderr"
-        return 1
-    fi
+    local current_full_url="$1"
     
     log_and_display "正在获取 WebDAV 服务器中 '${current_full_url}' 的子文件夹和文件列表..." "${BLUE}" "/dev/stderr"
-    local contents=() # To store both folders and files
+    local contents=()
     local curl_output=""
     local result_status=1
 
-    # Using Depth: 1 to list direct children
     if { curl_output=$(curl -s -L -k --user "$WEBDAV_USERNAME:$WEBDAV_PASSWORD" --request PROPFIND --header "Depth: 1" "$current_full_url" 2>&1); } then
         result_status=0
     else
         result_status=$?
         log_and_display "${RED}WebDAV 列表失败！错误: ${curl_output}${NC}" "" "/dev/stderr"
+        return 1
     fi
 
     if [ "$result_status" -eq 0 ] && [[ -n "$curl_output" ]]; then
-        # Escape the current_full_url for sed pattern matching
-        local current_full_url_escaped=$(echo "$current_full_url" | sed 's|/|\\/|g; s|\.|\\.|g; s|&|\\&|g')
+        # Decode the URL we used for the request, for accurate comparison.
+        local decoded_request_url
+        decoded_request_url=$(url_decode "$current_full_url")
+        local decoded_request_path_no_slash="${decoded_request_url%/}"
+        
+        # Use xmllint to reliably parse the XML and extract hrefs
+        local href_list
+        href_list=$(echo "$curl_output" | xmllint --xpath "//*[local-name()='response']/*[local-name()='href']/text()" - 2>/dev/null)
 
-        # Extract hrefs. Filter out the parent directory itself and then classify.
-        # hrefs ending with '/' are directories. Others are files.
-        while IFS= read -r href; do
-            # Remove the base URL and current path prefix
-            local item_name=$(echo "$href" | sed "s|^${current_full_url_escaped}||")
-            # Remove any trailing slash from item_name for proper display
-            local display_name="${item_name%/}"
+        while IFS= read -r href_encoded; do
+            local decoded_href
+            decoded_href=$(url_decode "$href_encoded")
+            local decoded_href_no_slash="${decoded_href%/}"
+
+            # CRITICAL FIX: Skip the parent directory itself by comparing full decoded paths.
+            if [[ "$decoded_href_no_slash" == "$decoded_request_path_no_slash" ]]; then
+                continue
+            fi
             
-            # Skip empty entries, and special "." ".." directories which are implicitly handled by navigation logic
-            if [[ -z "$display_name" || "$display_name" == "." || "$display_name" == ".." ]]; then
+            # CRITICAL FIX: Extract just the basename reliably.
+            local display_name
+            display_name=$(basename "$decoded_href_no_slash")
+            
+            if [[ -z "$display_name" ]]; then
                 continue
             fi
 
-            if [[ "$href" =~ /$ ]]; then # It's a directory
+            if [[ "$decoded_href" =~ /$ ]]; then # It's a directory
                 contents+=("${display_name} (文件夹)")
             else # It's a file
                 contents+=("${display_name} (文件)")
             fi
-        done <<< "$(echo "$curl_output" | grep -oP '<D:href>\K([^<]+)(?=</D:href>)')"
+        done <<< "$href_list"
     else
         log_and_display "${YELLOW}WebDAV 路径 '${current_full_url}' 下没有检测到子文件夹或文件。${NC}" "" "/dev/stderr"
     fi
     
-    # Sort the combined list
     IFS=$'\n' contents=($(sort <<<"${contents[*]}"))
     unset IFS
     printf '%s\n' "${contents[@]}"
@@ -1092,40 +1104,36 @@ choose_s3_r2_path() {
 }
 
 
+# MODIFIED: Refactored to use realpath for robust path manipulation and URL cleaning
 choose_webdav_path() {
     local initial_path="${WEBDAV_BACKUP_PATH:-/}"
     local current_remote_path="$initial_path"
     local final_selected_path=""
-
-    # Normalize initial path
-    if [[ "${current_remote_path:0:1}" != "/" ]]; then
-        current_remote_path="/$current_remote_path"
-    fi
-    if [[ "$current_remote_path" != "/" && "${current_remote_path: -1}" != "/" ]]; then
-        current_remote_path="${current_remote_path}/"
-    fi
+    local base_webdav_url="${WEBDAV_URL%/}" # Get base URL once, remove trailing slash
 
     while true; do
+        # --- FIX: NORMALIZE PATH using realpath -m at the start of each loop ---
+        current_remote_path=$(realpath -m "$current_remote_path")
+        if [[ "$current_remote_path" != "/" && "${current_remote_path: -1}" != "/" ]]; then
+            current_remote_path="${current_remote_path}/"
+        fi
+
         display_header
         echo -e "${BLUE}=== 设置 WebDAV 备份目标路径 ===${NC}"
         echo -e "当前浏览路径: ${YELLOW}${current_remote_path:-/}${NC}\n"
 
-        # Construct the full URL for the current path
-        local base_webdav_url="${WEBDAV_URL%/}" # Ensure no trailing slash on base URL
+        # --- FIX: Construct clean URL robustly ---
+        # Combine base URL with the canonical path, then clean up any double slashes
+        local full_url="${base_webdav_url}${current_remote_path}"
+        # Use perl for a negative lookbehind to avoid mangling "https://", then clean multiple slashes
+        if command -v perl &> /dev/null; then
+            full_url=$(echo "$full_url" | perl -pe 's,(?<!:)/+,/,g')
+        else # Fallback for systems without perl
+            full_url=$(echo "$full_url" | sed -e 's|[^:]//|/|g')
+        fi
         
-        # MODIFICATION: Replaced simple concatenation with robust URL cleaning
-        # This prevents issues like "http://a.com//b/c"
-        local temp_url="${base_webdav_url}${current_remote_path}"
-        local proto
-        proto=$(echo "$temp_url" | grep -oE '^[a-zA-Z]+://')
-        local path_part
-        path_part=$(echo "$temp_url" | sed -E "s|${proto}||")
-        local cleaned_path
-        cleaned_path=$(echo "$path_part" | sed -E 's|/{2,}|/|g')
-        local current_full_webdav_url="${proto}${cleaned_path}"
-
         local remote_contents_str
-        remote_contents_str=$(get_webdav_direct_contents "$current_full_webdav_url")
+        remote_contents_str=$(get_webdav_direct_contents "$full_url")
         local get_contents_status=$?
         local remote_contents_array=()
 
@@ -1163,14 +1171,8 @@ choose_webdav_path() {
         case "$choice" in
             "m" | "M" )
                 if [[ "$current_remote_path" != "/" ]]; then
-                    current_remote_path="${current_remote_path%/}"
-                    current_remote_path="$(dirname "$current_remote_path")"
-                    if [[ "$current_remote_path" == "." ]]; then
-                        current_remote_path="/"
-                    else
-                        current_remote_path="${current_remote_path}/"
-                    fi
-                    log_and_display "已返回上一级目录: ${current_remote_path:-/}" "${BLUE}"
+                    current_remote_path=$(realpath -m "${current_remote_path}/../")
+                    log_and_display "已返回上一级目录: ${current_remote_path}" "${BLUE}"
                 else
                     log_and_display "${YELLOW}已在根目录，无法返回上一级。${NC}"
                 fi
@@ -1182,14 +1184,15 @@ choose_webdav_path() {
                     if echo "$chosen_item_with_type" | grep -q " (文件夹)$"; then
                         local chosen_folder="$(echo "$chosen_item_with_type" | sed 's/\ (文件夹)$//')"
                         current_remote_path="${current_remote_path}${chosen_folder}/"
-                        log_and_display "已进入目录: ${current_remote_path}" "${GREEN}"
+                        log_and_display "已进入目录..." "${GREEN}"
                     else
                         log_and_display "${YELLOW}您选择的是一个文件，不能进入。请选择一个文件夹或按 'k' 键确认当前目录。${NC}"
+                        press_enter_to_continue
                     fi
                 else
                     log_and_display "${RED}无效的数字序号，请重新输入。${NC}"
+                    press_enter_to_continue
                 fi
-                press_enter_to_continue
                 ;;
             [kK] )
                 final_selected_path="$current_remote_path"
@@ -1197,13 +1200,11 @@ choose_webdav_path() {
                 ;;
             [aA] )
                 read -rp "请输入新的 WebDAV 目标路径（绝对路径或相对于 '${current_remote_path:-/}'）：" new_path_input
-                if [[ "$new_path_input" =~ ^/ ]]; then
-                    final_selected_path="$new_path_input"
-                else
-                    local base_for_relative="${current_remote_path%/}"
-                    final_selected_path="${base_for_relative}/${new_path_input}"
+                if [[ ! "$new_path_input" =~ ^/ ]]; then
+                    new_path_input="${current_remote_path}${new_path_input}"
                 fi
-                if [[ -n "$final_selected_path" && "$final_selected_path" != "/" && "${final_selected_path: -1}" != "/" ]]; then
+                final_selected_path=$(realpath -m "$new_path_input")
+                if [[ "$final_selected_path" != "/" && "${final_selected_path: -1}" != "/" ]]; then
                     final_selected_path="${final_selected_path}/"
                 fi
                 break
