@@ -33,7 +33,7 @@ WEBDAV_USERNAME=""
 WEBDAV_PASSWORD=""
 WEBDAV_BACKUP_PATH="" # WebDAV 备份的目标路径
 
-# --- [修改] FTP/FTPS/SFTP 凭证变量统一管理 ---
+# --- FTP/FTPS/SFTP 凭证变量统一管理 ---
 FTP_HOST=""
 FTP_USERNAME=""
 FTP_PASSWORD=""
@@ -166,7 +166,7 @@ save_config() {
         echo "WEBDAV_PASSWORD=\"$WEBDAV_PASSWORD\""
         echo "WEBDAV_BACKUP_PATH=\"$WEBDAV_BACKUP_PATH\"" # 保存 WebDAV 备份路径
 
-        # --- [修改] FTP/FTPS/SFTP 配置保存 ---
+        # --- FTP/FTPS/SFTP 配置保存 ---
         echo "FTP_HOST=\"$FTP_HOST\""
         echo "FTP_USERNAME=\"$FTP_USERNAME\""
         echo "FTP_PASSWORD=\"$FTP_PASSWORD\""
@@ -251,7 +251,7 @@ load_config() {
 
 # --- 核心功能 ---
 
-# [修改] 检查所需依赖项
+# 检查所需依赖项
 check_dependencies() {
     local missing_deps=()
     command -v zip &> /dev/null || missing_deps+=("zip")
@@ -271,7 +271,7 @@ check_dependencies() {
         command -v curl &> /dev/null || missing_deps+=("curl (用于WebDAV)")
     fi
     
-    # [修改] 统一检查 lftp，因为它现在处理 FTP, FTPS 和 SFTP
+    # 统一检查 lftp，因为它现在处理 FTP, FTPS 和 SFTP
     if [[ -n "$FTP_HOST" && -n "$FTP_USERNAME" && -n "$FTP_PASSWORD" ]] || \
        [[ -n "$FTPS_HOST" && -n "$FTPS_USERNAME" && -n "$FTPS_PASSWORD" ]] || \
        [[ -n "$SFTP_HOST" && -n "$SFTP_USERNAME" && -n "$SFTP_PASSWORD" ]]; then
@@ -780,7 +780,7 @@ get_webdav_direct_contents() {
 }
 
 
-# --- [修改] FTP/FTPS/SFTP functions ---
+# --- FTP/FTPS/SFTP functions ---
 
 # Test FTP connection
 test_ftp_connection() {
@@ -965,7 +965,7 @@ EOF
     return 0
 }
 
-# [修改] Test SFTP connection using lftp
+# Test SFTP connection using lftp
 test_sftp_connection() {
     if [[ -z "$SFTP_HOST" || -z "$SFTP_USERNAME" || -z "$SFTP_PASSWORD" ]]; then
         log_and_display "${RED}SFTP 配置不完整，无法测试连接。请先填写主机、用户名和密码。${NC}" "" "/dev/stderr"
@@ -1000,7 +1000,7 @@ EOF
     fi
 }
 
-# [修改] Helper function to list direct sub-folders AND files for SFTP using lftp
+# Helper function to list direct sub-folders AND files for SFTP using lftp
 get_sftp_direct_contents() {
     local host="$1" user="$2" pass="$3" port="$4" parent_path="$5"
     if [[ "$parent_path" != "/" && "${parent_path: -1}" != "/" ]]; then
@@ -1100,17 +1100,17 @@ choose_s3_r2_path() {
         echo -e "${BLUE}------------------------------------------------${NC}"
         echo "操作选项:"
         if [[ "$current_remote_path" != "/" ]]; then
-            echo -e "  ${GREEN}..${NC} - 返回上一级目录"
+            echo -e "  ${GREEN}m${NC} - 返回上一级目录"
         fi
         echo -e "  ${GREEN}k${NC} - 将当前路径 '${current_remote_path:-/}' 设置为备份目标"
         echo -e "  ${GREEN}a${NC} - 手动输入一个新的路径 (绝对路径或相对于当前路径)"
-        echo -e "  ${GREEN}c${NC} - 取消并返回上一级菜单"
+        echo -e "  ${GREEN}x${NC} - 取消并返回上一级菜单"
         echo -e "${BLUE}------------------------------------------------${NC}"
 
         read -rp "请输入您的选择 (数字或字母): " choice
 
         case "$choice" in
-            ".." )
+            "m" | "M" )
                 if [[ "$current_remote_path" != "/" ]]; then
                     current_remote_path="${current_remote_path%/}"
                     current_remote_path="$(dirname "$current_remote_path")"
@@ -1159,7 +1159,7 @@ choose_s3_r2_path() {
                 fi
                 break # Exit the while loop to confirm
                 ;;
-            [cC] )
+            [xX] )
                 log_and_display "取消设置 S3/R2 备份路径。" "${BLUE}"
                 return 1 # Indicate cancellation
                 ;;
@@ -1233,17 +1233,17 @@ choose_webdav_path() {
         echo -e "${BLUE}------------------------------------------------${NC}"
         echo "操作选项:"
         if [[ "$current_remote_path" != "/" ]]; then
-            echo -e "  ${GREEN}..${NC} - 返回上一级目录"
+            echo -e "  ${GREEN}m${NC} - 返回上一级目录"
         fi
         echo -e "  ${GREEN}k${NC} - 将当前路径 '${current_remote_path:-/}' 设置为备份目标"
         echo -e "  ${GREEN}a${NC} - 手动输入一个新的路径 (绝对路径或相对于当前路径)"
-        echo -e "  ${GREEN}c${NC} - 取消并返回上一级菜单"
+        echo -e "  ${GREEN}x${NC} - 取消并返回上一级菜单"
         echo -e "${BLUE}------------------------------------------------${NC}"
 
         read -rp "请输入您的选择 (数字或字母): " choice
 
         case "$choice" in
-            ".." )
+            "m" | "M" )
                 if [[ "$current_remote_path" != "/" ]]; then
                     current_remote_path="${current_remote_path%/}"
                     current_remote_path="$(dirname "$current_remote_path")"
@@ -1290,7 +1290,7 @@ choose_webdav_path() {
                 fi
                 break
                 ;;
-            [cC] )
+            [xX] )
                 log_and_display "取消设置 WebDAV 备份路径。" "${BLUE}"
                 return 1
                 ;;
@@ -1356,17 +1356,17 @@ choose_ftp_path() {
         echo -e "${BLUE}------------------------------------------------${NC}"
         echo "操作选项:"
         if [[ "$current_remote_path" != "/" ]]; then
-            echo -e "  ${GREEN}..${NC} - 返回上一级目录"
+            echo -e "  ${GREEN}m${NC} - 返回上一级目录"
         fi
         echo -e "  ${GREEN}k${NC} - 将当前路径 '${current_remote_path:-/}' 设置为备份目标"
         echo -e "  ${GREEN}a${NC} - 手动输入一个新的路径 (绝对路径或相对于当前路径)"
-        echo -e "  ${GREEN}c${NC} - 取消并返回上一级菜单"
+        echo -e "  ${GREEN}x${NC} - 取消并返回上一级菜单"
         echo -e "${BLUE}------------------------------------------------${NC}"
 
         read -rp "请输入您的选择 (数字或字母): " choice
 
         case "$choice" in
-            ".." )
+            "m" | "M" )
                 if [[ "$current_remote_path" != "/" ]]; then
                     current_remote_path="${current_remote_path%/}"
                     current_remote_path="$(dirname "$current_remote_path")"
@@ -1413,7 +1413,7 @@ choose_ftp_path() {
                 fi
                 break
                 ;;
-            [cC] )
+            [xX] )
                 log_and_display "取消设置 FTP 备份路径。" "${BLUE}"
                 return 1
                 ;;
@@ -1480,17 +1480,17 @@ choose_ftps_path() {
         echo -e "${BLUE}------------------------------------------------${NC}"
         echo "操作选项:"
         if [[ "$current_remote_path" != "/" ]]; then
-            echo -e "  ${GREEN}..${NC} - 返回上一级目录"
+            echo -e "  ${GREEN}m${NC} - 返回上一级目录"
         fi
         echo -e "  ${GREEN}k${NC} - 将当前路径 '${current_remote_path:-/}' 设置为备份目标"
         echo -e "  ${GREEN}a${NC} - 手动输入一个新的路径 (绝对路径或相对于当前路径)"
-        echo -e "  ${GREEN}c${NC} - 取消并返回上一级菜单"
+        echo -e "  ${GREEN}x${NC} - 取消并返回上一级菜单"
         echo -e "${BLUE}------------------------------------------------${NC}"
 
         read -rp "请输入您的选择 (数字或字母): " choice
 
         case "$choice" in
-            ".." )
+            "m" | "M" )
                 if [[ "$current_remote_path" != "/" ]]; then
                     current_remote_path="${current_remote_path%/}"
                     current_remote_path="$(dirname "$current_remote_path")"
@@ -1537,7 +1537,7 @@ choose_ftps_path() {
                 fi
                 break
                 ;;
-            [cC] )
+            [xX] )
                 log_and_display "取消设置 FTPS 备份路径。" "${BLUE}"
                 return 1
                 ;;
@@ -1604,17 +1604,17 @@ choose_sftp_path() {
         echo -e "${BLUE}------------------------------------------------${NC}"
         echo "操作选项:"
         if [[ "$current_remote_path" != "/" ]]; then
-            echo -e "  ${GREEN}..${NC} - 返回上一级目录"
+            echo -e "  ${GREEN}m${NC} - 返回上一级目录"
         fi
         echo -e "  ${GREEN}k${NC} - 将当前路径 '${current_remote_path:-/}' 设置为备份目标"
         echo -e "  ${GREEN}a${NC} - 手动输入一个新的路径 (绝对路径或相对于当前路径)"
-        echo -e "  ${GREEN}c${NC} - 取消并返回上一级菜单"
+        echo -e "  ${GREEN}x${NC} - 取消并返回上一级菜单"
         echo -e "${BLUE}------------------------------------------------${NC}"
 
         read -rp "请输入您的选择 (数字或字母): " choice
 
         case "$choice" in
-            ".." )
+            "m" | "M" )
                 if [[ "$current_remote_path" != "/" ]]; then
                     current_remote_path="${current_remote_path%/}"
                     current_remote_path="$(dirname "$current_remote_path")"
@@ -1661,7 +1661,7 @@ choose_sftp_path() {
                 fi
                 break
                 ;;
-            [cC] )
+            [xX] )
                 log_and_display "取消设置 SFTP 备份路径。" "${BLUE}"
                 return 1
                 ;;
@@ -1686,7 +1686,7 @@ choose_sftp_path() {
 
 
 # ================================================================
-# ===      云存储账号管理菜单 (保持不变)             ===
+# ===      云存储账号管理菜单                     ===
 # ================================================================
 
 # 管理 S3/R2 账号设置
@@ -2411,7 +2411,7 @@ set_cloud_storage() {
     done
 }
 
-# 6. 设置 Telegram 通知设定 (保持不变)
+# 6. 设置 Telegram 通知设定
 set_telegram_notification() {
     display_header
     echo -e "${BLUE}=== 6. 消息通知设定 (Telegram) ===${NC}"
@@ -2424,7 +2424,7 @@ set_telegram_notification() {
     press_enter_to_continue
 }
 
-# 7. 设置备份保留策略 (保持不变)
+# 7. 设置备份保留策略
 set_retention_policy() {
     while true; do
         display_header
@@ -2466,7 +2466,7 @@ set_retention_policy() {
                     log_and_display "${GREEN}已设置保留最近 ${RETENTION_VALUE} 天内的备份策略。${NC}"
                 else
                     log_and_display "${RED}输入无效，请输入一个大于等于 1 的整数。${NC}"
-                fi # Corrected from F
+                fi
                 press_enter_to_continue
                 ;;
             3)
@@ -2489,7 +2489,7 @@ set_retention_policy() {
 }
 
 
-# [修改] 应用保留策略的函数 (适应 lftp for SFTP)
+# 应用保留策略的函数
 apply_retention_policy() {
     log_and_display "${BLUE}--- 正在应用备份保留策略 ---${NC}"
 
@@ -2556,7 +2556,6 @@ EOF
                 delete_status=$?
                 ;;
             "sftp")
-                # [修改] 使用 lftp 删除 SFTP 文件
                 lftp -p "$SFTP_PORT" -u "$SFTP_USERNAME,$SFTP_PASSWORD" "sftp://$SFTP_HOST" <<EOF &>/dev/null
 set cmd:long-timeout 15
 set cmd:timeout 15
@@ -2670,7 +2669,6 @@ EOF
             fi
             raw_backups_list=$(echo "$raw_backups_list" | sed "s|^${target_path}||")
         elif [[ "$service_type" == "sftp" ]]; then
-            # [修改] 使用 lftp find 列出 SFTP 文件
             if { raw_backups_list=$(lftp -u "$SFTP_USERNAME","$SFTP_PASSWORD" -p "$SFTP_PORT" sftp://"$SFTP_HOST" -e "set cmd:long-timeout 10; set cmd:timeout 10; set sftp:auto-confirm yes; find ${target_path} -name '*_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].zip'; quit;" 2>&1); } then
                 get_list_status=0
             else
@@ -2795,7 +2793,7 @@ EOF
 }
 
 
-# [修改] 执行备份上传的核心逻辑 (适应 lftp for SFTP)
+# 执行备份上传的核心逻辑
 # 参数 1: 备份类型 (例如，"手动备份", "自动备份")
 perform_backup() {
     local backup_type="$1"
@@ -3039,7 +3037,7 @@ EOF
             ftps_this_upload_status="禁用"
         fi
 
-        # --- [修改] SFTP 上传, 使用 lftp ---
+        # --- SFTP 上传, 使用 lftp ---
         if [[ "$BACKUP_TARGET_SFTP" == "true" ]]; then
             if [[ -n "$SFTP_HOST" && -n "$SFTP_USERNAME" && -n "$SFTP_PASSWORD" && -n "$SFTP_BACKUP_PATH" ]]; then
                 log_and_display "正在尝试上传到 SFTP 服务器：${SFTP_USERNAME}@${SFTP_HOST}:${SFTP_PORT}${SFTP_BACKUP_PATH}${archive_name}..."
@@ -3155,7 +3153,7 @@ EOF
     fi
 }
 
-# 99. 卸载脚本 (保持不变)
+# 99. 卸载脚本
 uninstall_script() {
     display_header
     echo -e "${RED}=== 99. 卸载脚本 ===${NC}"
@@ -3241,7 +3239,7 @@ process_menu_choice() {
     esac
 }
 
-# [修改] 检查是否应该运行自动备份 (移除 sshpass 检查)
+# 检查是否应该运行自动备份
 check_auto_backup() {
     load_config # 确保加载最新配置
 
