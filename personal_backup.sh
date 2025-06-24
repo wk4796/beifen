@@ -96,7 +96,7 @@ clear_screen() {
 display_header() {
     clear_screen
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}      $SCRIPT_NAME       ${NC}"
+    echo -e "${GREEN}      $SCRIPT_NAME      ${NC}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 }
@@ -287,10 +287,9 @@ check_dependencies() {
         command -v lftp &> /dev/null || missing_deps+=("lftp (用于FTP/FTPS/SFTP)")
     fi
 
-    # 仅当 Telegram 凭证在配置中设置时才检查 curl 和 jq 依赖项
+    # 仅当 Telegram 凭证在配置中设置时才检查 curl 依赖项
     if [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
         command -v curl &> /dev/null || missing_deps+=("curl (用于Telegram)")
-        command -v jq &> /dev/null || missing_deps+=("jq (用于Telegram消息URL编码)")
     fi
 
     if [ ${#missing_deps[@]} -gt 0 ]; then
@@ -304,8 +303,10 @@ check_dependencies() {
 }
 
 
-# 发送 Telegram 消息的函数
-# 参数 1: 消息内容
+# ================================================================
+# ===      [修改后] 发送 Telegram 消息的函数                   ===
+# === 核心改动：使用 curl 的 --data-urlencode 来自动处理换行符。 ===
+# ================================================================
 send_telegram_message() {
     local message_content="$1"
     if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
@@ -313,26 +314,19 @@ send_telegram_message() {
         return 1
     fi
 
-    # 再次检查 curl 和 jq 是否存在
+    # 再次检查 curl 是否存在
     if ! command -v curl &> /dev/null; then
         log_and_display "${RED}错误：发送 Telegram 消息需要 'curl' 命令，但未找到。${NC}" "" "/dev/stderr"
         return 1
     fi
 
-    local encoded_message=""
-    if command -v jq &> /dev/null; then
-        encoded_message=$(printf %s "$message_content" | jq -sRr @uri)
-    else
-        log_and_display "${YELLOW}警告：未找到 'jq'，将使用简单的 URL 编码，可能不完全可靠。${NC}" "" "/dev/stderr"
-        # 备用简单编码 (对于复杂字符不太可靠)
-        encoded_message=$(printf %s "$message_content" | sed 's/[^a-zA-Z0-9._~-]/%&/g; s/ /%20/g')
-    fi
-
     log_and_display "正在发送 Telegram 消息..." "" "/dev/stderr"
+    # 使用 --data-urlencode 让 curl 自动处理换行符等特殊字符的编码
+    # 这比手动编码更可靠，并且不再需要 jq。
     if curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-        -d "chat_id=${TELEGRAM_CHAT_ID}" \
-        -d "text=${encoded_message}" \
-        -d "parse_mode=Markdown" > /dev/null; then
+        --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+        --data-urlencode "text=${message_content}" \
+        --data-urlencode "parse_mode=Markdown" > /dev/null; then
         log_and_display "${GREEN}Telegram 消息发送成功。${NC}" "" "/dev/stderr"
     else
         log_and_display "${RED}Telegram 消息发送失败！请检查配置、凭证和网络连接。${NC}" "" "/dev/stderr"
@@ -822,7 +816,7 @@ test_ftps_connection() {
 # debug 3
 
 # --- 兼容性与连接设置 ---
-set net:timeout 20          # 增加网络操作超时
+set net:timeout 20         # 增加网络操作超时
 set net:reconnect-interval-base 5  # 设置重连间隔
 
 # --- FTPS 核心设置 (显式模式 Explicit-Mode) ---
@@ -981,7 +975,7 @@ EOF
 
 
 # ================================================================
-# ===         增强型路径选择函数 (交互式浏览)              ===
+# ===         增强型路径选择函数 (交互式浏览)                  ===
 # ================================================================
 
 # MODIFIED: Refactored to use realpath for robust path manipulation
@@ -1581,7 +1575,7 @@ choose_sftp_path() {
 
 
 # ================================================================
-# ===         云存储账号管理菜单                      ===
+# ===         云存储账号管理菜单                               ===
 # ================================================================
 
 # 管理 S3/R2 账号设置
@@ -2248,7 +2242,7 @@ set_retention_policy() {
             "none") echo -e "  ${YELLOW}无保留策略（所有备份将保留）${NC}" ;;
             "count") echo -e "  ${YELLOW}保留最新 ${RETENTION_VALUE} 个备份${NC}" ;;
             "days")  echo -e "  ${YELLOW}保留最近 ${RETENTION_VALUE} 天内的备份${NC}" ;;
-            *)      echo -e "  ${YELLOW}未知策略或未设置${NC}" ;; # 添加默认情况
+            *)     echo -e "  ${YELLOW}未知策略或未设置${NC}" ;; # 添加默认情况
         esac
         echo ""
         echo "1. 设置按数量保留 (例如：保留最新的 5 个备份)"
@@ -2591,19 +2585,24 @@ EOF
         fi
     fi
 
-    local retention_summary="保留策略执行完毕。"
-    retention_summary+="\nS3/R2: 找到 ${total_s3_backups_found} 个，删除了 ${deleted_s3_count} 个。"
-    retention_summary+="\nWebDAV: 找到 ${total_webdav_backups_found} 个，删除了 ${deleted_webdav_count} 个。"
-    retention_summary+="\nFTP: 找到 ${total_ftp_backups_found} 个，删除了 ${deleted_ftp_count} 个。"
-    retention_summary+="\nFTPS: 找到 ${total_ftps_backups_found} 个，删除了 ${deleted_ftps_count} 个。"
-    retention_summary+="\nSFTP: 找到 ${total_sftp_backups_found} 个，删除了 ${deleted_sftp_count} 个。"
-    send_telegram_message "*个人自用数据备份：保留策略完成*\n${retention_summary}"
+    local retention_summary
+    retention_summary="*个人自用数据备份：保留策略完成*"
+    retention_summary+=$'\n'"保留策略执行完毕。"
+    retention_summary+=$'\n'"S3/R2: 找到 ${total_s3_backups_found} 个，删除了 ${deleted_s3_count} 个。"
+    retention_summary+=$'\n'"WebDAV: 找到 ${total_webdav_backups_found} 个，删除了 ${deleted_webdav_count} 个。"
+    retention_summary+=$'\n'"FTP: 找到 ${total_ftp_backups_found} 个，删除了 ${deleted_ftp_count} 个。"
+    retention_summary+=$'\n'"FTPS: 找到 ${total_ftps_backups_found} 个，删除了 ${deleted_ftps_count} 个。"
+    retention_summary+=$'\n'"SFTP: 找到 ${total_sftp_backups_found} 个，删除了 ${deleted_sftp_count} 个。"
+    send_telegram_message "${retention_summary}"
     log_and_display "${BLUE}--- 备份保留策略应用结束 ---${NC}"
 }
 
 
-# 执行备份上传的核心逻辑
-# 参数 1: 备份类型 (例如，"手动备份", "自动备份")
+# ================================================================
+# ===         [修改后] 执行备份上传的核心逻辑                  ===
+# === 核心改动：调整了 Telegram 报告的格式，使每个上传目标的信息   ===
+# ===         各占一行，观感更清晰。                          ===
+# ================================================================
 perform_backup() {
     local backup_type="$1"
     local readable_time=$(date '+%Y-%m-%d %H:%M:%S')
@@ -2613,12 +2612,18 @@ perform_backup() {
 
     log_and_display "${BLUE}--- ${backup_type} 过程开始 ---${NC}"
 
-    local initial_message="*个人自用数据备份：开始 (${backup_type})*\n时间: ${readable_time}\n将备份 ${total_paths_to_backup} 个路径。"
+    local initial_message
+    initial_message="*个人自用数据备份：开始 (${backup_type})*"
+    initial_message+=$'\n'"时间: ${readable_time}"
+    initial_message+=$'\n'"将备份 ${total_paths_to_backup} 个路径。"
     send_telegram_message "${initial_message}"
 
     if [ ${#BACKUP_SOURCE_PATHS_ARRAY[@]} -eq 0 ]; then
         log_and_display "${RED}错误：没有设置任何备份源路径。请先通过 '3. 自定义备份路径' 添加路径。${NC}"
-        send_telegram_message "*个人自用数据备份：失败*\n原因: 未设置备份源路径。"
+        local error_msg
+        error_msg="*个人自用数据备份：失败*"
+        error_msg+=$'\n'"原因: 未设置备份源路径。"
+        send_telegram_message "$error_msg"
         return 1
     fi
 
@@ -2647,7 +2652,11 @@ perform_backup() {
 
         if [[ ! -d "$current_backup_path" && ! -f "$current_backup_path" ]]; then
             log_and_display "${RED}错误：路径 '$current_backup_path' 无效或不存在，跳过此路径备份。${NC}"
-            send_telegram_message "*个人自用数据备份：路径失败*\n路径: \`${current_backup_path}\`\n原因: 路径无效或不存在。"
+            local path_error_msg
+            path_error_msg="*个人自用数据备份：路径失败*"
+            path_error_msg+=$'\n'"路径: \`${current_backup_path}\`"
+            path_error_msg+=$'\n'"原因: 路径无效或不存在。"
+            send_telegram_message "$path_error_msg"
             continue # 跳过当前路径，继续下一个
         fi
 
@@ -2658,8 +2667,6 @@ perform_backup() {
 
         if [[ -d "$current_backup_path" ]]; then
             # 压缩目录，只包含目录内的内容，不包含父目录本身
-            # zip 的 -j 选项用于只存储文件名，不包括目录结构。这里需要包含目录结构。
-            # 切换到父目录，然后压缩子目录
             zip_output=$( (cd "$(dirname "$current_backup_path")" && zip -r "$temp_archive_path" "$(basename "$current_backup_path")") 2>&1 )
             zip_command_status=$?
         elif [[ -f "$current_backup_path" ]]; then
@@ -2678,7 +2685,13 @@ perform_backup() {
             fi
         else
             log_and_display "${RED}文件压缩失败！请检查路径权限或磁盘空间。错误码: ${zip_command_status}${NC}"
-            send_telegram_message "*个人自用数据备份：压缩失败*\n路径: \`${current_backup_path}\`\n文件: \`${archive_name}\`\n原因: 压缩失败，错误码: ${zip_command_status}\n详细错误: \`${zip_output}\`"
+            local zip_error_msg
+            zip_error_msg="*个人自用数据备份：压缩失败*"
+            zip_error_msg+=$'\n'"路径: \`${current_backup_path}\`"
+            zip_error_msg+=$'\n'"文件: \`${archive_name}\`"
+            zip_error_msg+=$'\n'"原因: 压缩失败，错误码: ${zip_command_status}"
+            zip_error_msg+=$'\n'"详细错误: \`${zip_output}\`"
+            send_telegram_message "$zip_error_msg"
             rm -f "$temp_archive_path" 2>/dev/null # 尝试清理失败的临时文件
             continue # 跳过当前路径的上传，继续下一个
         fi
@@ -2771,7 +2784,7 @@ perform_backup() {
                 log_and_display "正在尝试上传到 FTP 服务器：${FTP_HOST}:${FTP_PORT}${FTP_BACKUP_PATH}${archive_name}..."
                 local ftp_upload_output=""
                 local ftp_upload_status_code=1
-                
+
                 if { ftp_upload_output=$(lftp -p "$FTP_PORT" -u "$FTP_USERNAME,$FTP_PASSWORD" "$FTP_HOST" <<EOF
 set net:timeout 300
 set ftp:passive-mode true
@@ -2808,7 +2821,7 @@ EOF
                 log_and_display "正在尝试上传到 FTPS 服务器：${FTPS_HOST}:${FTPS_PORT}${FTPS_BACKUP_PATH}${archive_name}..."
                 local ftps_upload_output=""
                 local ftps_upload_status_code=1
-                
+
                 if { ftps_upload_output=$(lftp -p "$FTPS_PORT" -u "$FTPS_USERNAME,$FTPS_PASSWORD" "$FTPS_HOST" <<EOF
 set net:timeout 300
 set ftp:passive-mode true
@@ -2848,7 +2861,7 @@ EOF
                 log_and_display "正在尝试上传到 SFTP 服务器：${SFTP_USERNAME}@${SFTP_HOST}:${SFTP_PORT}${SFTP_BACKUP_PATH}${archive_name}..."
                 local sftp_upload_output=""
                 local sftp_upload_status_code=1
-                
+
                 if { sftp_upload_output=$(lftp -p "$SFTP_PORT" -u "$SFTP_USERNAME,$SFTP_PASSWORD" "sftp://$SFTP_HOST" <<EOF
 set net:timeout 300
 set sftp:auto-confirm yes
@@ -2887,25 +2900,39 @@ EOF
             current_path_upload_status="失败"
         fi
 
-        # 发送当前路径的详细 Telegram 通知
-        local path_summary_message="*个人自用数据备份：路径完成 (${current_path_upload_status})*\n"
-        path_summary_message+="路径: \`${current_backup_path}\`\n"
-        path_summary_message+="备份文件: \`${archive_name}\`\n"
-        path_summary_message+="文件大小: ${backup_file_size}\n"
-        path_summary_message+="S3/R2 上传: ${s3_this_upload_status}"
-        if [[ -n "$S3_BUCKET_NAME" && "$s3_this_upload_status" != "禁用" ]]; then path_summary_message+=" (目标: \`${S3_BUCKET_NAME}/${S3_BACKUP_PATH}\`)"; fi
-        path_summary_message+="\n"
-        path_summary_message+="WebDAV 上传: ${webdav_this_upload_status}"
-        if [[ -n "$WEBDAV_URL" && "$webdav_this_upload_status" != "禁用" ]]; then path_summary_message+=" (目标: \`${WEBDAV_URL%/}/${WEBDAV_BACKUP_PATH}\`)"; fi
-        path_summary_message+="\n"
-        path_summary_message+="FTP 上传: ${ftp_this_upload_status}"
-        if [[ -n "$FTP_HOST" && "$ftp_this_upload_status" != "禁用" ]]; then path_summary_message+=" (目标: \`${FTP_HOST}:${FTP_PORT}${FTP_BACKUP_PATH}\`)"; fi
-        path_summary_message+="\n"
-        path_summary_message+="FTPS 上传: ${ftps_this_upload_status}"
-        if [[ -n "$FTPS_HOST" && "$ftps_this_upload_status" != "禁用" ]]; then path_summary_message+=" (目标: \`${FTPS_HOST}:${FTPS_PORT}${FTPS_BACKUP_PATH}\`)"; fi
-        path_summary_message+="\n"
-        path_summary_message+="SFTP 上传: ${sftp_this_upload_status}"
-        if [[ -n "$SFTP_HOST" && "$sftp_this_upload_status" != "禁用" ]]; then path_summary_message+=" (目标: \`${SFTP_HOST}:${SFTP_PORT}${SFTP_BACKUP_PATH}\`)"; fi
+        # --- 格式化并发送 Telegram 消息 ---
+        local path_summary_message
+        path_summary_message="*个人自用数据备份：路径完成 (${current_path_upload_status})*"
+        path_summary_message+=$'\n'"路径: \`${current_backup_path}\`"
+        path_summary_message+=$'\n'"备份文件: \`${archive_name}\`"
+        path_summary_message+=$'\n'"文件大小: ${backup_file_size}"
+        path_summary_message+=$'\n\n'"*上传状态:*"
+        
+        path_summary_message+=$'\n'"S3/R2: ${s3_this_upload_status}"
+        if [[ "$BACKUP_TARGET_S3" == "true" && "$s3_this_upload_status" != "禁用" && "$s3_this_upload_status" != "跳过 (配置不完整)" ]]; then
+             path_summary_message+=$'\n'"  - 目标: \`${S3_BUCKET_NAME}${S3_BACKUP_PATH}\`"
+        fi
+        
+        path_summary_message+=$'\n'"WebDAV: ${webdav_this_upload_status}"
+        if [[ "$BACKUP_TARGET_WEBDAV" == "true" && "$webdav_this_upload_status" != "禁用" && "$webdav_this_upload_status" != "跳过 (配置不完整)" ]]; then
+             path_summary_message+=$'\n'"  - 目标: \`${WEBDAV_URL%/}${WEBDAV_BACKUP_PATH}\`"
+        fi
+        
+        path_summary_message+=$'\n'"FTP: ${ftp_this_upload_status}"
+        if [[ "$BACKUP_TARGET_FTP" == "true" && "$ftp_this_upload_status" != "禁用" && "$ftp_this_upload_status" != "跳过 (配置不完整)" ]]; then
+             path_summary_message+=$'\n'"  - 目标: \`${FTP_HOST}:${FTP_PORT}${FTP_BACKUP_PATH}\`"
+        fi
+
+        path_summary_message+=$'\n'"FTPS: ${ftps_this_upload_status}"
+        if [[ "$BACKUP_TARGET_FTPS" == "true" && "$ftps_this_upload_status" != "禁用" && "$ftps_this_upload_status" != "跳过 (配置不完整)" ]]; then
+             path_summary_message+=$'\n'"  - 目标: \`${FTPS_HOST}:${FTPS_PORT}${FTPS_BACKUP_PATH}\`"
+        fi
+        
+        path_summary_message+=$'\n'"SFTP: ${sftp_this_upload_status}"
+        if [[ "$BACKUP_TARGET_SFTP" == "true" && "$sftp_this_upload_status" != "禁用" && "$sftp_this_upload_status" != "跳过 (配置不完整)" ]]; then
+             path_summary_message+=$'\n'"  - 目标: \`${SFTP_HOST}:${SFTP_PORT}${SFTP_BACKUP_PATH}\`"
+        fi
+        
         send_telegram_message "${path_summary_message}"
 
         # 清理当前路径的临时压缩文件
@@ -2941,21 +2968,22 @@ EOF
     fi
 
     # 发送最终的整体 Telegram 通知
-    local final_overall_message="*个人自用数据备份：总览 (${overall_status})*\n"
-    final_overall_message+="时间: ${readable_time}\n"
-    final_overall_message+="类型: ${backup_type}\n"
-    final_overall_message+="总路径数: ${total_paths_to_backup}\n"
-    final_overall_message+="成功备份路径数: ${overall_succeeded_count}\n"
+    local final_overall_message
+    final_overall_message="*个人自用数据备份：总览 (${overall_status})*"
+    final_overall_message+=$'\n'"时间: ${readable_time}"
+    final_overall_message+=$'\n'"类型: ${backup_type}"
+    final_overall_message+=$'\n'"总路径数: ${total_paths_to_backup}"
+    final_overall_message+=$'\n'"成功备份路径数: ${overall_succeeded_count}"
     send_telegram_message "${final_overall_message}"
 
     # 只有在至少一个上传尝试成功后才应用保留策略
-    # 注意：保留策略现在会处理新命名的文件
     if [[ "$overall_succeeded_count" -gt 0 ]]; then
         apply_retention_policy
     else
         log_and_display "${YELLOW}由于没有成功的备份上传，跳过保留策略的执行。${NC}"
     fi
 }
+
 
 # 99. 卸载脚本
 uninstall_script() {
@@ -3053,7 +3081,10 @@ check_auto_backup() {
     # 检查是否有至少一个备份路径
     if [ ${#BACKUP_SOURCE_PATHS_ARRAY[@]} -eq 0 ]; then
         log_and_display "${RED}自动备份失败：没有设置任何备份源路径。请通过主菜单设置。${NC}"
-        send_telegram_message "*个人自用数据备份：自动备份失败*\n原因: 未设置备份源路径。"
+        local error_msg
+        error_msg="*个人自用数据备份：自动备份失败*"
+        error_msg+=$'\n'"原因: 未设置备份源路径。"
+        send_telegram_message "$error_msg"
         return 1
     fi
 
@@ -3068,7 +3099,10 @@ check_auto_backup() {
 
     if [[ "$any_target_enabled" == "false" ]]; then
         log_and_display "${RED}自动备份失败：没有启用或配置完整的云存储目标。请通过 '5. 云存储设定' 进行配置。${NC}"
-        send_telegram_message "*个人自用数据备份：自动备份失败*\n原因: 未启用或配置完整的云存储目标。"
+        local error_msg
+        error_msg="*个人自用数据备份：自动备份失败*"
+        error_msg+=$'\n'"原因: 未启用或配置完整的云存储目标。"
+        send_telegram_message "$error_msg"
         return 1
     fi
 
