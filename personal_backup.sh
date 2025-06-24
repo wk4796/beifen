@@ -56,8 +56,8 @@ SFTP_BACKUP_PATH=""
 BACKUP_TARGET_S3="false"      # 是否启用 S3/R2 备份 (true/false)
 BACKUP_TARGET_WEBDAV="false" # 是否启用 WebDAV 备份 (true/false)
 BACKUP_TARGET_FTP="false"      # 是否启用 FTP 备份 (true/false)
-BACKUP_TARGET_FTPS="false"     # 是否启用 FTPS 备份 (true/false)
-BACKUP_TARGET_SFTP="false"     # 是否启用 SFTP 备份 (true/false)
+BACKUP_TARGET_FTPS="false"      # 是否启用 FTPS 备份 (true/false)
+BACKUP_TARGET_SFTP="false"      # 是否启用 SFTP 备份 (true/false)
 
 # Telegram 通知变量 (现在从配置文件加载/保存)
 TELEGRAM_BOT_TOKEN=""
@@ -282,8 +282,8 @@ check_dependencies() {
     
     # 统一检查 lftp，因为它现在处理 FTP, FTPS 和 SFTP
     if [[ -n "$FTP_HOST" && -n "$FTP_USERNAME" && -n "$FTP_PASSWORD" ]] || \
-       [[ -n "$FTPS_HOST" && -n "$FTPS_USERNAME" && -n "$FTPS_PASSWORD" ]] || \
-       [[ -n "$SFTP_HOST" && -n "$SFTP_USERNAME" ]]; then
+        [[ -n "$FTPS_HOST" && -n "$FTPS_USERNAME" && -n "$FTPS_PASSWORD" ]] || \
+        [[ -n "$SFTP_HOST" && -n "$SFTP_USERNAME" ]]; then
         command -v lftp &> /dev/null || missing_deps+=("lftp (用于FTP/FTPS/SFTP)")
     fi
 
@@ -304,7 +304,7 @@ check_dependencies() {
 
 
 # ================================================================
-# ===      [修改后] 发送 Telegram 消息的函数                   ===
+# ===     [修改后] 发送 Telegram 消息的函数                   ===
 # === 核心改动：使用 curl 的 --data-urlencode 来自动处理换行符。 ===
 # ================================================================
 send_telegram_message() {
@@ -816,7 +816,7 @@ test_ftps_connection() {
 # debug 3
 
 # --- 兼容性与连接设置 ---
-set net:timeout 20         # 增加网络操作超时
+set net:timeout 20       # 增加网络操作超时
 set net:reconnect-interval-base 5  # 设置重连间隔
 
 # --- FTPS 核心设置 (显式模式 Explicit-Mode) ---
@@ -1575,7 +1575,7 @@ choose_sftp_path() {
 
 
 # ================================================================
-# ===         云存储账号管理菜单                               ===
+# ===         云存储账号管理菜单                             ===
 # ================================================================
 
 # 管理 S3/R2 账号设置
@@ -2049,12 +2049,15 @@ manage_sftp_account() {
     done
 }
 
-# 选择要使用的云存储目标
+
+# ================================================================
+# ===         [修改后] 选择要使用的云存储目标                  ===
+# ================================================================
 select_backup_targets() {
     while true; do
         display_header
-        echo -e "${BLUE}=== 选择云备份目标 ===${NC}"
-        echo "请选择要用于备份的云存储 (可多选，至少选择一个有效目标)："
+        echo -e "${BLUE}=== 选择启用的云备份目标 ===${NC}"
+        echo "通过输入序号来切换对应目标的 [启用/禁用] 状态。"
         echo "------------------------------------------------"
 
         local s3_configured="false"
@@ -2068,7 +2071,7 @@ select_backup_targets() {
             s3_configured="true"
             echo -n "1. S3/R2 存储 (当前: "
             if [[ "$BACKUP_TARGET_S3" == "true" ]]; then echo -e "${GREEN}启用${NC})"; else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "   (路径: ${S3_BACKUP_PATH})"
+            echo "     (路径: ${S3_BACKUP_PATH})"
         else
             echo -e "1. S3/R2 存储 (${RED}未完全配置，无法启用${NC})"
         fi
@@ -2078,76 +2081,127 @@ select_backup_targets() {
             webdav_configured="true"
             echo -n "2. WebDAV 存储 (当前: "
             if [[ "$BACKUP_TARGET_WEBDAV" == "true" ]]; then echo -e "${GREEN}启用${NC})"; else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "   (路径: ${WEBDAV_BACKUP_PATH})"
+            echo "     (路径: ${WEBDAV_BACKUP_PATH})"
         else
             echo -e "2. WebDAV 存储 (${RED}未完全配置，无法启用${NC})"
         fi
 
-        # --- 新增 FTP/FTPS/SFTP 目标选择 ---
+        # FTP
         if [[ -n "$FTP_HOST" && -n "$FTP_USERNAME" && -n "$FTP_PASSWORD" && -n "$FTP_BACKUP_PATH" ]]; then
             ftp_configured="true"
             echo -n "3. FTP 存储 (当前: "
             if [[ "$BACKUP_TARGET_FTP" == "true" ]]; then echo -e "${GREEN}启用${NC})"; else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "   (路径: ${FTP_BACKUP_PATH})"
+            echo "     (路径: ${FTP_BACKUP_PATH})"
         else
             echo -e "3. FTP 存储 (${RED}未完全配置，无法启用${NC})"
         fi
 
+        # FTPS
         if [[ -n "$FTPS_HOST" && -n "$FTPS_USERNAME" && -n "$FTPS_PASSWORD" && -n "$FTPS_BACKUP_PATH" ]]; then
             ftps_configured="true"
             echo -n "4. FTPS 存储 (当前: "
             if [[ "$BACKUP_TARGET_FTPS" == "true" ]]; then echo -e "${GREEN}启用${NC})"; else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "   (路径: ${FTPS_BACKUP_PATH})"
+            echo "     (路径: ${FTPS_BACKUP_PATH})"
         else
             echo -e "4. FTPS 存储 (${RED}未完全配置，无法启用${NC})"
         fi
 
+        # SFTP
         if [[ -n "$SFTP_HOST" && -n "$SFTP_USERNAME" && -n "$SFTP_BACKUP_PATH" ]]; then
             sftp_configured="true"
             echo -n "5. SFTP 存储 (当前: "
             if [[ "$BACKUP_TARGET_SFTP" == "true" ]]; then echo -e "${GREEN}启用${NC})"; else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "   (路径: ${SFTP_BACKUP_PATH})"
+            echo "     (路径: ${SFTP_BACKUP_PATH})"
         else
             echo -e "5. SFTP 存储 (${RED}未完全配置，无法启用${NC})"
         fi
 
         echo ""
-        echo "0. 返回主菜单 (保存选择)"
+        echo "0. 保存并返回主菜单"
         echo -e "${BLUE}------------------------------------------------${NC}"
-        read -rp "请输入要启用的目标序号 (例如 '1 4 5' 启用S3,FTPS,SFTP，输入'0'保存并退出): " choice_input
+        read -rp "请输入要切换状态的目标序号 (输入'0'保存并退出): " choice
 
-        if [[ "$choice_input" == "0" ]]; then
-            save_config
-            log_and_display "备份目标设置已保存。" "${BLUE}"
-            break
-        fi
-
-        # Process selections
-        local temp_s3_target="false"
-        local temp_webdav_target="false"
-        local temp_ftp_target="false"
-        local temp_ftps_target="false"
-        local temp_sftp_target="false"
-        
-        for sel in $choice_input; do
-            case "$sel" in
-                1) if [[ "$s3_configured" == "true" ]]; then temp_s3_target="true"; else log_and_display "${RED}S3/R2 未配置，无法启用。${NC}"; fi ;;
-                2) if [[ "$webdav_configured" == "true" ]]; then temp_webdav_target="true"; else log_and_display "${RED}WebDAV 未配置，无法启用。${NC}"; fi ;;
-                3) if [[ "$ftp_configured" == "true" ]]; then temp_ftp_target="true"; else log_and_display "${RED}FTP 未配置，无法启用。${NC}"; fi ;;
-                4) if [[ "$ftps_configured" == "true" ]]; then temp_ftps_target="true"; else log_and_display "${RED}FTPS 未配置，无法启用。${NC}"; fi ;;
-                5) if [[ "$sftp_configured" == "true" ]]; then temp_sftp_target="true"; else log_and_display "${RED}SFTP 未配置，无法启用。${NC}"; fi ;;
-                *) log_and_display "${RED}无效的选项 '${sel}'。${NC}";;
-            esac
-        done
-
-        BACKUP_TARGET_S3="$temp_s3_target"
-        BACKUP_TARGET_WEBDAV="$temp_webdav_target"
-        BACKUP_TARGET_FTP="$temp_ftp_target"
-        BACKUP_TARGET_FTPS="$temp_ftps_target"
-        BACKUP_TARGET_SFTP="$temp_sftp_target"
-
-        log_and_display "备份目标已更新，请按0保存或继续修改。" "${GREEN}"
-        press_enter_to_continue
+        case "$choice" in
+            1)
+                if [[ "$s3_configured" == "true" ]]; then
+                    if [[ "$BACKUP_TARGET_S3" == "true" ]]; then
+                        BACKUP_TARGET_S3="false"
+                        log_and_display "S3/R2 备份已 ${YELLOW}禁用${NC}。"
+                    else
+                        BACKUP_TARGET_S3="true"
+                        log_and_display "S3/R2 备份已 ${GREEN}启用${NC}。"
+                    fi
+                else
+                    log_and_display "${RED}S3/R2 未配置，无法切换状态。${NC}"
+                fi
+                press_enter_to_continue
+                ;;
+            2)
+                if [[ "$webdav_configured" == "true" ]]; then
+                    if [[ "$BACKUP_TARGET_WEBDAV" == "true" ]]; then
+                        BACKUP_TARGET_WEBDAV="false"
+                        log_and_display "WebDAV 备份已 ${YELLOW}禁用${NC}。"
+                    else
+                        BACKUP_TARGET_WEBDAV="true"
+                        log_and_display "WebDAV 备份已 ${GREEN}启用${NC}。"
+                    fi
+                else
+                    log_and_display "${RED}WebDAV 未配置，无法切换状态。${NC}"
+                fi
+                press_enter_to_continue
+                ;;
+            3)
+                if [[ "$ftp_configured" == "true" ]]; then
+                    if [[ "$BACKUP_TARGET_FTP" == "true" ]]; then
+                        BACKUP_TARGET_FTP="false"
+                        log_and_display "FTP 备份已 ${YELLOW}禁用${NC}。"
+                    else
+                        BACKUP_TARGET_FTP="true"
+                        log_and_display "FTP 备份已 ${GREEN}启用${NC}。"
+                    fi
+                else
+                    log_and_display "${RED}FTP 未配置，无法切换状态。${NC}"
+                fi
+                press_enter_to_continue
+                ;;
+            4)
+                if [[ "$ftps_configured" == "true" ]]; then
+                    if [[ "$BACKUP_TARGET_FTPS" == "true" ]]; then
+                        BACKUP_TARGET_FTPS="false"
+                        log_and_display "FTPS 备份已 ${YELLOW}禁用${NC}。"
+                    else
+                        BACKUP_TARGET_FTPS="true"
+                        log_and_display "FTPS 备份已 ${GREEN}启用${NC}。"
+                    fi
+                else
+                    log_and_display "${RED}FTPS 未配置，无法切换状态。${NC}"
+                fi
+                press_enter_to_continue
+                ;;
+            5)
+                if [[ "$sftp_configured" == "true" ]]; then
+                    if [[ "$BACKUP_TARGET_SFTP" == "true" ]]; then
+                        BACKUP_TARGET_SFTP="false"
+                        log_and_display "SFTP 备份已 ${YELLOW}禁用${NC}。"
+                    else
+                        BACKUP_TARGET_SFTP="true"
+                        log_and_display "SFTP 备份已 ${GREEN}启用${NC}。"
+                    fi
+                else
+                    log_and_display "${RED}SFTP 未配置，无法切换状态。${NC}"
+                fi
+                press_enter_to_continue
+                ;;
+            0)
+                save_config
+                log_and_display "备份目标设置已保存。" "${BLUE}"
+                break
+                ;;
+            *)
+                log_and_display "${RED}无效的选项 '${choice}'，请重新输入。${NC}"
+                press_enter_to_continue
+                ;;
+        esac
     done
 }
 
@@ -2242,7 +2296,7 @@ set_retention_policy() {
             "none") echo -e "  ${YELLOW}无保留策略（所有备份将保留）${NC}" ;;
             "count") echo -e "  ${YELLOW}保留最新 ${RETENTION_VALUE} 个备份${NC}" ;;
             "days")  echo -e "  ${YELLOW}保留最近 ${RETENTION_VALUE} 天内的备份${NC}" ;;
-            *)     echo -e "  ${YELLOW}未知策略或未设置${NC}" ;; # 添加默认情况
+            *)      echo -e "  ${YELLOW}未知策略或未设置${NC}" ;; # 添加默认情况
         esac
         echo ""
         echo "1. 设置按数量保留 (例如：保留最新的 5 个备份)"
@@ -2600,8 +2654,8 @@ EOF
 
 # ================================================================
 # ===         [修改后] 执行备份上传的核心逻辑                  ===
-# === 核心改动：调整了 Telegram 报告的格式，使每个上传目标的信息   ===
-# ===         各占一行，观感更清晰。                          ===
+# === 核心改动：调整了 Telegram 报告的格式，使每个上传目标的信息 ===
+# ===         各占一行，观感更清晰。                         ===
 # ================================================================
 perform_backup() {
     local backup_type="$1"
