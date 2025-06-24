@@ -19,7 +19,7 @@ LAST_AUTO_BACKUP_TIMESTAMP=0 # 上次自动备份的 Unix 时间戳
 
 # 备份保留策略默认值
 RETENTION_POLICY_TYPE="none" # "none", "count", "days"
-RETENTION_VALUE=0           # 要保留的备份数量或天数
+RETENTION_VALUE=0            # 要保留的备份数量或天数
 
 # 云存储凭证变量 (现在从配置文件加载/保存，更方便)
 S3_ACCESS_KEY=""
@@ -274,7 +274,7 @@ check_dependencies() {
     # 统一检查 lftp，因为它现在处理 FTP, FTPS 和 SFTP
     if [[ -n "$FTP_HOST" && -n "$FTP_USERNAME" && -n "$FTP_PASSWORD" ]] || \
        [[ -n "$FTPS_HOST" && -n "$FTPS_USERNAME" && -n "$FTPS_PASSWORD" ]] || \
-       [[ -n "$SFTP_HOST" && -n "$SFTP_USERNAME" && -n "$SFTP_PASSWORD" ]]; then
+       [[ -n "$SFTP_HOST" && -n "$SFTP_USERNAME" ]]; then
         command -v lftp &> /dev/null || missing_deps+=("lftp (用于FTP/FTPS/SFTP)")
     fi
 
@@ -780,119 +780,84 @@ get_webdav_direct_contents() {
 }
 
 
-# --- FTP/FTPS/SFTP functions ---
+# ================================================================
+# ===          FTP/FTPS/SFTP Functions (REVISED)             ===
+# ================================================================
 
-# Test FTP connection
+# --- FTP Functions ---
+
 test_ftp_connection() {
     if [[ -z "$FTP_HOST" || -z "$FTP_USERNAME" || -z "$FTP_PASSWORD" ]]; then
-        log_and_display "${RED}FTP 配置不完整，无法测试连接。请先填写主机、用户名和密码。${NC}" "" "/dev/stderr"
-        return 1
+        log_and_display "${RED}FTP 配置不完整，无法测试连接。${NC}" "" "/dev/stderr"; return 1;
     fi
-
     log_and_display "正在测试 FTP 连接到：${FTP_HOST}:${FTP_PORT}..." "${BLUE}" "/dev/stderr"
-
-    local lftp_output=""
-    local lftp_status=1
-
-    # 使用 here-document 传递命令，更清晰
-    # 增加超时时间，使用 cls 代替 ls
-    if { lftp_output=$(lftp -p "$FTP_PORT" -u "$FTP_USERNAME,$FTP_PASSWORD" "$FTP_HOST" <<EOF
-set cmd:long-timeout 15
-set cmd:timeout 15
-set ftp:use-passive-mode true
-cls -F /
-quit
-EOF
-    2>&1); }; then
-        lftp_status=0
-    else
-        lftp_status=$?
+    local lftp_output
+    if ! lftp_output=$(lftp -p "$FTP_PORT" -u "$FTP_USERNAME,$FTP_PASSWORD" "$FTP_HOST" -e "set net:timeout 15; set ftp:passive-mode true; cls -F /; quit" 2>&1); then
+        log_and_display "${RED}FTP 连接失败！错误: ${lftp_output}${NC}" "" "/dev/stderr"; return 1;
     fi
-
-    if [ "$lftp_status" -eq 0 ]; then
-        log_and_display "${GREEN}FTP 连接成功！${NC}" "" "/dev/stderr"
-        return 0
-    else
-        log_and_display "${RED}FTP 连接失败！请检查配置、凭证、端口和网络连接。错误信息: ${lftp_output}${NC}" "" "/dev/stderr"
-        return 1
-    fi
+    log_and_display "${GREEN}FTP 连接成功！${NC}" "" "/dev/stderr"; return 0;
 }
 
-# Helper function to list direct sub-folders AND files for FTP
 get_ftp_direct_contents() {
     local host="$1" user="$2" pass="$3" port="$4" parent_path="$5"
-    if [[ "$parent_path" != "/" && "${parent_path: -1}" != "/" ]]; then
-        parent_path="${parent_path}/"
-    fi
-
+    if [[ "$parent_path" != "/" && "${parent_path: -1}" != "/" ]]; then parent_path="${parent_path}/"; fi
     log_and_display "正在获取 FTP 服务器中 '${parent_path}' 的子文件夹和文件列表..." "${BLUE}" "/dev/stderr"
+    local lftp_output
+    if ! lftp_output=$(lftp -p "$port" -u "$user,$pass" "$host" -e "set net:timeout 15; set ftp:passive-mode true; cls -F \"$parent_path\"; quit" 2>&1); then
+        log_and_display "${RED}FTP 列表失败。错误: ${lftp_output}${NC}" "" "/dev/stderr"; return 1;
+    fi
     local contents=()
-    local lftp_output=""
-    local result_status=1
-
-    # 使用统一的优化参数
-    if { lftp_output=$(lftp -p "$port" -u "$user,$pass" "$host" <<EOF
-set cmd:long-timeout 15
-set cmd:timeout 15
-set ftp:use-passive-mode true
-cls -F "$parent_path"
-quit
-EOF
-    2>&1); }; then
-        result_status=0
-    else
-        result_status=$?
-        log_and_display "${RED}FTP 连接失败或路径 '${parent_path}' 无效，无法获取子文件夹或文件列表。错误: ${lftp_output}${NC}" "" "/dev/stderr"
-        return 1
-    fi
-
-    # 后续的解析逻辑
-    if [ "$result_status" -eq 0 ] && [[ -n "$lftp_output" ]]; then
-        while IFS= read -r line; do
-            # lftp 的 cls -F 输出中，目录以 / 结尾
-            local cleaned_name=$(echo "$line" | sed 's|/$||')
-            if [[ "$cleaned_name" == "." || "$cleaned_name" == ".." || -z "$cleaned_name" ]]; then
-                continue
-            fi
-            if [[ "$line" =~ /$ ]]; then
-                contents+=("${cleaned_name} (文件夹)")
-            else
-                contents+=("${cleaned_name} (文件)")
-            fi
-        done <<< "$lftp_output"
-    else
-        log_and_display "${YELLOW}FTP 路径 '${parent_path}' 下没有检测到子文件夹或文件。${NC}" "" "/dev/stderr"
-    fi
-
-    IFS=$'\n' contents=($(sort <<<"${contents[*]}"))
-    unset IFS
-    printf '%s\n' "${contents[@]}"
-    return 0
+    while IFS= read -r line; do
+        if echo "$line" | grep -qvE '^(cd ok|quit|cls)'; then
+            local cleaned_name="${line%/}"
+            if [[ -z "$cleaned_name" || "$cleaned_name" == "." || "$cleaned_name" == ".." ]]; then continue; fi
+            if [[ "$line" =~ /$ ]]; then contents+=("${cleaned_name} (文件夹)"); else contents+=("${cleaned_name} (文件)"); fi
+        fi
+    done <<< "$lftp_output"
+    if [ ${#contents[@]} -eq 0 ]; then log_and_display "${YELLOW}FTP 路径 '${parent_path}' 下无内容。${NC}" "" "/dev/stderr"; fi
+    IFS=$'\n' contents=($(sort <<<"${contents[*]}")); unset IFS; printf '%s\n' "${contents[@]}"; return 0;
 }
 
-# Test FTPS connection
+# --- FTPS Functions ---
+
 test_ftps_connection() {
     if [[ -z "$FTPS_HOST" || -z "$FTPS_USERNAME" || -z "$FTPS_PASSWORD" ]]; then
         log_and_display "${RED}FTPS 配置不完整，无法测试连接。请先填写主机、用户名和密码。${NC}" "" "/dev/stderr"
         return 1
     fi
 
-    log_and_display "正在测试 FTPS 连接到：${FTPS_HOST}:${FTPS_PORT}..." "${BLUE}" "/dev/stderr"
+    log_and_display "正在测试 FTPS 连接到：${FTPS_HOST}:${FTPS_PORT} (使用显式加密模式)..." "${BLUE}" "/dev/stderr"
 
     local lftp_output=""
     local lftp_status=1
 
-    # 增加了 SSL/TLS 相关设置以提高兼容性
-    if { lftp_output=$(lftp -p "$FTPS_PORT" -u "$FTPS_USERNAME,$FTPS_PASSWORD" "ftps://$FTPS_HOST" <<EOF
-set cmd:long-timeout 15
-set cmd:timeout 15
-set ftp:use-passive-mode true
-# 强制使用 SSL/TLS，并加密数据通道，增强可靠性
-set ftp:ssl-force true
+    # 使用修正后的 lftp 命令
+    if { lftp_output=$(lftp -p "$FTPS_PORT" -u "$FTPS_USERNAME,$FTPS_PASSWORD" "$FTPS_HOST" <<EOF
+# --- 调试选项 (如果仍然失败，取消下面一行的注释以获取详细日志) ---
+# debug 3
+
+# --- 兼容性与连接设置 ---
+set net:timeout 20               # 增加网络操作超时
+set net:reconnect-interval-base 5  # 设置重连间隔
+
+# --- FTPS 核心设置 (显式模式 Explicit-Mode) ---
+# 启用被动模式，这对于防火墙/NAT环境至关重要
+set ftp:passive-mode true
+
+# 关键设置: 允许并优先使用 AUTH TLS 启动加密。这是最常见的显式FTPS模式。
+set ftp:ssl-allow true
+
+# 加密数据传输通道 (PROT P)
 set ftp:ssl-protect-data true
-# [重要] 如果服务器使用自签名证书，此项必须设置为 no，否则会因证书验证失败而卡住
+
+# (可选) 如果服务器需要特定的TLS版本，可以取消注释并修改
+# set ssl:priority "NORMAL:%VERS-TLS1.2"
+
+# [重要] 忽略证书验证。如果服务器使用自签名或无效证书，则必须设置为 'no'
 set ssl:verify-certificate no
-cls -F /
+
+# --- 命令执行 ---
+cls -F /  # 使用 cls -F / 代替 ls，获取更简洁的列表
 quit
 EOF
     2>&1); }; then
@@ -905,13 +870,13 @@ EOF
         log_and_display "${GREEN}FTPS 连接成功！${NC}" "" "/dev/stderr"
         return 0
     else
-        log_and_display "${RED}FTPS 连接失败！请检查配置、凭证、端口和网络连接。错误信息: ${lftp_output}${NC}" "" "/dev/stderr"
+        log_and_display "${RED}FTPS 连接失败！请检查配置、凭证、端口和网络连接。${NC}" "" "/dev/stderr"
+        log_and_display "${RED}lftp 错误输出: ${lftp_output}${NC}" "" "/dev/stderr"
+        log_and_display "${YELLOW}提示: 如果服务器是老旧的隐式(Implicit)FTPS(通常在端口990)，请在配置中修改端口为990，并在lftp命令中使用 'ftps://${FTPS_HOST}' 代替 '${FTPS_HOST}'。${NC}" "" "/dev/stderr"
         return 1
     fi
 }
 
-
-# Helper function to list direct sub-folders AND files for FTPS
 get_ftps_direct_contents() {
     local host="$1" user="$2" pass="$3" port="$4" parent_path="$5"
     if [[ "$parent_path" != "/" && "${parent_path: -1}" != "/" ]]; then
@@ -923,12 +888,11 @@ get_ftps_direct_contents() {
     local lftp_output=""
     local result_status=1
 
-    # 使用统一的优化参数
-    if { lftp_output=$(lftp -p "$port" -u "$user,$pass" "ftps://$host" <<EOF
-set cmd:long-timeout 15
-set cmd:timeout 15
-set ftp:use-passive-mode true
-set ftp:ssl-force true
+    # 使用与 test_ftps_connection 相同的健壮 lftp 配置
+    if { lftp_output=$(lftp -p "$port" -u "$user,$pass" "$host" <<EOF
+set net:timeout 20
+set ftp:passive-mode true
+set ftp:ssl-allow true
 set ftp:ssl-protect-data true
 set ssl:verify-certificate no
 cls -F "$parent_path"
@@ -945,18 +909,24 @@ EOF
     # 后续的解析逻辑
     if [ "$result_status" -eq 0 ] && [[ -n "$lftp_output" ]]; then
         while IFS= read -r line; do
-            local cleaned_name=$(echo "$line" | sed 's|/$||')
-            if [[ "$cleaned_name" == "." || "$cleaned_name" == ".." || -z "$cleaned_name" ]]; then
-                continue
-            fi
-            if [[ "$line" =~ /$ ]]; then
-                contents+=("${cleaned_name} (文件夹)")
-            else
-                contents+=("${cleaned_name} (文件)")
+            # 过滤掉 lftp 自身的输出信息，只保留文件/目录列表
+            if echo "$line" | grep -qvE '^(cd ok|quit|cls)'; then
+                local cleaned_name=$(echo "$line" | sed 's|/$||')
+                if [[ "$cleaned_name" == "." || "$cleaned_name" == ".." || -z "$cleaned_name" ]]; then
+                    continue
+                fi
+                if [[ "$line" =~ /$ ]]; then
+                    contents+=("${cleaned_name} (文件夹)")
+                else
+                    contents+=("${cleaned_name} (文件)")
+                fi
             fi
         done <<< "$lftp_output"
     else
-        log_and_display "${YELLOW}FTPS 路径 '${parent_path}' 下没有检测到子文件夹或文件。${NC}" "" "/dev/stderr"
+        # 错误信息已在 lftp 执行失败时打印，这里只处理无内容的情况
+        if [ "$result_status" -eq 0 ]; then
+             log_and_display "${YELLOW}FTPS 路径 '${parent_path}' 下没有检测到子文件夹或文件。${NC}" "" "/dev/stderr"
+        fi
     fi
 
     IFS=$'\n' contents=($(sort <<<"${contents[*]}"))
@@ -965,94 +935,43 @@ EOF
     return 0
 }
 
-# Test SFTP connection using lftp
+# --- SFTP Functions ---
+
 test_sftp_connection() {
-    if [[ -z "$SFTP_HOST" || -z "$SFTP_USERNAME" || -z "$SFTP_PASSWORD" ]]; then
-        log_and_display "${RED}SFTP 配置不完整，无法测试连接。请先填写主机、用户名和密码。${NC}" "" "/dev/stderr"
-        return 1
+    if [[ -z "$SFTP_HOST" || -z "$SFTP_USERNAME" ]]; then # Password can be empty for key auth
+        log_and_display "${RED}SFTP 配置不完整，无法测试连接。${NC}" "" "/dev/stderr"; return 1;
     fi
-
-    log_and_display "正在使用 lftp 测试 SFTP 连接到：${SFTP_USERNAME}@${SFTP_HOST}:${SFTP_PORT}..." "${BLUE}" "/dev/stderr"
-    log_and_display "${YELLOW}注意：lftp 会自动处理密码或密钥认证。如果遇到主机密钥问题，请手动连接一次 sftp ${SFTP_USERNAME}@${SFTP_HOST} -p ${SFTP_PORT} 以接受密钥。${NC}" "" "/dev/stderr"
-
-    local lftp_output=""
-    local lftp_status=1
-
-    if { lftp_output=$(lftp -p "$SFTP_PORT" -u "$SFTP_USERNAME,$SFTP_PASSWORD" "sftp://$SFTP_HOST" <<EOF
-set cmd:long-timeout 15
-set cmd:timeout 15
-set sftp:auto-confirm yes
-cls -F /
-quit
-EOF
-    2>&1); }; then
-        lftp_status=0
-    else
-        lftp_status=$?
+    log_and_display "正在测试 SFTP 连接到：${SFTP_USERNAME}@${SFTP_HOST}:${SFTP_PORT}..." "${BLUE}" "/dev/stderr"
+    log_and_display "${YELLOW}注意: lftp 会自动尝试密钥和密码认证。如果首次连接，请手动 'sftp -p ${SFTP_PORT} ${SFTP_USERNAME}@${SFTP_HOST}' 接受主机密钥。${NC}" "" "/dev/stderr"
+    local lftp_output
+    if ! lftp_output=$(lftp -p "$SFTP_PORT" -u "$SFTP_USERNAME,$SFTP_PASSWORD" "sftp://$SFTP_HOST" -e "set net:timeout 15; set sftp:auto-confirm yes; cls -F /; quit" 2>&1); then
+        log_and_display "${RED}SFTP 连接失败！错误: ${lftp_output}${NC}" "" "/dev/stderr"; return 1;
     fi
-    
-    if [ "$lftp_status" -eq 0 ]; then
-        log_and_display "${GREEN}SFTP 连接成功！${NC}" "" "/dev/stderr"
-        return 0
-    else
-        log_and_display "${RED}SFTP 连接失败！请检查配置、凭证、端口和网络连接。错误信息: ${lftp_output}${NC}" "" "/dev/stderr"
-        return 1
-    fi
+    log_and_display "${GREEN}SFTP 连接成功！${NC}" "" "/dev/stderr"; return 0;
 }
 
-# Helper function to list direct sub-folders AND files for SFTP using lftp
 get_sftp_direct_contents() {
     local host="$1" user="$2" pass="$3" port="$4" parent_path="$5"
-    if [[ "$parent_path" != "/" && "${parent_path: -1}" != "/" ]]; then
-        parent_path="${parent_path}/"
-    fi
-
+    if [[ "$parent_path" != "/" && "${parent_path: -1}" != "/" ]]; then parent_path="${parent_path}/"; fi
     log_and_display "正在获取 SFTP 服务器中 '${parent_path}' 的子文件夹和文件列表..." "${BLUE}" "/dev/stderr"
+    local lftp_output
+    if ! lftp_output=$(lftp -p "$port" -u "$user,$pass" "sftp://$host" -e "set net:timeout 15; set sftp:auto-confirm yes; cls -F \"$parent_path\"; quit" 2>&1); then
+        log_and_display "${RED}SFTP 列表失败。错误: ${lftp_output}${NC}" "" "/dev/stderr"; return 1;
+    fi
     local contents=()
-    local lftp_output=""
-    local result_status=1
-
-    if { lftp_output=$(lftp -p "$port" -u "$user,$pass" "sftp://$host" <<EOF
-set cmd:long-timeout 15
-set cmd:timeout 15
-set sftp:auto-confirm yes
-cls -F "$parent_path"
-quit
-EOF
-    2>&1); }; then
-        result_status=0
-    else
-        result_status=$?
-        log_and_display "${RED}SFTP 连接失败或路径 '${parent_path}' 无效，无法获取子文件夹或文件列表。错误: ${lftp_output}${NC}" "" "/dev/stderr"
-        return 1
-    fi
-
-    # Parsing logic is now identical to FTP/FTPS
-    if [ "$result_status" -eq 0 ] && [[ -n "$lftp_output" ]]; then
-        while IFS= read -r line; do
-            local cleaned_name=$(echo "$line" | sed 's|/$||')
-            if [[ "$cleaned_name" == "." || "$cleaned_name" == ".." || -z "$cleaned_name" ]]; then
-                continue
-            fi
-            if [[ "$line" =~ /$ ]]; then
-                contents+=("${cleaned_name} (文件夹)")
-            else
-                contents+=("${cleaned_name} (文件)")
-            fi
-        done <<< "$lftp_output"
-    else
-        log_and_display "${YELLOW}SFTP 路径 '${parent_path}' 下没有检测到子文件夹或文件。${NC}" "" "/dev/stderr"
-    fi
-    
-    IFS=$'\n' contents=($(sort <<<"${contents[*]}"))
-    unset IFS
-    printf '%s\n' "${contents[@]}"
-    return 0
+    while IFS= read -r line; do
+        if echo "$line" | grep -qvE '^(cd ok|quit|cls)'; then
+            local cleaned_name="${line%/}"
+            if [[ -z "$cleaned_name" || "$cleaned_name" == "." || "$cleaned_name" == ".." ]]; then continue; fi
+            if [[ "$line" =~ /$ ]]; then contents+=("${cleaned_name} (文件夹)"); else contents+=("${cleaned_name} (文件)"); fi
+        fi
+    done <<< "$lftp_output"
+    if [ ${#contents[@]} -eq 0 ]; then log_and_display "${YELLOW}SFTP 路径 '${parent_path}' 下无内容。${NC}" "" "/dev/stderr"; fi
+    IFS=$'\n' contents=($(sort <<<"${contents[*]}")); unset IFS; printf '%s\n' "${contents[@]}"; return 0;
 }
 
-
 # ================================================================
-# ===      增强型路径选择函数 (交互式浏览)           ===
+# ===         增强型路径选择函数 (交互式浏览)                  ===
 # ================================================================
 
 choose_s3_r2_path() {
@@ -1686,7 +1605,7 @@ choose_sftp_path() {
 
 
 # ================================================================
-# ===      云存储账号管理菜单                     ===
+# ===         云存储账号管理菜单                             ===
 # ================================================================
 
 # 管理 S3/R2 账号设置
@@ -2012,7 +1931,7 @@ manage_ftps_account() {
                     FTPS_PASSWORD="$input_password"
                 fi
 
-                read -rp "请输入 FTPS 端口 (默认: 21) [当前: ${FTPS_PORT}]: " input_port
+                read -rp "请输入 FTPS 端口 (默认: 21, 隐式FTPS通常为990) [当前: ${FTPS_PORT}]: " input_port
                 FTPS_PORT="${input_port:-$FTPS_PORT}"
                 [[ "$FTPS_PORT" =~ ^[0-9]+$ ]] || FTPS_PORT=21
 
@@ -2071,7 +1990,7 @@ manage_sftp_account() {
         local sftp_status="${RED}未配置${NC}"
         local sftp_path_status="${YELLOW}未设置目标路径${NC}"
 
-        if [[ -n "$SFTP_HOST" && -n "$SFTP_USERNAME" && -n "$SFTP_PASSWORD" ]]; then
+        if [[ -n "$SFTP_HOST" && -n "$SFTP_USERNAME" ]]; then
             sftp_status="${GREEN}已配置${NC} (主机: ${SFTP_HOST}:${SFTP_PORT} 用户名: ${SFTP_USERNAME})"
             if [[ -n "$SFTP_BACKUP_PATH" ]]; then
                 sftp_path_status="${GREEN}已设置目标路径: ${SFTP_BACKUP_PATH}${NC}"
@@ -2100,10 +2019,13 @@ manage_sftp_account() {
                 read -rp "请输入 SFTP 用户名 [当前: ${SFTP_USERNAME}]: " input_username
                 SFTP_USERNAME="${input_username:-$SFTP_USERNAME}"
 
-                read -s -rp "请输入 SFTP 密码或密钥密码 (留空不修改当前密码): " input_password
+                read -s -rp "请输入 SFTP 密码或密钥密码 (若无密码认证，请留空): " input_password
                 echo ""
                 if [[ -n "$input_password" ]]; then
                     SFTP_PASSWORD="$input_password"
+                else
+                    # Allow user to clear the password if they want to switch to key-only auth
+                    SFTP_PASSWORD=""
                 fi
 
                 read -rp "请输入 SFTP 端口 (默认: 22) [当前: ${SFTP_PORT}]: " input_port
@@ -2119,7 +2041,7 @@ manage_sftp_account() {
                 press_enter_to_continue
                 ;;
             3)
-                if [[ -z "$SFTP_HOST" || -z "$SFTP_USERNAME" || -z "$SFTP_PASSWORD" ]]; then
+                if [[ -z "$SFTP_HOST" || -z "$SFTP_USERNAME" ]]; then
                     log_and_display "${RED}SFTP 配置不完整，无法设置目标路径。请先通过选项 '1' 添加凭证。${NC}"
                 else
                     if choose_sftp_path; then
@@ -2175,9 +2097,8 @@ select_backup_targets() {
         if [[ -n "$S3_ACCESS_KEY" && -n "$S3_SECRET_KEY" && -n "$S3_ENDPOINT" && -n "$S3_BUCKET_NAME" && -n "$S3_BACKUP_PATH" ]]; then
             s3_configured="true"
             echo -n "1. S3/R2 存储 (当前: "
-            if [[ "$BACKUP_TARGET_S3" == "true" ]]; then echo -e "${GREEN}启用${NC})"
-            else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "       (已配置账号并设置路径: ${S3_BACKUP_PATH})"
+            if [[ "$BACKUP_TARGET_S3" == "true" ]]; then echo -e "${GREEN}启用${NC})"; else echo -e "${YELLOW}禁用${NC})" ; fi
+            echo "   (路径: ${S3_BACKUP_PATH})"
         else
             echo -e "1. S3/R2 存储 (${RED}未完全配置，无法启用${NC})"
         fi
@@ -2186,9 +2107,8 @@ select_backup_targets() {
         if [[ -n "$WEBDAV_URL" && -n "$WEBDAV_USERNAME" && -n "$WEBDAV_PASSWORD" && -n "$WEBDAV_BACKUP_PATH" ]]; then
             webdav_configured="true"
             echo -n "2. WebDAV 存储 (当前: "
-            if [[ "$BACKUP_TARGET_WEBDAV" == "true" ]]; then echo -e "${GREEN}启用${NC})"
-            else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "       (已配置账号并设置路径: ${WEBDAV_BACKUP_PATH})"
+            if [[ "$BACKUP_TARGET_WEBDAV" == "true" ]]; then echo -e "${GREEN}启用${NC})"; else echo -e "${YELLOW}禁用${NC})" ; fi
+            echo "   (路径: ${WEBDAV_BACKUP_PATH})"
         else
             echo -e "2. WebDAV 存储 (${RED}未完全配置，无法启用${NC})"
         fi
@@ -2197,9 +2117,8 @@ select_backup_targets() {
         if [[ -n "$FTP_HOST" && -n "$FTP_USERNAME" && -n "$FTP_PASSWORD" && -n "$FTP_BACKUP_PATH" ]]; then
             ftp_configured="true"
             echo -n "3. FTP 存储 (当前: "
-            if [[ "$BACKUP_TARGET_FTP" == "true" ]]; then echo -e "${GREEN}启用${NC})"
-            else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "       (已配置账号并设置路径: ${FTP_BACKUP_PATH})"
+            if [[ "$BACKUP_TARGET_FTP" == "true" ]]; then echo -e "${GREEN}启用${NC})"; else echo -e "${YELLOW}禁用${NC})" ; fi
+            echo "   (路径: ${FTP_BACKUP_PATH})"
         else
             echo -e "3. FTP 存储 (${RED}未完全配置，无法启用${NC})"
         fi
@@ -2207,19 +2126,17 @@ select_backup_targets() {
         if [[ -n "$FTPS_HOST" && -n "$FTPS_USERNAME" && -n "$FTPS_PASSWORD" && -n "$FTPS_BACKUP_PATH" ]]; then
             ftps_configured="true"
             echo -n "4. FTPS 存储 (当前: "
-            if [[ "$BACKUP_TARGET_FTPS" == "true" ]]; then echo -e "${GREEN}启用${NC})"
-            else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "       (已配置账号并设置路径: ${FTPS_BACKUP_PATH})"
+            if [[ "$BACKUP_TARGET_FTPS" == "true" ]]; then echo -e "${GREEN}启用${NC})"; else echo -e "${YELLOW}禁用${NC})" ; fi
+            echo "   (路径: ${FTPS_BACKUP_PATH})"
         else
             echo -e "4. FTPS 存储 (${RED}未完全配置，无法启用${NC})"
         fi
 
-        if [[ -n "$SFTP_HOST" && -n "$SFTP_USERNAME" && -n "$SFTP_PASSWORD" && -n "$SFTP_BACKUP_PATH" ]]; then
+        if [[ -n "$SFTP_HOST" && -n "$SFTP_USERNAME" && -n "$SFTP_BACKUP_PATH" ]]; then
             sftp_configured="true"
             echo -n "5. SFTP 存储 (当前: "
-            if [[ "$BACKUP_TARGET_SFTP" == "true" ]]; then echo -e "${GREEN}启用${NC})"
-            else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "       (已配置账号并设置路径: ${SFTP_BACKUP_PATH})"
+            if [[ "$BACKUP_TARGET_SFTP" == "true" ]]; then echo -e "${GREEN}启用${NC})"; else echo -e "${YELLOW}禁用${NC})" ; fi
+            echo "   (路径: ${SFTP_BACKUP_PATH})"
         else
             echo -e "5. SFTP 存储 (${RED}未完全配置，无法启用${NC})"
         fi
@@ -2227,118 +2144,39 @@ select_backup_targets() {
         echo ""
         echo "0. 返回主菜单 (保存选择)"
         echo -e "${BLUE}------------------------------------------------${NC}"
-        read -rp "请输入选项 (例如 '1', '2 3', '0'): " choice_input
+        read -rp "请输入要启用的目标序号 (例如 '1 4 5' 启用S3,FTPS,SFTP，输入'0'保存并退出): " choice_input
 
-        # Reset temporary targets based on current state before processing new input
-        local temp_s3_target="$BACKUP_TARGET_S3"
-        local temp_webdav_target="$BACKUP_TARGET_WEBDAV"
-        local temp_ftp_target="$BACKUP_TARGET_FTP"
-        local temp_ftps_target="$BACKUP_TARGET_FTPS"
-        local temp_sftp_target="$BACKUP_TARGET_SFTP"
-
-        # Initialize to false for fresh selection if user is providing specific numbers
-        # If user inputs "1 3", only 1 and 3 should be true, others false.
-        # If user inputs "0", keep current.
-        if [[ "$choice_input" =~ [1-5] ]]; then # If any target number is chosen, reset all to false first
-            temp_s3_target="false"
-            temp_webdav_target="false"
-            temp_ftp_target="false"
-            temp_ftps_target="false"
-            temp_sftp_target="false"
+        if [[ "$choice_input" == "0" ]]; then
+            save_config
+            log_and_display "备份目标设置已保存。" "${BLUE}"
+            break
         fi
 
-        local selections=($choice_input) # Split input into an array
-
-        for sel in "${selections[@]}"; do
+        # Process selections
+        local temp_s3_target="false"
+        local temp_webdav_target="false"
+        local temp_ftp_target="false"
+        local temp_ftps_target="false"
+        local temp_sftp_target="false"
+        
+        for sel in $choice_input; do
             case "$sel" in
-                "1")
-                    if [[ "$s3_configured" == "true" ]]; then
-                        temp_s3_target="true"
-                        log_and_display "已选择启用 S3/R2 备份。" "${GREEN}"
-                    else
-                        log_and_display "${RED}S3/R2 未完全配置，无法启用。${NC}"
-                    fi
-                    ;;
-                "2")
-                    if [[ "$webdav_configured" == "true" ]]; then
-                        temp_webdav_target="true"
-                        log_and_display "已选择启用 WebDAV 备份。" "${GREEN}"
-                    else
-                        log_and_display "${RED}WebDAV 未完全配置，无法启用。${NC}"
-                    fi
-                    ;;
-                "3")
-                    if [[ "$ftp_configured" == "true" ]]; then
-                        temp_ftp_target="true"
-                        log_and_display "已选择启用 FTP 备份。" "${GREEN}"
-                    else
-                        log_and_display "${RED}FTP 未完全配置，无法启用。${NC}"
-                    fi
-                    ;;
-                "4")
-                    if [[ "$ftps_configured" == "true" ]]; then
-                        temp_ftps_target="true"
-                        log_and_display "已选择启用 FTPS 备份。" "${GREEN}"
-                    else
-                        log_and_display "${RED}FTPS 未完全配置，无法启用。${NC}"
-                    fi
-                    ;;
-                "5")
-                    if [[ "$sftp_configured" == "true" ]]; then
-                        temp_sftp_target="true"
-                        log_and_display "已选择启用 SFTP 备份。" "${GREEN}"
-                    else
-                        log_and_display "${RED}SFTP 未完全配置，无法启用。${NC}"
-                    fi
-                    ;;
-                "0") # Only if '0' is the only input
-                    if [ "${#selections[@]}" -eq 1 ]; then
-                        # If 0 is chosen alone, break out and save current state (which was possibly modified by other numbers if multi-select was intented)
-                        # Or, if no specific targets were chosen, ensure all are false before breaking.
-                        break
-                    else
-                        log_and_display "${RED}无效的选项组合。'0' 只能单独使用。${NC}"
-                        temp_s3_target="$BACKUP_TARGET_S3" # Revert to previous state
-                        temp_webdav_target="$BACKUP_TARGET_WEBDAV"
-                        temp_ftp_target="$BACKUP_TARGET_FTP"
-                        temp_ftps_target="$BACKUP_TARGET_FTPS"
-                        temp_sftp_target="$BACKUP_TARGET_SFTP"
-                    fi
-                    ;;
-                *)
-                    log_and_display "${RED}无效的选项 '${sel}'，请重新输入。${NC}"
-                    temp_s3_target="$BACKUP_TARGET_S3" # Revert to previous state
-                    temp_webdav_target="$BACKUP_TARGET_WEBDAV"
-                    temp_ftp_target="$BACKUP_TARGET_FTP"
-                    temp_ftps_target="$BACKUP_TARGET_FTPS"
-                    temp_sftp_target="$BACKUP_TARGET_SFTP"
-                    ;;
+                1) if [[ "$s3_configured" == "true" ]]; then temp_s3_target="true"; else log_and_display "${RED}S3/R2 未配置，无法启用。${NC}"; fi ;;
+                2) if [[ "$webdav_configured" == "true" ]]; then temp_webdav_target="true"; else log_and_display "${RED}WebDAV 未配置，无法启用。${NC}"; fi ;;
+                3) if [[ "$ftp_configured" == "true" ]]; then temp_ftp_target="true"; else log_and_display "${RED}FTP 未配置，无法启用。${NC}"; fi ;;
+                4) if [[ "$ftps_configured" == "true" ]]; then temp_ftps_target="true"; else log_and_display "${RED}FTPS 未配置，无法启用。${NC}"; fi ;;
+                5) if [[ "$sftp_configured" == "true" ]]; then temp_sftp_target="true"; else log_and_display "${RED}SFTP 未配置，无法启用。${NC}"; fi ;;
+                *) log_and_display "${RED}无效的选项 '${sel}'。${NC}";;
             esac
         done
 
-        if [ "$choice_input" == "0" ] || [[ "$choice_input" =~ [1-5] ]]; then # If user selected 0 or any numbers, proceed to save
-            local any_target_enabled="false"
-            if [[ "$temp_s3_target" == "true" || "$temp_webdav_target" == "true" || "$temp_ftp_target" == "true" || "$temp_ftps_target" == "true" || "$temp_sftp_target" == "true" ]]; then
-                any_target_enabled="true"
-            fi
+        BACKUP_TARGET_S3="$temp_s3_target"
+        BACKUP_TARGET_WEBDAV="$temp_webdav_target"
+        BACKUP_TARGET_FTP="$temp_ftp_target"
+        BACKUP_TARGET_FTPS="$temp_ftps_target"
+        BACKUP_TARGET_SFTP="$temp_sftp_target"
 
-            if [[ "$any_target_enabled" == "false" ]]; then
-                log_and_display "${RED}警告：未选择任何有效备份目标。这会导致自动备份无法上传文件。${NC}"
-                read -rp "确定要不选择任何目标吗？(y/N): " confirm_none
-                if [[ ! "$confirm_none" =~ ^[Yy]$ ]]; then
-                    continue # 重新显示菜单
-                fi
-            fi
-
-            BACKUP_TARGET_S3="$temp_s3_target"
-            BACKUP_TARGET_WEBDAV="$temp_webdav_target"
-            BACKUP_TARGET_FTP="$temp_ftp_target"
-            BACKUP_TARGET_FTPS="$temp_ftps_target"
-            BACKUP_TARGET_SFTP="$temp_sftp_target"
-            save_config
-            log_and_display "备份目标设置已保存。" "${BLUE}"
-            break # Exit the while loop
-        fi
+        log_and_display "备份目标已更新，请按0保存或继续修改。" "${GREEN}"
         press_enter_to_continue
     done
 }
@@ -2377,17 +2215,13 @@ set_cloud_storage() {
             sftp_info="${GREEN}已配置${NC} (主机: ${SFTP_HOST}:${SFTP_PORT} | 用户名: ${SFTP_USERNAME} | 路径: ${SFTP_BACKUP_PATH:-未设置})"
         fi
 
-        echo "1. 选择云备份目标 (S3/R2: ${BACKUP_TARGET_S3}, WebDAV: ${BACKUP_TARGET_WEBDAV}, FTP: ${BACKUP_TARGET_FTP}, FTPS: ${BACKUP_TARGET_FTPS}, SFTP: ${BACKUP_TARGET_SFTP})"
-        echo "   当前S3/R2账号: $s3_info"
-        echo "   当前WebDAV账号: $webdav_info"
-        echo "   当前FTP账号: $ftp_info"
-        echo "   当前FTPS账号: $ftps_info"
-        echo "   当前SFTP账号: $sftp_info"
-        echo "2. 管理 S3/R2 账号设置"
-        echo "3. 管理 WebDAV 账号设置"
-        echo "4. 管理 FTP 账号设置"
-        echo "5. 管理 FTPS 账号设置"
-        echo "6. 管理 SFTP 账号设置"
+        echo "1. 选择启用的云备份目标 (S3:${BACKUP_TARGET_S3},WebDAV:${BACKUP_TARGET_WEBDAV},FTP:${BACKUP_TARGET_FTP},FTPS:${BACKUP_TARGET_FTPS},SFTP:${BACKUP_TARGET_SFTP})"
+        echo ""
+        echo "2. 管理 S3/R2 账号 (当前: $s3_info)"
+        echo "3. 管理 WebDAV 账号 (当前: $webdav_info)"
+        echo "4. 管理 FTP 账号 (当前: $ftp_info)"
+        echo "5. 管理 FTPS 账号 (当前: $ftps_info)"
+        echo "6. 管理 SFTP 账号 (当前: $sftp_info)"
         echo "0. 返回主菜单"
         echo -e "${BLUE}------------------------------------------------${NC}"
         read -rp "请输入选项: " sub_choice
@@ -2416,9 +2250,13 @@ set_telegram_notification() {
     display_header
     echo -e "${BLUE}=== 6. 消息通知设定 (Telegram) ===${NC}"
     log_and_display "${YELLOW}Telegram Bot Token 和 Chat ID 将保存到本地配置文件，请确保配置文件安全！${NC}"
-    read -rp "请输入 Telegram Bot Token (例如 123456:ABC-DEF1234ghIkl-79f): " TELEGRAM_BOT_TOKEN
-    read -rp "请输入 Telegram Chat ID (例如 -123456789 或 123456789): " TELEGRAM_CHAT_ID
-    save_config # 保存凭证到配置文件
+    read -rp "请输入 Telegram Bot Token [当前: ${TELEGRAM_BOT_TOKEN}]: " input_token
+    TELEGRAM_BOT_TOKEN="${input_token:-$TELEGRAM_BOT_TOKEN}"
+
+    read -rp "请输入 Telegram Chat ID [当前: ${TELEGRAM_CHAT_ID}]: " input_chat_id
+    TELEGRAM_CHAT_ID="${input_chat_id:-$TELEGRAM_CHAT_ID}"
+    
+    save_config
     log_and_display "${GREEN}Telegram 通知配置已更新并保存。${NC}"
     log_and_display "${YELLOW}提示：您可以向 @BotFather 获取 Bot Token，然后向您的 Bot 发送消息，再访问 https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates 获取 Chat ID。${NC}"
     press_enter_to_continue
@@ -2534,20 +2372,18 @@ apply_retention_policy() {
                 ;;
             "ftp")
                 lftp -p "$FTP_PORT" -u "$FTP_USERNAME,$FTP_PASSWORD" "$FTP_HOST" <<EOF &>/dev/null
-set cmd:long-timeout 15
-set cmd:timeout 15
-set ftp:use-passive-mode true
+set net:timeout 15
+set ftp:passive-mode true
 rm "$FTP_BACKUP_PATH$file_to_delete"
 quit
 EOF
                 delete_status=$?
                 ;;
             "ftps")
-                lftp -p "$FTPS_PORT" -u "$FTPS_USERNAME,$FTPS_PASSWORD" "ftps://$FTPS_HOST" <<EOF &>/dev/null
-set cmd:long-timeout 15
-set cmd:timeout 15
-set ftp:use-passive-mode true
-set ftp:ssl-force true
+                lftp -p "$FTPS_PORT" -u "$FTPS_USERNAME,$FTPS_PASSWORD" "$FTPS_HOST" <<EOF &>/dev/null
+set net:timeout 15
+set ftp:passive-mode true
+set ftp:ssl-allow true
 set ftp:ssl-protect-data true
 set ssl:verify-certificate no
 rm "$FTPS_BACKUP_PATH$file_to_delete"
@@ -2557,8 +2393,7 @@ EOF
                 ;;
             "sftp")
                 lftp -p "$SFTP_PORT" -u "$SFTP_USERNAME,$SFTP_PASSWORD" "sftp://$SFTP_HOST" <<EOF &>/dev/null
-set cmd:long-timeout 15
-set cmd:timeout 15
+set net:timeout 15
 set sftp:auto-confirm yes
 rm "$SFTP_BACKUP_PATH$file_to_delete"
 quit
@@ -2651,8 +2486,7 @@ EOF
             # We specifically look for zip files that match the backup naming convention
             raw_backups_list=$(echo "$curl_output" | grep -oP '<D:href>\K([^<]*[a-zA-Z0-9_-]+_[0-9]{14}\.zip)(?=</D:href>)' | sed "s|^${base_webdav_url_for_retention//./\\.}${target_path//./\\.}\|/||" | sed "s|/${target_path//./\\.}\|/||")
         elif [[ "$service_type" == "ftp" ]]; then
-            # Add timeout and passive mode settings
-            if { raw_backups_list=$(lftp -u "$FTP_USERNAME","$FTP_PASSWORD" -p "$FTP_PORT" "$FTP_HOST" -e "set cmd:long-timeout 10; set cmd:timeout 10; set ftp:use-passive-mode yes; find ${target_path} -name '*_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].zip'; quit;" 2>&1); } then
+            if { raw_backups_list=$(lftp -u "$FTP_USERNAME","$FTP_PASSWORD" -p "$FTP_PORT" "$FTP_HOST" -e "set net:timeout 20; set ftp:passive-mode true; find ${target_path} -name '*_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].zip'; quit;" 2>&1); } then
                 get_list_status=0
             else
                 get_list_status=$?
@@ -2660,8 +2494,7 @@ EOF
             fi
             raw_backups_list=$(echo "$raw_backups_list" | sed "s|^${target_path}||")
         elif [[ "$service_type" == "ftps" ]]; then
-            # Add timeout and passive mode settings
-            if { raw_backups_list=$(lftp -u "$FTPS_USERNAME","$FTPS_PASSWORD" -p "$FTPS_PORT" ftps://"$FTPS_HOST" -e "set cmd:long-timeout 10; set cmd:timeout 10; set ftp:use-passive-mode yes; set ftp:ssl-force true; set ftp:ssl-protect-data true; set ssl:verify-certificate no; find ${target_path} -name '*_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].zip'; quit;" 2>&1); } then
+            if { raw_backups_list=$(lftp -u "$FTPS_USERNAME","$FTPS_PASSWORD" -p "$FTPS_PORT" "$FTPS_HOST" -e "set net:timeout 20; set ftp:passive-mode true; set ftp:ssl-allow true; set ftp:ssl-protect-data true; set ssl:verify-certificate no; find ${target_path} -name '*_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].zip'; quit;" 2>&1); } then
                 get_list_status=0
             else
                 get_list_status=$?
@@ -2669,7 +2502,7 @@ EOF
             fi
             raw_backups_list=$(echo "$raw_backups_list" | sed "s|^${target_path}||")
         elif [[ "$service_type" == "sftp" ]]; then
-            if { raw_backups_list=$(lftp -u "$SFTP_USERNAME","$SFTP_PASSWORD" -p "$SFTP_PORT" sftp://"$SFTP_HOST" -e "set cmd:long-timeout 10; set cmd:timeout 10; set sftp:auto-confirm yes; find ${target_path} -name '*_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].zip'; quit;" 2>&1); } then
+            if { raw_backups_list=$(lftp -u "$SFTP_USERNAME","$SFTP_PASSWORD" -p "$SFTP_PORT" "sftp://$SFTP_HOST" -e "set net:timeout 20; set sftp:auto-confirm yes; find ${target_path} -name '*_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].zip'; quit;" 2>&1); } then
                 get_list_status=0
             else
                 get_list_status=$?
@@ -2775,7 +2608,7 @@ EOF
     fi
 
     if [[ "$BACKUP_TARGET_SFTP" == "true" ]]; then
-        if [[ -n "$SFTP_HOST" && -n "$SFTP_USERNAME" && -n "$SFTP_PASSWORD" && -n "$SFTP_BACKUP_PATH" ]]; then
+        if [[ -n "$SFTP_HOST" && -n "$SFTP_USERNAME" && -n "$SFTP_BACKUP_PATH" ]]; then
             process_service_retention "sftp" "SFTP_BACKUP_PATH" total_sftp_backups_found deleted_sftp_count
         else
             log_and_display "${YELLOW}SFTP 已启用为备份目标但配置不完整，跳过 SFTP 备份清理。${NC}"
@@ -2964,12 +2797,9 @@ perform_backup() {
                 local ftp_upload_status_code=1
                 
                 if { ftp_upload_output=$(lftp -p "$FTP_PORT" -u "$FTP_USERNAME,$FTP_PASSWORD" "$FTP_HOST" <<EOF
-set cmd:long-timeout 3600
-set cmd:timeout 300
-set ftp:use-passive-mode true
-# 创建远端目录 (如果不存在)，-p 选项可以递归创建
+set net:timeout 300
+set ftp:passive-mode true
 mkdir -p "$FTP_BACKUP_PATH"
-# 上传文件
 put -O "$FTP_BACKUP_PATH" "$temp_archive_path"
 quit
 EOF
@@ -3003,11 +2833,10 @@ EOF
                 local ftps_upload_output=""
                 local ftps_upload_status_code=1
                 
-                if { ftps_upload_output=$(lftp -p "$FTPS_PORT" -u "$FTPS_USERNAME,$FTPS_PASSWORD" "ftps://$FTPS_HOST" <<EOF
-set cmd:long-timeout 3600
-set cmd:timeout 300
-set ftp:use-passive-mode true
-set ftp:ssl-force true
+                if { ftps_upload_output=$(lftp -p "$FTPS_PORT" -u "$FTPS_USERNAME,$FTPS_PASSWORD" "$FTPS_HOST" <<EOF
+set net:timeout 300
+set ftp:passive-mode true
+set ftp:ssl-allow true
 set ftp:ssl-protect-data true
 set ssl:verify-certificate no
 mkdir -p "$FTPS_BACKUP_PATH"
@@ -3039,14 +2868,13 @@ EOF
 
         # --- SFTP 上传, 使用 lftp ---
         if [[ "$BACKUP_TARGET_SFTP" == "true" ]]; then
-            if [[ -n "$SFTP_HOST" && -n "$SFTP_USERNAME" && -n "$SFTP_PASSWORD" && -n "$SFTP_BACKUP_PATH" ]]; then
+            if [[ -n "$SFTP_HOST" && -n "$SFTP_USERNAME" && -n "$SFTP_BACKUP_PATH" ]]; then
                 log_and_display "正在尝试上传到 SFTP 服务器：${SFTP_USERNAME}@${SFTP_HOST}:${SFTP_PORT}${SFTP_BACKUP_PATH}${archive_name}..."
                 local sftp_upload_output=""
                 local sftp_upload_status_code=1
                 
                 if { sftp_upload_output=$(lftp -p "$SFTP_PORT" -u "$SFTP_USERNAME,$SFTP_PASSWORD" "sftp://$SFTP_HOST" <<EOF
-set cmd:long-timeout 3600
-set cmd:timeout 300
+set net:timeout 300
 set sftp:auto-confirm yes
 mkdir -p "$SFTP_BACKUP_PATH"
 put -O "$SFTP_BACKUP_PATH" "$temp_archive_path"
@@ -3259,7 +3087,7 @@ check_auto_backup() {
     if [[ "$BACKUP_TARGET_WEBDAV" == "true" && -n "$WEBDAV_URL" && -n "$WEBDAV_USERNAME" && -n "$WEBDAV_PASSWORD" && -n "$WEBDAV_BACKUP_PATH" ]]; then any_target_enabled="true"; fi
     if [[ "$BACKUP_TARGET_FTP" == "true" && -n "$FTP_HOST" && -n "$FTP_USERNAME" && -n "$FTP_PASSWORD" && -n "$FTP_BACKUP_PATH" ]]; then any_target_enabled="true"; fi
     if [[ "$BACKUP_TARGET_FTPS" == "true" && -n "$FTPS_HOST" && -n "$FTPS_USERNAME" && -n "$FTPS_PASSWORD" && -n "$FTPS_BACKUP_PATH" ]]; then any_target_enabled="true"; fi
-    if [[ "$BACKUP_TARGET_SFTP" == "true" && -n "$SFTP_HOST" && -n "$SFTP_USERNAME" && -n "$SFTP_PASSWORD" && -n "$SFTP_BACKUP_PATH" ]]; then any_target_enabled="true"; fi
+    if [[ "$BACKUP_TARGET_SFTP" == "true" && -n "$SFTP_HOST" && -n "$SFTP_USERNAME" && -n "$SFTP_BACKUP_PATH" ]]; then any_target_enabled="true"; fi
 
 
     if [[ "$any_target_enabled" == "false" ]]; then
