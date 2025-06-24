@@ -132,6 +132,13 @@ press_enter_to_continue() {
     clear_screen
 }
 
+# NEW: URL解码函数
+# 参数 1: URL编码的字符串
+url_decode() {
+    local url_encoded="${1//+/ }"
+    printf '%b' "${url_encoded//%/\\x}"
+}
+
 # --- 配置保存和加载 ---
 
 # 保存配置到文件
@@ -326,7 +333,7 @@ send_telegram_message() {
         -d "parse_mode=Markdown" > /dev/null; then
         log_and_display "${GREEN}Telegram 消息发送成功。${NC}" "" "/dev/stderr"
     else
-        log_and_display "${RED}Telegram 消息发送失败！请检查 Bot Token 和 Chat ID，或网络连接。${NC}" "" "/dev/stderr"
+        log_and_display "${RED}Telegram 消息发送失败！请检查配置、凭证和网络连接。${NC}" "" "/dev/stderr"
     fi
 }
 
@@ -670,9 +677,7 @@ test_webdav_connection() {
     fi
 }
 
-# Helper function to list direct sub-folders AND files for WebDAV under a given URL
-# Parameter 1: The current full URL of the parent directory to list (e.g., "http://your.webdav.server/path/to/parent/")
-# Returns: List of content names (e.g., "myfolder (文件夹)", "myfile.txt (文件)") to stdout on success, empty list and non-zero exit on failure.
+# MODIFIED: Added URL decoding and robust parent filtering
 get_webdav_direct_contents() {
     local current_full_url="$1"
     
@@ -690,22 +695,28 @@ get_webdav_direct_contents() {
     fi
 
     if [ "$result_status" -eq 0 ] && [[ -n "$curl_output" ]]; then
-        # Escape the current_full_url for sed pattern matching
-        local current_full_url_escaped=$(echo "$current_full_url" | sed 's|/|\\/|g; s|\.|\\.|g; s|&|\\&|g')
+        local current_full_url_no_slash="${current_full_url%/}"
 
-        # Extract hrefs. Filter out the parent directory itself and then classify.
-        # hrefs ending with '/' are directories. Others are files.
         while IFS= read -r href; do
-            # MODIFIED: Use basename for robust parsing
-            local display_name
-            display_name=$(basename "$href")
+            # Decode the full href first
+            local decoded_href
+            decoded_href=$(url_decode "$href")
+            local decoded_href_no_slash="${decoded_href%/}"
+
+            # Skip the parent directory itself
+            if [[ "$decoded_href_no_slash" == "$current_full_url_no_slash" ]]; then
+                continue
+            fi
             
-            # Skip empty entries, and the parent directory itself which can be returned by some servers
-            if [[ -z "$display_name" || "$href" == "$current_full_url" ]]; then
+            # Get the display name from the decoded href
+            local display_name
+            display_name=$(basename "$decoded_href_no_slash")
+            
+            if [[ -z "$display_name" ]]; then
                 continue
             fi
 
-            if [[ "$href" =~ /$ ]]; then # It's a directory
+            if [[ "$decoded_href" =~ /$ ]]; then # It's a directory
                 contents+=("${display_name} (文件夹)")
             else # It's a file
                 contents+=("${display_name} (文件)")
