@@ -35,7 +35,9 @@ declare -a RCLONE_TARGETS_METADATA_ARRAY=()
 RCLONE_TARGETS_METADATA_STRING=""
 
 
-# Telegram 通知变量
+# --- Telegram 通知变量 ---
+# [MODIFIED] 新增 Telegram 通知开关
+TELEGRAM_ENABLED="false"
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
 
@@ -117,7 +119,6 @@ save_config() {
     BACKUP_SOURCE_PATHS_STRING=$(IFS=';;'; echo "${BACKUP_SOURCE_PATHS_ARRAY[*]}")
     RCLONE_TARGETS_STRING=$(IFS=';;'; echo "${RCLONE_TARGETS_ARRAY[*]}")
     ENABLED_RCLONE_TARGET_INDICES_STRING=$(IFS=';;'; echo "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[*]}")
-    # [NEW] 转换元数据数组为字符串
     RCLONE_TARGETS_METADATA_STRING=$(IFS=';;'; echo "${RCLONE_TARGETS_METADATA_ARRAY[*]}")
 
     {
@@ -128,8 +129,9 @@ save_config() {
         echo "RETENTION_VALUE=$RETENTION_VALUE"
         echo "RCLONE_TARGETS_STRING=\"$RCLONE_TARGETS_STRING\""
         echo "ENABLED_RCLONE_TARGET_INDICES_STRING=\"$ENABLED_RCLONE_TARGET_INDICES_STRING\""
-        # [NEW] 保存元数据
         echo "RCLONE_TARGETS_METADATA_STRING=\"$RCLONE_TARGETS_METADATA_STRING\""
+        # [MODIFIED] 保存 Telegram 开关状态
+        echo "TELEGRAM_ENABLED=\"$TELEGRAM_ENABLED\""
         echo "TELEGRAM_BOT_TOKEN=\"$TELEGRAM_BOT_TOKEN\""
         echo "TELEGRAM_CHAT_ID=\"$TELEGRAM_CHAT_ID\""
     } > "$CONFIG_FILE"
@@ -174,7 +176,6 @@ load_config() {
             ENABLED_RCLONE_TARGET_INDICES_ARRAY=()
         fi
         
-        # [NEW] 加载元数据，并处理向后兼容
         if [[ -n "$RCLONE_TARGETS_METADATA_STRING" ]]; then
             IFS=';;'; read -r -a RCLONE_TARGETS_METADATA_ARRAY <<< "$RCLONE_TARGETS_METADATA_STRING"
         fi
@@ -184,7 +185,6 @@ load_config() {
             log_and_display "检测到旧版配置，正在更新目标元数据..." "${YELLOW}"
             local temp_meta_array=()
             for i in "${!RCLONE_TARGETS_ARRAY[@]}"; do
-                # 如果某个位置的元数据不存在，则填充默认值
                 local meta="${RCLONE_TARGETS_METADATA_ARRAY[$i]:-手动添加}"
                 temp_meta_array+=("$meta")
             done
@@ -206,7 +206,7 @@ check_dependencies() {
     command -v realpath &> /dev/null || missing_deps+=("realpath")
     command -v rclone &> /dev/null || missing_deps+=("rclone") # 主要依赖
 
-    if [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
+    if [[ "$TELEGRAM_ENABLED" == "true" ]]; then
         command -v curl &> /dev/null || missing_deps+=("curl (用于Telegram)")
     fi
 
@@ -222,14 +222,19 @@ check_dependencies() {
 
 # 发送 Telegram 消息
 send_telegram_message() {
+    # [MODIFIED] Bug Fix: 更改返回值为 0，以防止在 set -e 模式下退出脚本
+    if [[ "$TELEGRAM_ENABLED" != "true" ]]; then
+        return 0 # 禁用是正常行为，不应返回错误码
+    fi
+
     local message_content="$1"
     if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
-        log_and_display "${YELLOW}Telegram 通知未配置，跳过发送消息。${NC}" "" "/dev/stderr"
-        return 1
+        log_and_display "${YELLOW}Telegram 通知已启用，但凭证未配置，跳过发送消息。${NC}" "" "/dev/stderr"
+        return 0 # 未配置凭证是用户选择，不应返回错误码
     fi
     if ! command -v curl &> /dev/null; then
-        log_and_display "${RED}错误：发送 Telegram 消息需要 'curl'。${NC}" "" "/dev/stderr"
-        return 1
+        log_and_display "${RED}错误：发送 Telegram 消息需要 'curl'，但未安装。${NC}" "" "/dev/stderr"
+        return 1 # 依赖缺失是真正的错误
     fi
     log_and_display "正在发送 Telegram 消息..." "" "/dev/stderr"
     if curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
@@ -262,11 +267,20 @@ set_auto_backup_interval() {
 manual_backup() {
     display_header
     echo -e "${BLUE}=== 2. 手动备份 ===${NC}"
+
     if [ ${#BACKUP_SOURCE_PATHS_ARRAY[@]} -eq 0 ]; then
         log_and_display "${RED}错误：没有设置任何备份源路径。${NC}"
+        log_and_display "${YELLOW}请先使用选项 [3] 添加要备份的路径。${NC}"
         press_enter_to_continue
         return 1
     fi
+    if [ ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} -eq 0 ]; then
+        log_and_display "${RED}错误：没有启用任何 Rclone 备份目标。${NC}"
+        log_and_display "${YELLOW}请先使用选项 [5] -> [1] 来配置并启用一个或多个目标。${NC}"
+        press_enter_to_continue
+        return 1
+    fi
+
     perform_backup "手动备份"
     press_enter_to_continue
 }
@@ -406,7 +420,6 @@ display_compression_info() {
 # ===         在脚本内创建 Rclone 远程端 (增强版)           ===
 # ================================================================
 
-# [NEW] 创建远程端后，提示并添加为备份目标的辅助函数
 prompt_and_add_target() {
     local remote_name="$1"
     local source_of_creation="$2" # "由助手创建"
@@ -831,7 +844,7 @@ get_rclone_direct_contents() {
     return 0
 }
 
-# 交互式选择 Rclone 路径
+# [MODIFIED] Bug Fix: 交互式选择 Rclone 路径，修复了路径处理逻辑
 choose_rclone_path() {
     local remote_name="$1"
     local current_remote_path="/"
@@ -874,7 +887,14 @@ choose_rclone_path() {
         case "$choice" in
             "m" | "M" )
                 if [[ "$current_remote_path" != "/" ]]; then
-                    current_remote_path=$(realpath -m "${current_remote_path}/../")
+                    # 使用 dirname 安全地返回上一级
+                    local parent_dir
+                    parent_dir=$(dirname "${current_remote_path%/}")
+                    if [[ "$parent_dir" != "/" ]]; then
+                        current_remote_path="${parent_dir}/"
+                    else
+                        current_remote_path="/"
+                    fi
                 fi
                 ;;
             [0-9]* )
@@ -883,8 +903,12 @@ choose_rclone_path() {
                     if echo "$chosen_item" | grep -q " (文件夹)$"; then
                         local chosen_folder
                         chosen_folder=$(echo "$chosen_item" | sed 's/\ (文件夹)$//')
-                        current_remote_path="${current_remote_path}${chosen_folder}/"
-                        current_remote_path=$(realpath -m "$current_remote_path")
+                        # 手动拼接路径，避免 realpath 的问题
+                        if [[ "$current_remote_path" == "/" ]]; then
+                             current_remote_path="/${chosen_folder}/"
+                        else
+                             current_remote_path="${current_remote_path}${chosen_folder}/"
+                        fi
                     else
                         log_and_display "${YELLOW}不能进入文件。${NC}"; press_enter_to_continue
                     fi
@@ -897,8 +921,14 @@ choose_rclone_path() {
                 break
                 ;;
             [aA] )
-                read -rp "请输入新的目标路径 (绝对路径, e.g., /backups/): " new_path_input
-                final_selected_path=$(realpath -m "$new_path_input")
+                read -rp "请输入新的目标路径 (e.g., /backups/path/): " new_path_input
+                # 标准化用户输入
+                local new_path="$new_path_input"
+                if [[ "${new_path:0:1}" != "/" ]]; then
+                    new_path="/${new_path}"
+                fi
+                new_path=$(echo "$new_path" | sed 's#//#/#g')
+                final_selected_path="$new_path"
                 break
                 ;;
             [xX] ) return 1 ;;
@@ -930,7 +960,6 @@ view_and_manage_rclone_targets() {
                     fi
                 done
 
-                # [MODIFIED] 显示目标和其来源元数据
                 local metadata="${RCLONE_TARGETS_METADATA_ARRAY[$i]}"
                 echo -n "$((i+1)). ${RCLONE_TARGETS_ARRAY[$i]} "
                 if [[ -n "$metadata" ]]; then
@@ -964,7 +993,6 @@ view_and_manage_rclone_targets() {
                 elif choose_rclone_path "$remote_name"; then
                     local remote_path="$CHOSEN_RCLONE_PATH"
                     RCLONE_TARGETS_ARRAY+=("${remote_name}:${remote_path}")
-                    # [NEW] 为手动添加的目标设置元数据
                     RCLONE_TARGETS_METADATA_ARRAY+=("手动添加")
                     needs_saving="true"
                     log_and_display "${GREEN}已成功添加目标: ${remote_name}:${remote_path}${NC}"
@@ -982,7 +1010,6 @@ view_and_manage_rclone_targets() {
                     read -rp "确定要删除目标 '${RCLONE_TARGETS_ARRAY[$deleted_index]}' 吗? (y/N): " confirm
                     if [[ "$confirm" =~ ^[Yy]$ ]]; then
                         unset 'RCLONE_TARGETS_ARRAY[$deleted_index]'
-                        # [NEW] 同时删除对应的元数据
                         unset 'RCLONE_TARGETS_METADATA_ARRAY[$deleted_index]'
                         RCLONE_TARGETS_ARRAY=("${RCLONE_TARGETS_ARRAY[@]}")
                         RCLONE_TARGETS_METADATA_ARRAY=("${RCLONE_TARGETS_METADATA_ARRAY[@]}")
@@ -1075,7 +1102,7 @@ test_rclone_remotes() {
 
         if [ ${#remotes_list[@]} -eq 0 ]; then
             log_and_display "${YELLOW}未发现任何已配置的 Rclone 远程端。${NC}"
-            log_and_display "请先使用 '创建新的 Rclone 远程端' 或 'rclone config' 进行配置。"
+            log_and_display "请先使用 '[助手] 创建新的 Rclone 远程端' 或 'rclone config' 进行配置。"
             press_enter_to_continue
             break
         fi
@@ -1096,11 +1123,17 @@ test_rclone_remotes() {
             local remote_to_test="${remotes_list[$((choice-1))]}"
             log_and_display "正在测试 '${remote_to_test}'..." "${YELLOW}"
 
-            if rclone about "${remote_to_test}:" >/dev/null 2>&1; then
+            # [MODIFIED] 使用更可靠的 lsjson 命令进行核心连接测试
+            if rclone lsjson --max-depth 1 "${remote_to_test}:" >/dev/null 2>&1; then
                 log_and_display "连接测试成功！ '${remote_to_test}' 可用。" "${GREEN}"
-                echo -e "${GREEN}--- Rclone About Info ---${NC}"
-                rclone about "${remote_to_test}:"
-                echo -e "${GREEN}-------------------------${NC}"
+                
+                # 尝试获取并显示详细信息，但不将其作为测试失败的依据
+                echo -e "${GREEN}--- 详细信息 (部分后端可能不支持) ---${NC}"
+                if ! rclone about "${remote_to_test}:"; then
+                    echo "无法获取详细的存储空间信息。"
+                fi
+                echo -e "${GREEN}-------------------------------------------${NC}"
+
             else
                 log_and_display "连接测试失败！" "${RED}"
                 log_and_display "请检查远程端配置 ('rclone config') 或网络连接。"
@@ -1141,18 +1174,72 @@ set_cloud_storage() {
 
 # 6. 设置 Telegram 通知设定
 set_telegram_notification() {
-    display_header
-    echo -e "${BLUE}=== 6. 消息通知设定 (Telegram) ===${NC}"
-    log_and_display "${YELLOW}凭证将保存到本地配置文件！${NC}"
-    read -rp "请输入 Telegram Bot Token [当前: ${TELEGRAM_BOT_TOKEN}]: " input_token
-    TELEGRAM_BOT_TOKEN="${input_token:-$TELEGRAM_BOT_TOKEN}"
+    local needs_saving="false"
+    while true; do
+        display_header
+        echo -e "${BLUE}=== 6. 消息通知设定 (Telegram) ===${NC}"
+        
+        local status_text
+        if [[ "$TELEGRAM_ENABLED" == "true" ]]; then
+            status_text="${GREEN}已启用${NC}"
+        else
+            status_text="${YELLOW}已禁用${NC}"
+        fi
+        echo -e "当前状态: ${status_text}"
+        echo -e "Bot Token: ${TELEGRAM_BOT_TOKEN}"
+        echo -e "Chat ID:   ${TELEGRAM_CHAT_ID}"
+        echo ""
+        
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+        if [[ "$TELEGRAM_ENABLED" == "true" ]]; then
+            echo -e "  1. ${YELLOW}禁用通知${NC}"
+        else
+            echo -e "  1. ${GREEN}启用通知${NC}"
+        fi
+        echo -e "  2. ${YELLOW}设置/修改凭证 (Token 和 Chat ID)${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  0. ${RED}保存并返回${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        read -rp "请输入选项: " choice
 
-    read -rp "请输入 Telegram Chat ID [当前: ${TELEGRAM_CHAT_ID}]: " input_chat_id
-    TELEGRAM_CHAT_ID="${input_chat_id:-$TELEGRAM_CHAT_ID}"
+        case $choice in
+            1) # 启用/禁用
+                if [[ "$TELEGRAM_ENABLED" == "true" ]]; then
+                    TELEGRAM_ENABLED="false"
+                    log_and_display "Telegram 通知已禁用。" "${YELLOW}"
+                else
+                    TELEGRAM_ENABLED="true"
+                    log_and_display "Telegram 通知已启用。" "${GREEN}"
+                fi
+                needs_saving="true"
+                press_enter_to_continue
+                ;;
+            2) # 设置凭证
+                log_and_display "${YELLOW}凭证将保存到本地配置文件！${NC}"
+                read -rp "请输入新的 Telegram Bot Token [留空不修改]: " input_token
+                # 如果用户输入了内容，则更新；否则保持原样
+                TELEGRAM_BOT_TOKEN="${input_token:-$TELEGRAM_BOT_TOKEN}"
 
-    save_config
-    log_and_display "${GREEN}Telegram 通知配置已更新并保存。${NC}"
-    press_enter_to_continue
+                read -rp "请输入新的 Telegram Chat ID [留空不修改]: " input_chat_id
+                TELEGRAM_CHAT_ID="${input_chat_id:-$TELEGRAM_CHAT_ID}"
+
+                log_and_display "${GREEN}Telegram 凭证已更新。${NC}"
+                needs_saving="true"
+                press_enter_to_continue
+                ;;
+            0) # 返回
+                if [[ "$needs_saving" == "true" ]]; then
+                    save_config
+                    log_and_display "Telegram 设置已保存。" "${BLUE}"
+                fi
+                break
+                ;;
+            *)
+                log_and_display "${RED}无效选项。${NC}"
+                press_enter_to_continue
+                ;;
+        esac
+    done
 }
 
 # 7. 设置备份保留策略
@@ -1232,15 +1319,18 @@ apply_retention_policy() {
         local rclone_target="${RCLONE_TARGETS_ARRAY[$enabled_idx]}"
         log_and_display "正在为目标 ${rclone_target} 应用保留策略..."
 
+        # [MODIFIED] 使用更兼容的 lsf 命令，不再依赖 --format "p;T"
         local backups_list
-        backups_list=$(rclone lsf --format "p;T" "${rclone_target}" | grep -E '_[0-9]{14}\.zip;')
+        backups_list=$(rclone lsf --files-only "${rclone_target}" | grep -E '_[0-9]{14}\.zip$')
+        
         if [[ -z "$backups_list" ]]; then
             log_and_display "在 ${rclone_target} 中未找到备份文件，跳过。" "${YELLOW}"
             continue
         fi
 
+        # 由于时间戳在文件名中，直接排序即可
         local sorted_backups
-        sorted_backups=$(echo "$backups_list" | sort -t ';' -k 2)
+        sorted_backups=$(echo "$backups_list" | sort)
 
         local backups_to_process=()
         mapfile -t backups_to_process <<< "$sorted_backups"
@@ -1253,10 +1343,15 @@ apply_retention_policy() {
             if [ "$num_to_delete" -gt 0 ]; then
                 log_and_display "发现 ${num_to_delete} 个旧备份，将删除..." "${YELLOW}"
                 for (( i=0; i<num_to_delete; i++ )); do
-                    local file_path_to_delete
-                    file_path_to_delete=$(echo "${backups_to_process[$i]}" | cut -d ';' -f 1)
-                    log_and_display "正在删除: ${rclone_target}${file_path_to_delete}"
-                    if rclone deletefile "${rclone_target}${file_path_to_delete}"; then
+                    local file_path_to_delete="${backups_to_process[$i]}"
+                    
+                    local target_path_for_delete="${rclone_target}"
+                    if [[ "${target_path_for_delete: -1}" != "/" ]]; then
+                        target_path_for_delete+="/"
+                    fi
+                    
+                    log_and_display "正在删除: ${target_path_for_delete}${file_path_to_delete}"
+                    if rclone deletefile "${target_path_for_delete}${file_path_to_delete}"; then
                         deleted_count=$((deleted_count + 1))
                     fi
                 done
@@ -1266,14 +1361,20 @@ apply_retention_policy() {
             local cutoff_timestamp=$(( current_timestamp - RETENTION_VALUE * 24 * 3600 ))
             log_and_display "将删除 ${RETENTION_VALUE} 天前的备份..." "${YELLOW}"
             for item in "${backups_to_process[@]}"; do
-                local file_path file_date file_timestamp
-                file_path=$(echo "$item" | cut -d ';' -f 1)
-                file_date=$(echo "$item" | cut -d ';' -f 2 | cut -d 'T' -f 1)
-                file_timestamp=$(date -d "$file_date" +%s)
+                # [MODIFIED] 从文件名中提取时间戳
+                local timestamp_str
+                timestamp_str=$(echo "$item" | grep -o -E '[0-9]{14}')
+                local file_timestamp
+                file_timestamp=$(date -d "${timestamp_str}" +%s 2>/dev/null || echo 0)
 
-                if [[ "$file_timestamp" -lt "$cutoff_timestamp" ]]; then
-                    log_and_display "正在删除: ${rclone_target}${file_path}"
-                    if rclone deletefile "${rclone_target}${file_path}"; then
+                if [[ "$file_timestamp" -ne 0 && "$file_timestamp" -lt "$cutoff_timestamp" ]]; then
+                    local target_path_for_delete="${rclone_target}"
+                    if [[ "${target_path_for_delete: -1}" != "/" ]]; then
+                        target_path_for_delete+="/"
+                    fi
+
+                    log_and_display "正在删除: ${target_path_for_delete}${item}"
+                    if rclone deletefile "${target_path_for_delete}${item}"; then
                         deleted_count=$((deleted_count + 1))
                     fi
                 fi
@@ -1336,13 +1437,25 @@ perform_backup() {
 
         local backup_file_size
         backup_file_size=$(du -h "$temp_archive_path" | awk '{print $1}')
+        
+        local num_enabled_targets=${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}
+        log_and_display "压缩完成 (大小: ${backup_file_size})。准备上传到 ${num_enabled_targets} 个已启用的目标..." "${GREEN}"
+
         local path_summary_message="*${SCRIPT_NAME}：路径处理*\n路径: \`${current_backup_path}\`\n文件: \`${archive_name}\` (${backup_file_size})\n\n*上传状态:*"
 
         local upload_statuses=""
         for enabled_idx in "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}"; do
             local rclone_target="${RCLONE_TARGETS_ARRAY[$enabled_idx]}"
-            log_and_display "正在上传到 Rclone 目标: ${rclone_target}"
-            if rclone copyto "$temp_archive_path" "${rclone_target}${archive_name}" --progress; then
+            
+            # [MODIFIED] Bug Fix: 确保目标路径以斜杠结尾
+            local destination_path="${rclone_target}"
+            if [[ "${destination_path: -1}" != "/" ]]; then
+                destination_path+="/"
+            fi
+
+            log_and_display "正在上传到 Rclone 目标: ${destination_path}"
+            # Rclone 的 --progress 会自动显示上传进度条
+            if rclone copyto "$temp_archive_path" "${destination_path}${archive_name}" --progress; then
                 log_and_display "${GREEN}上传到 ${rclone_target} 成功！${NC}"
                 upload_statuses+="\n- \`${rclone_target}\`: 成功"
                 any_upload_succeeded_for_path="true"
@@ -1415,7 +1528,16 @@ show_main_menu() {
     echo -e "  3. ${YELLOW}自定义备份路径${NC} (数量: ${#BACKUP_SOURCE_PATHS_ARRAY[@]})"
     echo -e "  4. ${YELLOW}压缩包格式${NC} (ZIP)"
     echo -e "  5. ${YELLOW}云存储设定${NC} (Rclone)"
-    echo -e "  6. ${YELLOW}消息通知设定${NC} (Telegram)"
+
+    # [MODIFIED] 在主菜单中显示 Telegram 的启用/禁用状态
+    local telegram_status_text
+    if [[ "$TELEGRAM_ENABLED" == "true" ]]; then
+        telegram_status_text="${GREEN}已启用${NC}"
+    else
+        telegram_status_text="${YELLOW}已禁用${NC}"
+    fi
+    echo -e "  6. ${YELLOW}消息通知设定${NC} (Telegram, 当前: ${telegram_status_text})"
+
     local retention_status_text="已禁用"
     if [[ "$RETENTION_POLICY_TYPE" == "count" ]]; then
         retention_status_text="保留 ${RETENTION_VALUE} 个"
