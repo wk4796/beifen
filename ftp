@@ -556,6 +556,11 @@ test_s3_r2_connection() {
     unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
 
     if [ "$test_status" -eq 0 ]; then
+        # NEW: Check for API error even on exit 0
+        if echo "$test_output" | grep -q 'Error'; then
+             log_and_display "${RED}S3/R2 连接失败！服务器返回错误。请检查配置、凭证和网络连接。错误信息: ${test_output}${NC}" "" "/dev/stderr"
+             return 1
+        fi
         log_and_display "${GREEN}S3/R2 连接成功！${NC}" "" "/dev/stderr"
         return 0
     else
@@ -564,25 +569,21 @@ test_s3_r2_connection() {
     fi
 }
 
-# Helper function to list direct sub-folders AND files for S3/R2 under a given prefix
-# Parameter 1: The parent prefix to list from (e.g., "", "myfolder/")
-# Returns: List of content names (e.g., "myfolder (文件夹)", "myfile.txt (文件)") to stdout on success, empty list and non-zero exit on failure.
+# MODIFIED: Added detailed JSON error checking from the API response.
 get_s3_r2_direct_contents() {
     local parent_prefix="$1"
-    # Ensure parent_prefix doesn't start with / for S3 API calls, but does end with / for consistent prefix matching
-    parent_prefix="${parent_prefix#/}" # Remove leading slash
+    parent_prefix="${parent_prefix#/}" 
     if [[ -n "$parent_prefix" && "${parent_prefix: -1}" != "/" ]]; then
         parent_prefix="${parent_prefix}/"
     fi
-    # If parent_prefix is empty, it means root, and we don't want an extra slash in API calls
     if [[ -z "$parent_prefix" ]]; then
         parent_prefix=""
     fi
 
     export AWS_ACCESS_KEY_ID="$S3_ACCESS_KEY"
     export AWS_SECRET_ACCESS_KEY="$S3_SECRET_KEY"
-    local contents=() # To store both folders and files, with type indicator
-    local result_status=1 # Assume failure
+    local contents=()
+    local result_status=1
 
     log_and_display "正在尝试获取 S3/R2 中 '${parent_prefix:-根目录}' 的直接子文件夹和文件..." "${BLUE}" "/dev/stderr"
 
@@ -591,110 +592,58 @@ get_s3_r2_direct_contents() {
 
     if command -v aws &> /dev/null; then
         if command -v jq &> /dev/null; then
-            # Use aws s3api list-objects-v2 to get CommonPrefixes (folders) and Contents (files)
             if { cmd_output=$(aws s3api list-objects-v2 \
                 --bucket "$S3_BUCKET_NAME" \
                 --prefix "$parent_prefix" \
                 --delimiter '/' \
                 --endpoint-url "$S3_ENDPOINT" \
-                --query '{CommonPrefixes: CommonPrefixes[].Prefix, Contents: Contents[].Key}' \
-                --output json 2>&1); } then
+                --output json 2>&1); }; then
                 cmd_status=0
             else
                 cmd_status=$?
-                log_and_display "${RED}S3/R2 列表失败 (awscli + jq)！请检查桶名、路径、端点、权限或 jq 安装。错误: ${cmd_output}${NC}" "" "/dev/stderr"
+                log_and_display "${RED}S3/R2 列表失败 (awscli 执行错误)！请检查命令或网络。错误: ${cmd_output}${NC}" "" "/dev/stderr"
                 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
                 return 1
             fi
 
             if [ "$cmd_status" -eq 0 ]; then
-                local folders_json=$(echo "$cmd_output" | jq -r '.CommonPrefixes[] | select(. != null)' 2>/dev/null)
-                local files_json=$(echo "$cmd_output" | jq -r '.Contents[] | select(. != null)' 2>/dev/null)
+                # --- NEW: Check for API-level errors in the JSON response ---
+                if [[ $(echo "$cmd_output" | jq 'has("Error")') == "true" && $(echo "$cmd_output" | jq '.Error | select(. != null)') != "null" ]]; then
+                    local error_code=$(echo "$cmd_output" | jq -r '.Error.Code')
+                    local error_message=$(echo "$cmd_output" | jq -r '.Error.Message')
+                    log_and_display "${RED}S3/R2 API 返回错误！\n代码: ${error_code}\n消息: ${error_message}${NC}" "" "/dev/stderr"
+                    log_and_display "${YELLOW}请检查您的 Access Key, Secret Key, 桶名, 和存储桶权限。${NC}" "" "/dev/stderr"
+                    unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+                    return 1
+                fi
 
-                # Add folders, stripping parent_prefix and adding type suffix
+                # Continue with normal parsing if no error
+                local folders_json=$(echo "$cmd_output" | jq -r '.CommonPrefixes[].Prefix | select(. != null)' 2>/dev/null)
+                local files_json=$(echo "$cmd_output" | jq -r '.Contents[].Key | select(. != null)' 2>/dev/null)
+                
                 if [[ -n "$folders_json" ]]; then
-                    # We expect 'CommonPrefixes' to already end with '/', so remove parent_prefix and then remove trailing slash for clean name.
                     mapfile -t -O "${#contents[@]}" contents <<< "$(echo "$folders_json" | sed "s|^${parent_prefix}||" | sed 's|/$||' | grep -E '\S' | awk '{print $1" (文件夹)"}')"
                 fi
                 
-                # Add files, stripping parent_prefix and filtering out directory entries themselves
                 if [[ -n "$files_json" ]]; then
-                    mapfile -t -O "${#contents[@]}" contents <<< "$(echo "$files_json" | sed "s|^${parent_prefix}||" | grep -E '\S' | awk '{print $1" (文件)"}' | grep -v '^$' | grep -v '^\.\.?$')"
+                    mapfile -t -O "${#contents[@]}" contents <<< "$(echo "$files_json" | sed "s|^${parent_prefix}||" | grep -E '\S' | awk '{print $1" (文件)"}' | grep -vF "${parent_prefix%/}" | grep -v '^$' | grep -v '^\.\.?$')"
                 fi
 
-                # Sort the combined list alphabetically
                 IFS=$'\n' contents=($(sort <<<"${contents[*]}"))
                 unset IFS
-                
-                result_status=0 # Success
+                result_status=0
             fi
-        else # Fallback without jq (less robust)
-            log_and_display "${YELLOW}未找到 'jq' 命令，尝试使用不那么健壮的 'aws s3 ls'。${NC}" "" "/dev/stderr"
-            if { cmd_output=$(aws s3 ls "s3://${S3_BUCKET_NAME}/${parent_prefix}" --endpoint-url "$S3_ENDPOINT" 2>&1); } then
-                cmd_status=0
-            else
-                cmd_status=$?
-                log_and_display "${RED}S3/R2 列表失败 (awscli without jq)！请检查桶名、路径、端点或权限。错误: ${cmd_output}${NC}" "" "/dev/stderr"
-                unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
-                return 1
-            fi
-
-            if [ "$cmd_status" -eq 0 ]; then
-                # Parse lines: 'PRE folder_name/' for directories, size date time file_name for files
-                while IFS= read -r line; do
-                    if [[ "$line" =~ ^PRE\ (.*)/$ ]]; then
-                        local folder_name="${BASH_REMATCH[1]}"
-                        contents+=("${folder_name} (文件夹)")
-                    elif [[ "$line" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}\ +[0-9]+\ +(.+)$ ]]; then
-                        local file_name="${BASH_REMATCH[1]}"
-                        contents+=("${file_name} (文件)")
-                    fi
-                done <<< "$(echo "$cmd_output" | sed "s|^${parent_prefix}||" | grep -v '^\.$' | grep -v '^\.\.$')"
-                
-                # Sort the combined list
-                IFS=$'\n' contents=($(sort <<<"${contents[*]}"))
-                unset IFS
-                
-                result_status=0 # Success
-            fi
-        fi
-    elif command -v s3cmd &> /dev/null; then
-        log_and_display "${YELLOW}正在使用 s3cmd 尝试列出 S3/R2 子文件夹和文件。此方法可能不如awscli全面。${NC}" "" "/dev/stderr"
-        if { cmd_output=$(s3cmd ls "s3://${S3_BUCKET_NAME}/${parent_prefix}" 2>&1); } then
-            cmd_status=0
-        else
-            cmd_status=$?
-            log_and_display "${RED}S3/R2 列表失败 (s3cmd)！请检查桶名、路径、端点或权限。错误: ${cmd_output}${NC}" "" "/dev/stderr"
-            unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+        else 
+            log_and_display "${RED}S3/R2 列表功能需要 'jq'，请安装。例如: sudo apt install jq${NC}" "" "/dev/stderr"
             return 1
         fi
-        if [ "$cmd_status" -eq 0 ]; then
-            while IFS= read -r line; do
-                local item_path_full=$(echo "$line" | awk '{print $NF}')
-                local item_path_relative=$(echo "$item_path_full" | sed 's|s3://'"${S3_BUCKET_NAME//./\\.}"'/'"${parent_prefix//./\\.}"'|\?||' | sed 's|/$||' | grep -v '^$' | grep -v '^\.\.?$')
-                if [[ -n "$item_path_relative" ]]; then
-                    if [[ "$line" =~ \ /$ ]]; then # Directories end with '/' in s3cmd ls output (before sed)
-                        contents+=("${item_path_relative} (文件夹)")
-                    else
-                        contents+=("${item_path_relative} (文件)")
-                    fi
-                fi
-            done <<< "$cmd_output"
-            
-            # Sort the combined list
-            IFS=$'\n' contents=($(sort <<<"${contents[*]}"))
-            unset IFS
-
-            result_status=0 # Success
-        fi
     else
-        log_and_display "${RED}未找到 'awscli' 或 's3cmd' 命令，无法列出 S3/R2 文件夹和文件。${NC}" "" "/dev/stderr"
+        log_and_display "${RED}未找到 'awscli' 命令，无法列出 S3/R2 文件夹和文件。${NC}" "" "/dev/stderr"
     fi
     unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
 
-    # Output found contents
     printf '%s\n' "${contents[@]}"
-    return "$result_status" # Return 0 for success, 1 for failure
+    return "$result_status"
 }
 
 
@@ -1023,34 +972,33 @@ EOF
 # ===         增强型路径选择函数 (交互式浏览)              ===
 # ================================================================
 
+# MODIFIED: Refactored to use realpath for robust path manipulation
 choose_s3_r2_path() {
-    local initial_path="${S3_BACKUP_PATH:-/}" # Start from currently configured path or root
+    local initial_path="${S3_BACKUP_PATH:-/}"
     local current_remote_path="$initial_path"
-    local final_selected_path="" # The path user finally confirms
-
-    # Normalize initial path: ensure it starts with / and ends with / if not root
-    if [[ "${current_remote_path:0:1}" != "/" ]]; then
-        current_remote_path="/$current_remote_path"
-    fi
-    if [[ "$current_remote_path" != "/" && "${current_remote_path: -1}" != "/" ]]; then
-        current_remote_path="${current_remote_path}/"
-    fi
+    local final_selected_path=""
 
     while true; do
+        # --- FIX: NORMALIZE PATH using realpath -m ---
+        current_remote_path=$(realpath -m "$current_remote_path")
+        if [[ "$current_remote_path" != "/" && "${current_remote_path: -1}" != "/" ]]; then
+            current_remote_path="${current_remote_path}/"
+        fi
+
         display_header
         echo -e "${BLUE}=== 设置 S3/R2 备份目标路径 ===${NC}"
         echo -e "当前浏览路径: ${YELLOW}${current_remote_path:-/}${NC}\n"
 
         # S3 prefixes don't usually start with /
         local s3_display_path="${current_remote_path#/}"
-        local remote_contents_str=$(get_s3_r2_direct_contents "$s3_display_path") # 调用新的函数
+        local remote_contents_str=$(get_s3_r2_direct_contents "$s3_display_path")
         local get_contents_status=$?
         local remote_contents_array=()
 
         if [ "$get_contents_status" -ne 0 ]; then
             log_and_display "${RED}获取 S3/R2 文件夹和文件列表失败，请检查配置或重试。${NC}"
             press_enter_to_continue
-            continue # Continue the while loop to re-display options
+            continue
         elif [[ -n "$remote_contents_str" ]]; then
             mapfile -t remote_contents_array <<< "$remote_contents_str"
         fi
@@ -1080,56 +1028,47 @@ choose_s3_r2_path() {
         case "$choice" in
             "m" | "M" )
                 if [[ "$current_remote_path" != "/" ]]; then
-                    current_remote_path="${current_remote_path%/}"
-                    current_remote_path="$(dirname "$current_remote_path")"
-                    if [[ "$current_remote_path" == "." ]]; then
-                        current_remote_path="/"
-                    else
-                        current_remote_path="${current_remote_path}/"
-                    fi
-                    log_and_display "已返回上一级目录: ${current_remote_path:-/}" "${BLUE}"
+                    current_remote_path=$(realpath -m "${current_remote_path}/../")
+                    log_and_display "已返回上一级目录: ${current_remote_path}" "${BLUE}"
                 else
                     log_and_display "${YELLOW}已在根目录，无法返回上一级。${NC}"
                 fi
                 press_enter_to_continue
                 ;;
-            [0-9]* ) # If it's a number, try to navigate into it if it's a folder
+            [0-9]* )
                 if [ "$choice" -ge 1 ] && [ "$choice" -le ${#remote_contents_array[@]} ]; then
                     local chosen_item_with_type="${remote_contents_array[$((choice-1))]}"
-                    # Check if the chosen item is a directory by looking for the " (文件夹)" suffix
                     if echo "$chosen_item_with_type" | grep -q " (文件夹)$"; then
                         local chosen_folder="$(echo "$chosen_item_with_type" | sed 's/\ (文件夹)$//')"
-                        current_remote_path="${current_remote_path}${chosen_folder}/" # Append the clean folder name and ensure slash
-                        log_and_display "已进入目录: ${current_remote_path}" "${GREEN}"
+                        current_remote_path="${current_remote_path}${chosen_folder}/"
+                        log_and_display "已进入目录..." "${GREEN}"
                     else
                         log_and_display "${YELLOW}您选择的是一个文件，不能进入。请选择一个文件夹或按 'k' 键确认当前目录。${NC}"
+                        press_enter_to_continue
                     fi
                 else
                     log_and_display "${RED}无效的数字序号，请重新输入。${NC}"
+                    press_enter_to_continue
                 fi
-                press_enter_to_continue
                 ;;
             [kK] )
                 final_selected_path="$current_remote_path"
-                break # Exit the while loop to confirm
+                break
                 ;;
             [aA] )
                 read -rp "请输入新的 S3/R2 目标路径（绝对路径或相对于 '${current_remote_path:-/}'）：" new_path_input
-                if [[ "$new_path_input" =~ ^/ ]]; then # Absolute path
-                    final_selected_path="$new_path_input"
-                else # Relative path
-                    local base_for_relative="${current_remote_path%/}"
-                    final_selected_path="${base_for_relative}/${new_path_input}"
+                if [[ ! "$new_path_input" =~ ^/ ]]; then
+                    new_path_input="${current_remote_path}${new_path_input}"
                 fi
-                # Ensure selected path ends with a slash if it's not root and not explicitly a file name
-                if [[ -n "$final_selected_path" && "$final_selected_path" != "/" && "${final_selected_path: -1}" != "/" ]]; then
+                final_selected_path=$(realpath -m "$new_path_input")
+                if [[ "$final_selected_path" != "/" && "${final_selected_path: -1}" != "/" ]]; then
                     final_selected_path="${final_selected_path}/"
                 fi
-                break # Exit the while loop to confirm
+                break
                 ;;
             [xX] )
                 log_and_display "取消设置 S3/R2 备份路径。" "${BLUE}"
-                return 1 # Indicate cancellation
+                return 1
                 ;;
             * )
                 log_and_display "${RED}无效的输入，请重新输入。${NC}"
@@ -1138,17 +1077,17 @@ choose_s3_r2_path() {
         esac
     done
 
-    # Final confirmation after loop exit
     local display_path_confirm="${final_selected_path:-/ (根目录)}"
     read -rp "最终确认您选择的 S3/R2 目标路径是 '${display_path_confirm}'。确认吗？(y/N): " confirm_path
     if [[ "$confirm_path" =~ ^[Yy]$ ]]; then
-        # S3_BACKUP_PATH should not start with a leading slash for awscli compatibility
-        S3_BACKUP_PATH="${final_selected_path#/}"
+        # S3_BACKUP_PATH should not start with a leading slash for awscli compatibility, but keep it for display consistency
+        S3_BACKUP_PATH="${final_selected_path%/}/"
+        if [[ "$S3_BACKUP_PATH" == "//" ]]; then S3_BACKUP_PATH="/"; fi
         log_and_display "${GREEN}S3/R2 备份路径已设置为：${display_path_confirm}${NC}"
-        return 0 # Success
+        return 0
     else
         log_and_display "${YELLOW}取消设置，请重新选择。${NC}"
-        return 1 # User wants to re-do or cancel
+        return 1
     fi
 }
 
