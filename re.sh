@@ -27,7 +27,7 @@ LAST_AUTO_BACKUP_TIMESTAMP=0 # 上次自动备份的 Unix 时间戳
 
 # 备份保留策略默认值
 RETENTION_POLICY_TYPE="none" # "none", "count", "days"
-RETENTION_VALUE=0           # 要保留的备份数量或天数
+RETENTION_VALUE=0            # 要保留的备份数量或天数
 
 # --- Rclone 配置 ---
 declare -a RCLONE_TARGETS_ARRAY=()
@@ -117,7 +117,7 @@ clear_screen() {
 display_header() {
     clear_screen
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}      $SCRIPT_NAME      ${NC}"
+    echo -e "${GREEN}      $SCRIPT_NAME       ${NC}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 }
@@ -283,12 +283,12 @@ check_dependencies() {
             fi
 
             if [ "$installed_something" -eq 1 ]; then
-                 log_and_display "${GREEN}依赖安装尝试完成，请重新运行脚本。${NC}"
-                 exit 0
+                log_and_display "${GREEN}依赖安装尝试完成，请重新运行脚本。${NC}"
+                exit 0
             else
-                 log_and_display "${RED}自动安装失败，请手动安装。${NC}"
-                 press_enter_to_continue
-                 return 1
+                log_and_display "${RED}自动安装失败，请手动安装。${NC}"
+                press_enter_to_continue
+                return 1
             fi
         else
             log_and_display "已取消自动安装。请手动安装后重试。" "${YELLOW}"
@@ -939,7 +939,7 @@ set_retention_policy() {
             "none") echo -e "  ${YELLOW}无保留策略（所有备份将保留）${NC}" ;;
             "count") echo -e "  ${YELLOW}保留最新 ${RETENTION_VALUE} 个备份${NC}" ;;
             "days")  echo -e "  ${YELLOW}保留最近 ${RETENTION_VALUE} 天内的备份${NC}" ;;
-            *)       echo -e "  ${YELLOW}未知策略或未设置${NC}" ;;
+            *)      echo -e "  ${YELLOW}未知策略或未设置${NC}" ;;
         esac
         echo ""
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
@@ -1173,7 +1173,7 @@ perform_sync_backup() {
     send_telegram_message "*${SCRIPT_NAME}：同步总览 (${overall_status})*\n成功同步路径数: ${overall_succeeded_count}/${total_paths_to_backup}"
 }
 
-# [MODIFIED] 归档模式备份逻辑 (使用 exit code 判断)
+# [MODIFIED] 归档模式备份逻辑
 perform_archive_backup() {
     local backup_type="$1"
     local readable_time=$(date '+%Y-%m-%d %H:%M:%S')
@@ -1196,7 +1196,8 @@ perform_archive_backup() {
         local archive_name="all_sources_${timestamp}.zip"
         local temp_archive_path="${TEMP_DIR}/${archive_name}"
 
-        zip -r "$temp_archive_path" "${BACKUP_SOURCE_PATHS_ARRAY[@]}"
+        # 修改点: 添加 -q 参数实现静默压缩
+        zip -rq "$temp_archive_path" "${BACKUP_SOURCE_PATHS_ARRAY[@]}"
         
         if [ $? -eq 0 ]; then
             local backup_file_size
@@ -1204,8 +1205,8 @@ perform_archive_backup() {
             log_and_display "合并压缩完成 (大小: ${backup_file_size})。准备上传..." "${GREEN}"
             
             if upload_archive "$temp_archive_path" "$archive_name" "所有源"; then
-                 any_upload_succeeded="true"
-                 overall_succeeded_count=$((total_paths_to_backup))
+                any_upload_succeeded="true"
+                overall_succeeded_count=$((total_paths_to_backup))
             fi
             
             rm -f "$temp_archive_path"
@@ -1235,9 +1236,11 @@ perform_archive_backup() {
 
             log_and_display "正在压缩到 '$archive_name'..."
             if [[ -d "$current_backup_path" ]]; then
-                (cd "$(dirname "$current_backup_path")" && zip -r "$temp_archive_path" "$(basename "$current_backup_path")")
+                # 修改点: 添加 -q 参数实现静默压缩
+                (cd "$(dirname "$current_backup_path")" && zip -rq "$temp_archive_path" "$(basename "$current_backup_path")")
             else
-                (cd "$(dirname "$current_backup_path")" && zip "$temp_archive_path" "$(basename "$current_backup_path")")
+                # 修改点: 添加 -q 参数实现静默压缩
+                (cd "$(dirname "$current_backup_path")" && zip -q "$temp_archive_path" "$(basename "$current_backup_path")")
             fi
 
             if [ $? -ne 0 ]; then
@@ -1539,7 +1542,7 @@ show_main_menu() {
     if [[ "$BACKUP_MODE" == "sync" ]]; then
         mode_text="同步模式"
     fi
-    echo -e "备份模式: ${GREEN}${mode_text}${NC}  备份源: ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个  已启用目标: ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} 个"
+    echo -e "备份模式: ${GREEN}${mode_text}${NC}   备份源: ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个  已启用目标: ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} 个"
 
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 功能选项 ━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "  1. ${YELLOW}自动备份与计划任务${NC} (间隔: ${AUTO_BACKUP_INTERVAL_DAYS} 天)"
@@ -1656,7 +1659,7 @@ main() {
 }
 
 # ================================================================
-# ===         RCLONE 云存储管理函数 (从您的脚本中复制)         ===
+# ===           RCLONE 云存储管理函数 (从您的脚本中复制)         ===
 # ================================================================
 
 prompt_and_add_target() {
