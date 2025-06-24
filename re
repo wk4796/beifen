@@ -66,7 +66,7 @@ clear_screen() {
 display_header() {
     clear_screen
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}      $SCRIPT_NAME       ${NC}"
+    echo -e "${GREEN}      $SCRIPT_NAME      ${NC}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 }
@@ -369,7 +369,7 @@ display_compression_info() {
 }
 
 # ================================================================
-# ===         在脚本内创建 Rclone 远程端 (增强版)              ===
+# ===         在脚本内创建 Rclone 远程端 (增强版)           ===
 # ================================================================
 
 # 通用函数: 获取远程端名称
@@ -726,7 +726,7 @@ create_rclone_remote_wizard() {
 
 
 # ================================================================
-# ===         RCLONE 云存储管理函数 (优化版)                 ===
+# ===         RCLONE 云存储管理函数 (优化版)                  ===
 # ================================================================
 
 # 检查 Rclone 远程端是否存在
@@ -873,9 +873,14 @@ view_and_manage_rclone_targets() {
         fi
         
         echo -e "${BLUE}------------------------------------------------${NC}"
-        echo " a - 添加新目标      d - 删除目标      m - 修改目标路径"
-        echo " t - 切换启用/禁用状态"
-        echo " 0 - 保存并返回"
+        # --- [MODIFIED] Menu layout changed to a single column for clarity ---
+        echo "  a - 添加新目标"
+        echo "  d - 删除目标"
+        echo "  m - 修改目标路径"
+        echo "  t - 切换启用/禁用状态"
+        echo ""
+        echo "  0 - 保存并返回"
+        # --- [MODIFIED] End of change ---
         echo -e "${BLUE}------------------------------------------------${NC}"
         read -rp "请输入选项: " choice
 
@@ -1040,7 +1045,7 @@ set_cloud_storage() {
         echo " 3. 测试 Rclone 远程端连接"
         echo ""
         echo -e "${YELLOW}提示: '备份目标' 是 '远程端' 加上具体路径 (例如 mydrive:/backups)。${NC}"
-        echo "      '远程端' 是您在 Rclone 中的云存储账户配置。"
+        echo "       '远程端' 是您在 Rclone 中的云存储账户配置。"
         echo ""
         echo " 0. 返回主菜单"
         echo -e "${BLUE}------------------------------------------------${NC}"
