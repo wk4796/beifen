@@ -33,7 +33,7 @@ WEBDAV_USERNAME=""
 WEBDAV_PASSWORD=""
 WEBDAV_BACKUP_PATH="" # WebDAV 备份的目标路径
 
-# --- 新增 FTP/FTPS/SFTP 凭证变量 ---
+# --- [修改] FTP/FTPS/SFTP 凭证变量统一管理 ---
 FTP_HOST=""
 FTP_USERNAME=""
 FTP_PASSWORD=""
@@ -53,11 +53,11 @@ SFTP_PORT=22 # 默认 SFTP 端口
 SFTP_BACKUP_PATH=""
 
 # 备份目标标志
-BACKUP_TARGET_S3="false"     # 是否启用 S3/R2 备份 (true/false)
+BACKUP_TARGET_S3="false"      # 是否启用 S3/R2 备份 (true/false)
 BACKUP_TARGET_WEBDAV="false" # 是否启用 WebDAV 备份 (true/false)
-BACKUP_TARGET_FTP="false"    # 是否启用 FTP 备份 (true/false)
-BACKUP_TARGET_FTPS="false"   # 是否启用 FTPS 备份 (true/false)
-BACKUP_TARGET_SFTP="false"   # 是否启用 SFTP 备份 (true/false)
+BACKUP_TARGET_FTP="false"     # 是否启用 FTP 备份 (true/false)
+BACKUP_TARGET_FTPS="false"    # 是否启用 FTPS 备份 (true/false)
+BACKUP_TARGET_SFTP="false"    # 是否启用 SFTP 备份 (true/false)
 
 # Telegram 通知变量 (现在从配置文件加载/保存)
 TELEGRAM_BOT_TOKEN=""
@@ -166,7 +166,7 @@ save_config() {
         echo "WEBDAV_PASSWORD=\"$WEBDAV_PASSWORD\""
         echo "WEBDAV_BACKUP_PATH=\"$WEBDAV_BACKUP_PATH\"" # 保存 WebDAV 备份路径
 
-        # --- 新增 FTP/FTPS/SFTP 配置保存 ---
+        # --- [修改] FTP/FTPS/SFTP 配置保存 ---
         echo "FTP_HOST=\"$FTP_HOST\""
         echo "FTP_USERNAME=\"$FTP_USERNAME\""
         echo "FTP_PASSWORD=\"$FTP_PASSWORD\""
@@ -251,7 +251,7 @@ load_config() {
 
 # --- 核心功能 ---
 
-# 检查所需依赖项
+# [修改] 检查所需依赖项
 check_dependencies() {
     local missing_deps=()
     command -v zip &> /dev/null || missing_deps+=("zip")
@@ -270,15 +270,12 @@ check_dependencies() {
     if [[ -n "$WEBDAV_URL" && -n "$WEBDAV_USERNAME" && -n "$WEBDAV_PASSWORD" ]]; then
         command -v curl &> /dev/null || missing_deps+=("curl (用于WebDAV)")
     fi
-    # 仅当 FTP/FTPS 凭证在配置中设置时才检查 lftp 依赖项
+    
+    # [修改] 统一检查 lftp，因为它现在处理 FTP, FTPS 和 SFTP
     if [[ -n "$FTP_HOST" && -n "$FTP_USERNAME" && -n "$FTP_PASSWORD" ]] || \
-       [[ -n "$FTPS_HOST" && -n "$FTPS_USERNAME" && -n "$FTPS_PASSWORD" ]]; then
-        command -v lftp &> /dev/null || missing_deps+=("lftp (用于FTP/FTPS)")
-    fi
-    # 仅当 SFTP 凭证在配置中设置时才检查 sftp 和 sshpass 依赖项
-    if [[ -n "$SFTP_HOST" && -n "$SFTP_USERNAME" && -n "$SFTP_PASSWORD" ]]; then
-        command -v sftp &> /dev/null || missing_deps+=("sftp (用于SFTP)")
-        command -v sshpass &> /dev/null || missing_deps+=("sshpass (建议安装用于SFTP密码认证)")
+       [[ -n "$FTPS_HOST" && -n "$FTPS_USERNAME" && -n "$FTPS_PASSWORD" ]] || \
+       [[ -n "$SFTP_HOST" && -n "$SFTP_USERNAME" && -n "$SFTP_PASSWORD" ]]; then
+        command -v lftp &> /dev/null || missing_deps+=("lftp (用于FTP/FTPS/SFTP)")
     fi
 
     # 仅当 Telegram 凭证在配置中设置时才检查 curl 和 jq 依赖项
@@ -289,13 +286,14 @@ check_dependencies() {
 
     if [ ${#missing_deps[@]} -gt 0 ]; then
         log_and_display "${RED}检测到以下依赖项缺失，请安装后重试：${missing_deps[*]}${NC}"
-        log_and_display "例如 (Debian/Ubuntu): sudo apt update && sudo apt install zip awscli curl jq realpath lftp openssh-client sshpass" "${YELLOW}"
-        log_and_display "例如 (CentOS/RHEL): sudo yum install zip awscli curl jq realpath lftp openssh-clients sshpass" "${YELLOW}"
+        log_and_display "例如 (Debian/Ubuntu): sudo apt update && sudo apt install zip awscli curl jq realpath lftp" "${YELLOW}"
+        log_and_display "例如 (CentOS/RHEL): sudo yum install zip awscli curl jq realpath lftp" "${YELLOW}"
         press_enter_to_continue
         return 1
     fi
     return 0
 }
+
 
 # 发送 Telegram 消息的函数
 # 参数 1: 消息内容
@@ -782,9 +780,9 @@ get_webdav_direct_contents() {
 }
 
 
-# --- [OPTIMIZED] FTP/FTPS/SFTP functions ---
+# --- [修改] FTP/FTPS/SFTP functions ---
 
-# [OPTIMIZED] Test FTP connection
+# Test FTP connection
 test_ftp_connection() {
     if [[ -z "$FTP_HOST" || -z "$FTP_USERNAME" || -z "$FTP_PASSWORD" ]]; then
         log_and_display "${RED}FTP 配置不完整，无法测试连接。请先填写主机、用户名和密码。${NC}" "" "/dev/stderr"
@@ -820,7 +818,7 @@ EOF
     fi
 }
 
-# [OPTIMIZED] Helper function to list direct sub-folders AND files for FTP
+# Helper function to list direct sub-folders AND files for FTP
 get_ftp_direct_contents() {
     local host="$1" user="$2" pass="$3" port="$4" parent_path="$5"
     if [[ "$parent_path" != "/" && "${parent_path: -1}" != "/" ]]; then
@@ -872,7 +870,7 @@ EOF
     return 0
 }
 
-# [OPTIMIZED] Test FTPS connection
+# Test FTPS connection
 test_ftps_connection() {
     if [[ -z "$FTPS_HOST" || -z "$FTPS_USERNAME" || -z "$FTPS_PASSWORD" ]]; then
         log_and_display "${RED}FTPS 配置不完整，无法测试连接。请先填写主机、用户名和密码。${NC}" "" "/dev/stderr"
@@ -913,7 +911,7 @@ EOF
 }
 
 
-# [OPTIMIZED] Helper function to list direct sub-folders AND files for FTPS
+# Helper function to list direct sub-folders AND files for FTPS
 get_ftps_direct_contents() {
     local host="$1" user="$2" pass="$3" port="$4" parent_path="$5"
     if [[ "$parent_path" != "/" && "${parent_path: -1}" != "/" ]]; then
@@ -967,45 +965,42 @@ EOF
     return 0
 }
 
-# Test SFTP connection
+# [修改] Test SFTP connection using lftp
 test_sftp_connection() {
     if [[ -z "$SFTP_HOST" || -z "$SFTP_USERNAME" || -z "$SFTP_PASSWORD" ]]; then
         log_and_display "${RED}SFTP 配置不完整，无法测试连接。请先填写主机、用户名和密码。${NC}" "" "/dev/stderr"
         return 1
     fi
 
-    log_and_display "正在测试 SFTP 连接到：${SFTP_USERNAME}@${SFTP_HOST}:${SFTP_PORT}..." "${BLUE}" "/dev/stderr"
-    log_and_display "${YELLOW}注意：SFTP 密码认证依赖于 'sshpass'。如果遇到问题，建议使用 SSH 密钥。${NC}" "" "/dev/stderr"
+    log_and_display "正在使用 lftp 测试 SFTP 连接到：${SFTP_USERNAME}@${SFTP_HOST}:${SFTP_PORT}..." "${BLUE}" "/dev/stderr"
+    log_and_display "${YELLOW}注意：lftp 会自动处理密码或密钥认证。如果遇到主机密钥问题，请手动连接一次 sftp ${SFTP_USERNAME}@${SFTP_HOST} -p ${SFTP_PORT} 以接受密钥。${NC}" "" "/dev/stderr"
 
-    # Use sshpass combined with sftp for connection test
-    local sftp_output=""
-    local sftp_status=1
+    local lftp_output=""
+    local lftp_status=1
 
-    if command -v sshpass &> /dev/null; then
-        # Add timeout for sftp
-        if { sftp_output=$(sshpass -p "$SFTP_PASSWORD" sftp -oBatchMode=no -oConnectTimeout=10 -oStrictHostKeyChecking=no -b - -P "$SFTP_PORT" "$SFTP_USERNAME@$SFTP_HOST" <<< "ls /; quit;" 2>&1); } then
-            sftp_status=0
-        else
-            sftp_status=$?
-        fi
+    if { lftp_output=$(lftp -p "$SFTP_PORT" -u "$SFTP_USERNAME,$SFTP_PASSWORD" "sftp://$SFTP_HOST" <<EOF
+set cmd:long-timeout 15
+set cmd:timeout 15
+set sftp:auto-confirm yes
+cls -F /
+quit
+EOF
+    2>&1); }; then
+        lftp_status=0
     else
-        log_and_display "${RED}错误：未找到 'sshpass' 命令。SFTP 密码认证需要安装 'sshpass'。${NC}" "" "/dev/stderr"
-        log_and_display "${RED}请安装 'sshpass' 或配置 SSH 密钥以进行无密码登录。${NC}" "" "/dev/stderr"
-        return 1
+        lftp_status=$?
     fi
-
-    if [ "$sftp_status" -eq 0 ]; then
+    
+    if [ "$lftp_status" -eq 0 ]; then
         log_and_display "${GREEN}SFTP 连接成功！${NC}" "" "/dev/stderr"
         return 0
     else
-        log_and_display "${RED}SFTP 连接失败！请检查配置、凭证、端口和网络连接。错误信息: ${sftp_output}${NC}" "" "/dev/stderr"
+        log_and_display "${RED}SFTP 连接失败！请检查配置、凭证、端口和网络连接。错误信息: ${lftp_output}${NC}" "" "/dev/stderr"
         return 1
     fi
 }
 
-# Helper function to list direct sub-folders AND files for SFTP
-# Parameters: host, port, user, pass, parent_path
-# Returns: List of content names (e.g., "myfolder (文件夹)", "myfile.txt (文件)") to stdout on success, empty list and non-zero exit on failure.
+# [修改] Helper function to list direct sub-folders AND files for SFTP using lftp
 get_sftp_direct_contents() {
     local host="$1" user="$2" pass="$3" port="$4" parent_path="$5"
     if [[ "$parent_path" != "/" && "${parent_path: -1}" != "/" ]]; then
@@ -1014,40 +1009,41 @@ get_sftp_direct_contents() {
 
     log_and_display "正在获取 SFTP 服务器中 '${parent_path}' 的子文件夹和文件列表..." "${BLUE}" "/dev/stderr"
     local contents=()
-    local sftp_output=""
+    local lftp_output=""
     local result_status=1
 
-    if ! command -v sshpass &> /dev/null; then
-        log_and_display "${RED}SFTP 无法获取子文件夹或文件列表：未找到 sshpass 命令。${NC}" "" "/dev/stderr"
-        return 1
-    fi
-
-    # Use sftp 'ls -F' which marks directories with a slash. Add timeout settings.
-    if { sftp_output=$(sshpass -p "$pass" sftp -oBatchMode=no -oConnectTimeout=10 -oStrictHostKeyChecking=no -b - -P "$port" "$user@$host" <<< "ls -F ${parent_path}; quit;" 2>&1); } then
+    if { lftp_output=$(lftp -p "$port" -u "$user,$pass" "sftp://$host" <<EOF
+set cmd:long-timeout 15
+set cmd:timeout 15
+set sftp:auto-confirm yes
+cls -F "$parent_path"
+quit
+EOF
+    2>&1); }; then
         result_status=0
     else
         result_status=$?
-        log_and_display "${RED}SFTP 列表失败！错误: ${sftp_output}${NC}" "" "/dev/stderr"
+        log_and_display "${RED}SFTP 连接失败或路径 '${parent_path}' 无效，无法获取子文件夹或文件列表。错误: ${lftp_output}${NC}" "" "/dev/stderr"
+        return 1
     fi
 
-    if [ "$result_status" -eq 0 ] && [[ -n "$sftp_output" ]]; then
-        # Filter out ".." and "." special directory entries if they appear
+    # Parsing logic is now identical to FTP/FTPS
+    if [ "$result_status" -eq 0 ] && [[ -n "$lftp_output" ]]; then
         while IFS= read -r line; do
-            if [[ "$line" == "." || "$line" == ".." || -z "$line" ]]; then
-                continue # Skip current and parent directory, and empty lines
+            local cleaned_name=$(echo "$line" | sed 's|/$||')
+            if [[ "$cleaned_name" == "." || "$cleaned_name" == ".." || -z "$cleaned_name" ]]; then
+                continue
             fi
-            if [[ "$line" =~ /$ ]]; then # Directory (ends with / in sftp ls -F output)
-                local cleaned_name="${line%/}" # Remove trailing / for a pure directory name
+            if [[ "$line" =~ /$ ]]; then
                 contents+=("${cleaned_name} (文件夹)")
-            else # File
-                contents+=("${line} (文件)")
+            else
+                contents+=("${cleaned_name} (文件)")
             fi
-        done <<< "$sftp_output"
+        done <<< "$lftp_output"
     else
         log_and_display "${YELLOW}SFTP 路径 '${parent_path}' 下没有检测到子文件夹或文件。${NC}" "" "/dev/stderr"
     fi
     
-    # Sort the combined list
     IFS=$'\n' contents=($(sort <<<"${contents[*]}"))
     unset IFS
     printf '%s\n' "${contents[@]}"
@@ -1056,7 +1052,7 @@ get_sftp_direct_contents() {
 
 
 # ================================================================
-# ===         增强型路径选择函数 (交互式浏览)           ===
+# ===      增强型路径选择函数 (交互式浏览)           ===
 # ================================================================
 
 choose_s3_r2_path() {
@@ -1690,7 +1686,7 @@ choose_sftp_path() {
 
 
 # ================================================================
-# ===         云存储账号管理菜单 (保持不变)             ===
+# ===      云存储账号管理菜单 (保持不变)             ===
 # ================================================================
 
 # 管理 S3/R2 账号设置
@@ -2098,14 +2094,13 @@ manage_sftp_account() {
                 log_and_display "--- 添加/修改 SFTP 账号凭证 ---"
                 log_and_display "${YELLOW}凭证将保存到本地配置文件，请确保配置文件安全！${NC}"
                 log_and_display "${YELLOW}建议使用 SSH 密钥进行 SFTP 认证以提高安全性。${NC}"
-                log_and_display "${YELLOW}如果使用密码，需要安装 'sshpass'。${NC}"
                 read -rp "请输入 SFTP 主机名 (例如 sftp.example.com 或 192.168.1.1) [当前: ${SFTP_HOST}]: " input_host
                 SFTP_HOST="${input_host:-$SFTP_HOST}"
 
                 read -rp "请输入 SFTP 用户名 [当前: ${SFTP_USERNAME}]: " input_username
                 SFTP_USERNAME="${input_username:-$SFTP_USERNAME}"
 
-                read -s -rp "请输入 SFTP 密码 (留空不修改当前密码): " input_password
+                read -s -rp "请输入 SFTP 密码或密钥密码 (留空不修改当前密码): " input_password
                 echo ""
                 if [[ -n "$input_password" ]]; then
                     SFTP_PASSWORD="$input_password"
@@ -2182,7 +2177,7 @@ select_backup_targets() {
             echo -n "1. S3/R2 存储 (当前: "
             if [[ "$BACKUP_TARGET_S3" == "true" ]]; then echo -e "${GREEN}启用${NC})"
             else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "     (已配置账号并设置路径: ${S3_BACKUP_PATH})"
+            echo "       (已配置账号并设置路径: ${S3_BACKUP_PATH})"
         else
             echo -e "1. S3/R2 存储 (${RED}未完全配置，无法启用${NC})"
         fi
@@ -2193,7 +2188,7 @@ select_backup_targets() {
             echo -n "2. WebDAV 存储 (当前: "
             if [[ "$BACKUP_TARGET_WEBDAV" == "true" ]]; then echo -e "${GREEN}启用${NC})"
             else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "     (已配置账号并设置路径: ${WEBDAV_BACKUP_PATH})"
+            echo "       (已配置账号并设置路径: ${WEBDAV_BACKUP_PATH})"
         else
             echo -e "2. WebDAV 存储 (${RED}未完全配置，无法启用${NC})"
         fi
@@ -2204,7 +2199,7 @@ select_backup_targets() {
             echo -n "3. FTP 存储 (当前: "
             if [[ "$BACKUP_TARGET_FTP" == "true" ]]; then echo -e "${GREEN}启用${NC})"
             else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "     (已配置账号并设置路径: ${FTP_BACKUP_PATH})"
+            echo "       (已配置账号并设置路径: ${FTP_BACKUP_PATH})"
         else
             echo -e "3. FTP 存储 (${RED}未完全配置，无法启用${NC})"
         fi
@@ -2214,7 +2209,7 @@ select_backup_targets() {
             echo -n "4. FTPS 存储 (当前: "
             if [[ "$BACKUP_TARGET_FTPS" == "true" ]]; then echo -e "${GREEN}启用${NC})"
             else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "     (已配置账号并设置路径: ${FTPS_BACKUP_PATH})"
+            echo "       (已配置账号并设置路径: ${FTPS_BACKUP_PATH})"
         else
             echo -e "4. FTPS 存储 (${RED}未完全配置，无法启用${NC})"
         fi
@@ -2224,7 +2219,7 @@ select_backup_targets() {
             echo -n "5. SFTP 存储 (当前: "
             if [[ "$BACKUP_TARGET_SFTP" == "true" ]]; then echo -e "${GREEN}启用${NC})"
             else echo -e "${YELLOW}禁用${NC})" ; fi
-            echo "     (已配置账号并设置路径: ${SFTP_BACKUP_PATH})"
+            echo "       (已配置账号并设置路径: ${SFTP_BACKUP_PATH})"
         else
             echo -e "5. SFTP 存储 (${RED}未完全配置，无法启用${NC})"
         fi
@@ -2494,7 +2489,7 @@ set_retention_policy() {
 }
 
 
-# 应用保留策略的函数 (适应新的命名规则)
+# [修改] 应用保留策略的函数 (适应 lftp for SFTP)
 apply_retention_policy() {
     log_and_display "${BLUE}--- 正在应用备份保留策略 ---${NC}"
 
@@ -2561,14 +2556,15 @@ EOF
                 delete_status=$?
                 ;;
             "sftp")
-                if command -v sshpass &> /dev/null; then
-                    # Add timeout for sftp
-                    sshpass -p "$SFTP_PASSWORD" sftp -oBatchMode=no -oConnectTimeout=10 -oStrictHostKeyChecking=no -b - -P "$SFTP_PORT" "$SFTP_USERNAME@$SFTP_HOST" <<< "rm ${SFTP_BACKUP_PATH}${file_to_delete}" &> /dev/null
-                    delete_status=$?
-                else
-                    log_and_display "${RED}SFTP 删除失败：未找到 sshpass 命令。${NC}" "" "/dev/stderr"
-                    delete_status=1 # Indicate failure
-                fi
+                # [修改] 使用 lftp 删除 SFTP 文件
+                lftp -p "$SFTP_PORT" -u "$SFTP_USERNAME,$SFTP_PASSWORD" "sftp://$SFTP_HOST" <<EOF &>/dev/null
+set cmd:long-timeout 15
+set cmd:timeout 15
+set sftp:auto-confirm yes
+rm "$SFTP_BACKUP_PATH$file_to_delete"
+quit
+EOF
+                delete_status=$?
                 ;;
         esac
         return "$delete_status"
@@ -2674,17 +2670,14 @@ EOF
             fi
             raw_backups_list=$(echo "$raw_backups_list" | sed "s|^${target_path}||")
         elif [[ "$service_type" == "sftp" ]]; then
-            if command -v sshpass &> /dev/null; then
-                # Add timeout for sftp
-                if { raw_backups_list=$(sshpass -p "$SFTP_PASSWORD" sftp -oBatchMode=no -oConnectTimeout=10 -oStrictHostKeyChecking=no -b - -P "$SFTP_PORT" "$SFTP_USERNAME@$SFTP_HOST" <<< "ls -R ${target_path}/" 2>&1); } then
-                    get_list_status=0
-                else
-                    get_list_status=$?
-                    log_and_display "${RED}SFTP 列出文件失败！错误: ${raw_backups_list}${NC}" "" "/dev/stderr"
-                fi
-                # Filter for lines that are zip files matching the pattern
-                raw_backups_list=$(echo "$raw_backups_list" | grep -E '/[a-zA-Z0-9_-]+_[0-9]{14}\.zip$' | sed 's|.*/||') # Gets only filename from full path
+            # [修改] 使用 lftp find 列出 SFTP 文件
+            if { raw_backups_list=$(lftp -u "$SFTP_USERNAME","$SFTP_PASSWORD" -p "$SFTP_PORT" sftp://"$SFTP_HOST" -e "set cmd:long-timeout 10; set cmd:timeout 10; set sftp:auto-confirm yes; find ${target_path} -name '*_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].zip'; quit;" 2>&1); } then
+                get_list_status=0
+            else
+                get_list_status=$?
+                log_and_display "${RED}SFTP 列出文件失败！错误: ${raw_backups_list}${NC}" "" "/dev/stderr"
             fi
+            raw_backups_list=$(echo "$raw_backups_list" | sed "s|^${target_path}||")
         fi
 
         if [ "$get_list_status" -ne 0 ]; then
@@ -2785,11 +2778,7 @@ EOF
 
     if [[ "$BACKUP_TARGET_SFTP" == "true" ]]; then
         if [[ -n "$SFTP_HOST" && -n "$SFTP_USERNAME" && -n "$SFTP_PASSWORD" && -n "$SFTP_BACKUP_PATH" ]]; then
-            if command -v sshpass &> /dev/null; then
-                process_service_retention "sftp" "SFTP_BACKUP_PATH" total_sftp_backups_found deleted_sftp_count
-            else
-                log_and_display "${RED}SFTP 已启用为备份目标，但未找到 sshpass 命令，SFTP 清理功能将被跳过。${NC}"
-            fi
+            process_service_retention "sftp" "SFTP_BACKUP_PATH" total_sftp_backups_found deleted_sftp_count
         else
             log_and_display "${YELLOW}SFTP 已启用为备份目标但配置不完整，跳过 SFTP 备份清理。${NC}"
         fi
@@ -2806,7 +2795,7 @@ EOF
 }
 
 
-# 执行备份上传的核心逻辑 (大幅修改以支持多路径独立备份)
+# [修改] 执行备份上传的核心逻辑 (适应 lftp for SFTP)
 # 参数 1: 备份类型 (例如，"手动备份", "自动备份")
 perform_backup() {
     local backup_type="$1"
@@ -2969,7 +2958,7 @@ perform_backup() {
             webdav_this_upload_status="禁用"
         fi
 
-        # --- [OPTIMIZED] FTP 上传 ---
+        # --- FTP 上传 ---
         if [[ "$BACKUP_TARGET_FTP" == "true" ]]; then
             if [[ -n "$FTP_HOST" && -n "$FTP_USERNAME" && -n "$FTP_PASSWORD" && -n "$FTP_BACKUP_PATH" ]]; then
                 log_and_display "正在尝试上传到 FTP 服务器：${FTP_HOST}:${FTP_PORT}${FTP_BACKUP_PATH}${archive_name}..."
@@ -3009,7 +2998,7 @@ EOF
             ftp_this_upload_status="禁用"
         fi
 
-        # --- [OPTIMIZED] FTPS 上传 ---
+        # --- FTPS 上传 ---
         if [[ "$BACKUP_TARGET_FTPS" == "true" ]]; then
             if [[ -n "$FTPS_HOST" && -n "$FTPS_USERNAME" && -n "$FTPS_PASSWORD" && -n "$FTPS_BACKUP_PATH" ]]; then
                 log_and_display "正在尝试上传到 FTPS 服务器：${FTPS_HOST}:${FTPS_PORT}${FTPS_BACKUP_PATH}${archive_name}..."
@@ -3050,22 +3039,34 @@ EOF
             ftps_this_upload_status="禁用"
         fi
 
-        # --- 新增 SFTP 上传 ---
+        # --- [修改] SFTP 上传, 使用 lftp ---
         if [[ "$BACKUP_TARGET_SFTP" == "true" ]]; then
             if [[ -n "$SFTP_HOST" && -n "$SFTP_USERNAME" && -n "$SFTP_PASSWORD" && -n "$SFTP_BACKUP_PATH" ]]; then
                 log_and_display "正在尝试上传到 SFTP 服务器：${SFTP_USERNAME}@${SFTP_HOST}:${SFTP_PORT}${SFTP_BACKUP_PATH}${archive_name}..."
                 local sftp_upload_output=""
                 local sftp_upload_status_code=1
-                if command -v sshpass &> /dev/null; then
-                    # Add timeout for sftp
-                    if { sftp_upload_output=$(sshpass -p "$SFTP_PASSWORD" sftp -oBatchMode=no -oConnectTimeout=10 -oStrictHostKeyChecking=no -b - -P "$SFTP_PORT" "$SFTP_USERNAME@$SFTP_HOST" <<< "put '$temp_archive_path' ${SFTP_BACKUP_PATH}${archive_name}" 2>&1); } then
-                        sftp_upload_status_code=0
-                    else
-                        sftp_upload_status_code=$?
-                    fi
+                
+                if { sftp_upload_output=$(lftp -p "$SFTP_PORT" -u "$SFTP_USERNAME,$SFTP_PASSWORD" "sftp://$SFTP_HOST" <<EOF
+set cmd:long-timeout 3600
+set cmd:timeout 300
+set sftp:auto-confirm yes
+mkdir -p "$SFTP_BACKUP_PATH"
+put -O "$SFTP_BACKUP_PATH" "$temp_archive_path"
+quit
+EOF
+                2>&1); }; then
+                    sftp_upload_status_code=0
                 else
-                    log_and_display "${RED}SFTP 上传失败：未找到 sshpass 命令。${NC}"
-                    sftp_this_upload_status="跳过 (缺少 sshpass)"
+                    sftp_upload_status_code=$?
+                fi
+
+                if [ "$sftp_upload_status_code" -eq 0 ]; then
+                    log_and_display "${GREEN}SFTP 上传成功！${NC}"
+                    sftp_this_upload_status="成功"
+                    any_upload_succeeded_for_path="true"
+                else
+                    log_and_display "${RED}SFTP 上传失败！请检查配置或网络连接。错误信息: ${sftp_upload_output}${NC}"
+                    sftp_this_upload_status="失败"
                 fi
             else
                 log_and_display "${RED}SFTP 已设置为备份目标，但配置不完整。跳过 SFTP 上传。${NC}"
@@ -3240,7 +3241,7 @@ process_menu_choice() {
     esac
 }
 
-# 检查是否应该运行自动备份 (根据间隔时间)
+# [修改] 检查是否应该运行自动备份 (移除 sshpass 检查)
 check_auto_backup() {
     load_config # 确保加载最新配置
 
@@ -3260,15 +3261,7 @@ check_auto_backup() {
     if [[ "$BACKUP_TARGET_WEBDAV" == "true" && -n "$WEBDAV_URL" && -n "$WEBDAV_USERNAME" && -n "$WEBDAV_PASSWORD" && -n "$WEBDAV_BACKUP_PATH" ]]; then any_target_enabled="true"; fi
     if [[ "$BACKUP_TARGET_FTP" == "true" && -n "$FTP_HOST" && -n "$FTP_USERNAME" && -n "$FTP_PASSWORD" && -n "$FTP_BACKUP_PATH" ]]; then any_target_enabled="true"; fi
     if [[ "$BACKUP_TARGET_FTPS" == "true" && -n "$FTPS_HOST" && -n "$FTPS_USERNAME" && -n "$FTPS_PASSWORD" && -n "$FTPS_BACKUP_PATH" ]]; then any_target_enabled="true"; fi
-    # For SFTP, also check for sshpass if password is used, or rely on SSH keys
-    if [[ "$BACKUP_TARGET_SFTP" == "true" && -n "$SFTP_HOST" && -n "$SFTP_USERNAME" && -n "$SFTP_PASSWORD" && -n "$SFTP_BACKUP_PATH" ]]; then
-        if command -v sshpass &> /dev/null; then
-            any_target_enabled="true"
-        else
-            log_and_display "${RED}SFTP 已启用但未找到 sshpass 命令，将无法进行密码认证的自动备份。请安装 sshpass 或使用 SSH 密钥。${NC}"
-            # Don't set any_target_enabled to true for SFTP if sshpass is missing, to reflect inability to back up
-        fi
-    fi
+    if [[ "$BACKUP_TARGET_SFTP" == "true" && -n "$SFTP_HOST" && -n "$SFTP_USERNAME" && -n "$SFTP_PASSWORD" && -n "$SFTP_BACKUP_PATH" ]]; then any_target_enabled="true"; fi
 
 
     if [[ "$any_target_enabled" == "false" ]]; then
