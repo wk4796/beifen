@@ -19,7 +19,7 @@ LAST_AUTO_BACKUP_TIMESTAMP=0 # 上次自动备份的 Unix 时间戳
 
 # 备份保留策略默认值
 RETENTION_POLICY_TYPE="none" # "none", "count", "days"
-RETENTION_VALUE=0            # 要保留的备份数量或天数
+RETENTION_VALUE=0           # 要保留的备份数量或天数
 
 # 云存储凭证变量 (现在从配置文件加载/保存，更方便)
 S3_ACCESS_KEY=""
@@ -55,9 +55,9 @@ SFTP_BACKUP_PATH=""
 # 备份目标标志
 BACKUP_TARGET_S3="false"      # 是否启用 S3/R2 备份 (true/false)
 BACKUP_TARGET_WEBDAV="false" # 是否启用 WebDAV 备份 (true/false)
-BACKUP_TARGET_FTP="false"     # 是否启用 FTP 备份 (true/false)
-BACKUP_TARGET_FTPS="false"    # 是否启用 FTPS 备份 (true/false)
-BACKUP_TARGET_SFTP="false"    # 是否启用 SFTP 备份 (true/false)
+BACKUP_TARGET_FTP="false"      # 是否启用 FTP 备份 (true/false)
+BACKUP_TARGET_FTPS="false"     # 是否启用 FTPS 备份 (true/false)
+BACKUP_TARGET_SFTP="false"     # 是否启用 SFTP 备份 (true/false)
 
 # Telegram 通知变量 (现在从配置文件加载/保存)
 TELEGRAM_BOT_TOKEN=""
@@ -96,7 +96,7 @@ clear_screen() {
 display_header() {
     clear_screen
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}      $SCRIPT_NAME      ${NC}"
+    echo -e "${GREEN}      $SCRIPT_NAME       ${NC}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 }
@@ -781,7 +781,7 @@ get_webdav_direct_contents() {
 
 
 # ================================================================
-# ===          FTP/FTPS/SFTP Functions (REVISED)             ===
+# ===         FTP/FTPS/SFTP Functions (REVISED)           ===
 # ================================================================
 
 # --- FTP Functions ---
@@ -798,24 +798,48 @@ test_ftp_connection() {
     log_and_display "${GREEN}FTP 连接成功！${NC}" "" "/dev/stderr"; return 0;
 }
 
+# MODIFIED: Changed lftp command to `cd` then `cls` for reliability
 get_ftp_direct_contents() {
     local host="$1" user="$2" pass="$3" port="$4" parent_path="$5"
     if [[ "$parent_path" != "/" && "${parent_path: -1}" != "/" ]]; then parent_path="${parent_path}/"; fi
     log_and_display "正在获取 FTP 服务器中 '${parent_path}' 的子文件夹和文件列表..." "${BLUE}" "/dev/stderr"
+    
     local lftp_output
-    if ! lftp_output=$(lftp -p "$port" -u "$user,$pass" "$host" -e "set net:timeout 15; set ftp:passive-mode true; cls -F \"$parent_path\"; quit" 2>&1); then
-        log_and_display "${RED}FTP 列表失败。错误: ${lftp_output}${NC}" "" "/dev/stderr"; return 1;
+    local result_status=1
+    
+    if { lftp_output=$(lftp -p "$port" -u "$user,$pass" "$host" <<EOF
+set net:timeout 15
+set ftp:passive-mode true
+cd "$parent_path"
+cls -F
+quit
+EOF
+    2>&1); }; then
+        result_status=0
+    else
+        result_status=$?
+        log_and_display "${RED}FTP 列表失败。错误: ${lftp_output}${NC}" "" "/dev/stderr"
+        return 1
     fi
+
     local contents=()
-    while IFS= read -r line; do
-        if echo "$line" | grep -qvE '^(cd ok|quit|cls)'; then
-            local cleaned_name="${line%/}"
-            if [[ -z "$cleaned_name" || "$cleaned_name" == "." || "$cleaned_name" == ".." ]]; then continue; fi
-            if [[ "$line" =~ /$ ]]; then contents+=("${cleaned_name} (文件夹)"); else contents+=("${cleaned_name} (文件)"); fi
-        fi
-    done <<< "$lftp_output"
+    if [ "$result_status" -eq 0 ] && [[ -n "$lftp_output" ]]; then
+        while IFS= read -r line; do
+            # Filter out lftp's own messages
+            if echo "$line" | grep -qvE '^(cd ok|quit|cls)'; then
+                local cleaned_name="${line%/}" # Remove trailing slash if it's a directory
+                if [[ -z "$cleaned_name" || "$cleaned_name" == "." || "$cleaned_name" == ".." ]]; then continue; fi
+                if [[ "$line" =~ /$ ]]; then 
+                    contents+=("${cleaned_name} (文件夹)")
+                else 
+                    contents+=("${cleaned_name} (文件)")
+                fi
+            fi
+        done <<< "$lftp_output"
+    fi
+
     if [ ${#contents[@]} -eq 0 ]; then log_and_display "${YELLOW}FTP 路径 '${parent_path}' 下无内容。${NC}" "" "/dev/stderr"; fi
-    IFS=$'\n' contents=($(sort <<<"${contents[*]}")); unset IFS; printf '%s\n' "${contents[@]}"; return 0;
+    IFS=$'\n' contents=($(sort <<<"${contents[*]}")); unset IFS; printf '%s\n' "${contents[@]}"; return 0
 }
 
 # --- FTPS Functions ---
@@ -837,7 +861,7 @@ test_ftps_connection() {
 # debug 3
 
 # --- 兼容性与连接设置 ---
-set net:timeout 20               # 增加网络操作超时
+set net:timeout 20          # 增加网络操作超时
 set net:reconnect-interval-base 5  # 设置重连间隔
 
 # --- FTPS 核心设置 (显式模式 Explicit-Mode) ---
@@ -877,6 +901,7 @@ EOF
     fi
 }
 
+# MODIFIED: Changed lftp command to `cd` then `cls` for reliability
 get_ftps_direct_contents() {
     local host="$1" user="$2" pass="$3" port="$4" parent_path="$5"
     if [[ "$parent_path" != "/" && "${parent_path: -1}" != "/" ]]; then
@@ -895,7 +920,8 @@ set ftp:passive-mode true
 set ftp:ssl-allow true
 set ftp:ssl-protect-data true
 set ssl:verify-certificate no
-cls -F "$parent_path"
+cd "$parent_path"
+cls -F
 quit
 EOF
     2>&1); }; then
@@ -909,9 +935,9 @@ EOF
     # 后续的解析逻辑
     if [ "$result_status" -eq 0 ] && [[ -n "$lftp_output" ]]; then
         while IFS= read -r line; do
-            # 过滤掉 lftp 自身的输出信息，只保留文件/目录列表
+            # Filter out lftp's own messages
             if echo "$line" | grep -qvE '^(cd ok|quit|cls)'; then
-                local cleaned_name=$(echo "$line" | sed 's|/$||')
+                local cleaned_name=$(echo "$line" | sed 's|/$||') # Remove trailing slash if it's a directory
                 if [[ "$cleaned_name" == "." || "$cleaned_name" == ".." || -z "$cleaned_name" ]]; then
                     continue
                 fi
@@ -922,11 +948,10 @@ EOF
                 fi
             fi
         done <<< "$lftp_output"
-    else
-        # 错误信息已在 lftp 执行失败时打印，这里只处理无内容的情况
-        if [ "$result_status" -eq 0 ]; then
-             log_and_display "${YELLOW}FTPS 路径 '${parent_path}' 下没有检测到子文件夹或文件。${NC}" "" "/dev/stderr"
-        fi
+    fi
+    
+    if [ ${#contents[@]} -eq 0 ] && [ "$result_status" -eq 0 ]; then
+         log_and_display "${YELLOW}FTPS 路径 '${parent_path}' 下没有检测到子文件夹或文件。${NC}" "" "/dev/stderr"
     fi
 
     IFS=$'\n' contents=($(sort <<<"${contents[*]}"))
@@ -950,28 +975,52 @@ test_sftp_connection() {
     log_and_display "${GREEN}SFTP 连接成功！${NC}" "" "/dev/stderr"; return 0;
 }
 
+# MODIFIED: Changed lftp command to `cd` then `cls` for reliability
 get_sftp_direct_contents() {
     local host="$1" user="$2" pass="$3" port="$4" parent_path="$5"
     if [[ "$parent_path" != "/" && "${parent_path: -1}" != "/" ]]; then parent_path="${parent_path}/"; fi
     log_and_display "正在获取 SFTP 服务器中 '${parent_path}' 的子文件夹和文件列表..." "${BLUE}" "/dev/stderr"
+
     local lftp_output
-    if ! lftp_output=$(lftp -p "$port" -u "$user,$pass" "sftp://$host" -e "set net:timeout 15; set sftp:auto-confirm yes; cls -F \"$parent_path\"; quit" 2>&1); then
+    local result_status=1
+
+    if { lftp_output=$(lftp -p "$port" -u "$user,$pass" "sftp://$host" <<EOF
+set net:timeout 15
+set sftp:auto-confirm yes
+cd "$parent_path"
+cls -F
+quit
+EOF
+    2>&1); }; then
+        result_status=0
+    else
+        result_status=$?
         log_and_display "${RED}SFTP 列表失败。错误: ${lftp_output}${NC}" "" "/dev/stderr"; return 1;
     fi
+    
     local contents=()
-    while IFS= read -r line; do
-        if echo "$line" | grep -qvE '^(cd ok|quit|cls)'; then
-            local cleaned_name="${line%/}"
-            if [[ -z "$cleaned_name" || "$cleaned_name" == "." || "$cleaned_name" == ".." ]]; then continue; fi
-            if [[ "$line" =~ /$ ]]; then contents+=("${cleaned_name} (文件夹)"); else contents+=("${cleaned_name} (文件)"); fi
-        fi
-    done <<< "$lftp_output"
+    if [ "$result_status" -eq 0 ] && [[ -n "$lftp_output" ]]; then
+        while IFS= read -r line; do
+            # Filter out lftp's own messages
+            if echo "$line" | grep -qvE '^(cd ok|quit|cls)'; then
+                local cleaned_name="${line%/}" # Remove trailing slash if it's a directory
+                if [[ -z "$cleaned_name" || "$cleaned_name" == "." || "$cleaned_name" == ".." ]]; then continue; fi
+                if [[ "$line" =~ /$ ]]; then 
+                    contents+=("${cleaned_name} (文件夹)")
+                else 
+                    contents+=("${cleaned_name} (文件)")
+                fi
+            fi
+        done <<< "$lftp_output"
+    fi
+
     if [ ${#contents[@]} -eq 0 ]; then log_and_display "${YELLOW}SFTP 路径 '${parent_path}' 下无内容。${NC}" "" "/dev/stderr"; fi
     IFS=$'\n' contents=($(sort <<<"${contents[*]}")); unset IFS; printf '%s\n' "${contents[@]}"; return 0;
 }
 
+
 # ================================================================
-# ===         增强型路径选择函数 (交互式浏览)                  ===
+# ===         增强型路径选择函数 (交互式浏览)              ===
 # ================================================================
 
 choose_s3_r2_path() {
@@ -1124,9 +1173,20 @@ choose_webdav_path() {
 
         # Construct the full URL for the current path
         local base_webdav_url="${WEBDAV_URL%/}" # Ensure no trailing slash on base URL
-        local current_full_webdav_url="${base_webdav_url}${current_remote_path}"
+        
+        # MODIFICATION: Replaced simple concatenation with robust URL cleaning
+        # This prevents issues like "http://a.com//b/c"
+        local temp_url="${base_webdav_url}${current_remote_path}"
+        local proto
+        proto=$(echo "$temp_url" | grep -oE '^[a-zA-Z]+://')
+        local path_part
+        path_part=$(echo "$temp_url" | sed -E "s|${proto}||")
+        local cleaned_path
+        cleaned_path=$(echo "$path_part" | sed -E 's|/{2,}|/|g')
+        local current_full_webdav_url="${proto}${cleaned_path}"
 
-        local remote_contents_str=$(get_webdav_direct_contents "$current_full_webdav_url")
+        local remote_contents_str
+        remote_contents_str=$(get_webdav_direct_contents "$current_full_webdav_url")
         local get_contents_status=$?
         local remote_contents_array=()
 
@@ -1232,20 +1292,19 @@ choose_webdav_path() {
     fi
 }
 
+# MODIFIED: Refactored to use realpath for robust path manipulation
 choose_ftp_path() {
     local initial_path="${FTP_BACKUP_PATH:-/}"
     local current_remote_path="$initial_path"
     local final_selected_path=""
 
-    # Normalize initial path
-    if [[ "${current_remote_path:0:1}" != "/" ]]; then
-        current_remote_path="/$current_remote_path"
-    fi
-    if [[ "$current_remote_path" != "/" && "${current_remote_path: -1}" != "/" ]]; then
-        current_remote_path="${current_remote_path}/"
-    fi
-
     while true; do
+        # --- FIX: NORMALIZE PATH using realpath -m ---
+        current_remote_path=$(realpath -m "$current_remote_path")
+        if [[ "$current_remote_path" != "/" && "${current_remote_path: -1}" != "/" ]]; then
+            current_remote_path="${current_remote_path}/"
+        fi
+        
         display_header
         echo -e "${BLUE}=== 设置 FTP 备份目标路径 ===${NC}"
         echo -e "当前浏览路径: ${YELLOW}${current_remote_path:-/}${NC}\n"
@@ -1287,14 +1346,8 @@ choose_ftp_path() {
         case "$choice" in
             "m" | "M" )
                 if [[ "$current_remote_path" != "/" ]]; then
-                    current_remote_path="${current_remote_path%/}"
-                    current_remote_path="$(dirname "$current_remote_path")"
-                    if [[ "$current_remote_path" == "." ]]; then
-                        current_remote_path="/"
-                    else
-                        current_remote_path="${current_remote_path}/"
-                    fi
-                    log_and_display "已返回上一级目录: ${current_remote_path:-/}" "${BLUE}"
+                    current_remote_path=$(realpath -m "${current_remote_path}/../")
+                    log_and_display "已返回上一级目录: ${current_remote_path}" "${BLUE}"
                 else
                     log_and_display "${YELLOW}已在根目录，无法返回上一级。${NC}"
                 fi
@@ -1306,14 +1359,15 @@ choose_ftp_path() {
                     if echo "$chosen_item_with_type" | grep -q " (文件夹)$"; then
                         local chosen_folder="$(echo "$chosen_item_with_type" | sed 's/\ (文件夹)$//')"
                         current_remote_path="${current_remote_path}${chosen_folder}/"
-                        log_and_display "已进入目录: ${current_remote_path}" "${GREEN}"
+                        log_and_display "已进入目录..." "${GREEN}"
                     else
                         log_and_display "${YELLOW}您选择的是一个文件，不能进入。请选择一个文件夹或按 'k' 键确认当前目录。${NC}"
+                        press_enter_to_continue
                     fi
                 else
                     log_and_display "${RED}无效的数字序号，请重新输入。${NC}"
+                    press_enter_to_continue
                 fi
-                press_enter_to_continue
                 ;;
             [kK] )
                 final_selected_path="$current_remote_path"
@@ -1321,13 +1375,11 @@ choose_ftp_path() {
                 ;;
             [aA] )
                 read -rp "请输入新的 FTP 目标路径（绝对路径或相对于 '${current_remote_path:-/}'）：" new_path_input
-                if [[ "$new_path_input" =~ ^/ ]]; then
-                    final_selected_path="$new_path_input"
-                else
-                    local base_for_relative="${current_remote_path%/}"
-                    final_selected_path="${base_for_relative}/${new_path_input}"
+                if [[ ! "$new_path_input" =~ ^/ ]]; then
+                    new_path_input="${current_remote_path}${new_path_input}"
                 fi
-                if [[ -n "$final_selected_path" && "$final_selected_path" != "/" && "${final_selected_path: -1}" != "/" ]]; then
+                final_selected_path=$(realpath -m "$new_path_input")
+                if [[ "$final_selected_path" != "/" && "${final_selected_path: -1}" != "/" ]]; then
                     final_selected_path="${final_selected_path}/"
                 fi
                 break
@@ -1355,20 +1407,19 @@ choose_ftp_path() {
     fi
 }
 
+# MODIFIED: Refactored to use realpath for robust path manipulation
 choose_ftps_path() {
     local initial_path="${FTPS_BACKUP_PATH:-/}"
     local current_remote_path="$initial_path"
     local final_selected_path=""
 
-    # Normalize initial path
-    if [[ "${current_remote_path:0:1}" != "/" ]]; then
-        current_remote_path="/$current_remote_path"
-    fi
-    if [[ "$current_remote_path" != "/" && "${current_remote_path: -1}" != "/" ]]; then
-        current_remote_path="${current_remote_path}/"
-    fi
-
     while true; do
+        # --- FIX: NORMALIZE PATH using realpath -m ---
+        current_remote_path=$(realpath -m "$current_remote_path")
+        if [[ "$current_remote_path" != "/" && "${current_remote_path: -1}" != "/" ]]; then
+            current_remote_path="${current_remote_path}/"
+        fi
+
         display_header
         echo -e "${BLUE}=== 设置 FTPS 备份目标路径 ===${NC}"
         echo -e "当前浏览路径: ${YELLOW}${current_remote_path:-/}${NC}\n"
@@ -1411,14 +1462,8 @@ choose_ftps_path() {
         case "$choice" in
             "m" | "M" )
                 if [[ "$current_remote_path" != "/" ]]; then
-                    current_remote_path="${current_remote_path%/}"
-                    current_remote_path="$(dirname "$current_remote_path")"
-                    if [[ "$current_remote_path" == "." ]]; then
-                        current_remote_path="/"
-                    else
-                        current_remote_path="${current_remote_path}/"
-                    fi
-                    log_and_display "已返回上一级目录: ${current_remote_path:-/}" "${BLUE}"
+                    current_remote_path=$(realpath -m "${current_remote_path}/../")
+                    log_and_display "已返回上一级目录: ${current_remote_path}" "${BLUE}"
                 else
                     log_and_display "${YELLOW}已在根目录，无法返回上一级。${NC}"
                 fi
@@ -1430,14 +1475,15 @@ choose_ftps_path() {
                     if echo "$chosen_item_with_type" | grep -q " (文件夹)$"; then
                         local chosen_folder="$(echo "$chosen_item_with_type" | sed 's/\ (文件夹)$//')"
                         current_remote_path="${current_remote_path}${chosen_folder}/"
-                        log_and_display "已进入目录: ${current_remote_path}" "${GREEN}"
+                        log_and_display "已进入目录..." "${GREEN}"
                     else
                         log_and_display "${YELLOW}您选择的是一个文件，不能进入。请选择一个文件夹或按 'k' 键确认当前目录。${NC}"
+                        press_enter_to_continue
                     fi
                 else
                     log_and_display "${RED}无效的数字序号，请重新输入。${NC}"
+                    press_enter_to_continue
                 fi
-                press_enter_to_continue
                 ;;
             [kK] )
                 final_selected_path="$current_remote_path"
@@ -1445,13 +1491,11 @@ choose_ftps_path() {
                 ;;
             [aA] )
                 read -rp "请输入新的 FTPS 目标路径（绝对路径或相对于 '${current_remote_path:-/}'）：" new_path_input
-                if [[ "$new_path_input" =~ ^/ ]]; then
-                    final_selected_path="$new_path_input"
-                else
-                    local base_for_relative="${current_remote_path%/}"
-                    final_selected_path="${base_for_relative}/${new_path_input}"
+                if [[ ! "$new_path_input" =~ ^/ ]]; then
+                    new_path_input="${current_remote_path}${new_path_input}"
                 fi
-                if [[ -n "$final_selected_path" && "$final_selected_path" != "/" && "${final_selected_path: -1}" != "/" ]]; then
+                final_selected_path=$(realpath -m "$new_path_input")
+                if [[ "$final_selected_path" != "/" && "${final_selected_path: -1}" != "/" ]]; then
                     final_selected_path="${final_selected_path}/"
                 fi
                 break
@@ -1479,20 +1523,19 @@ choose_ftps_path() {
     fi
 }
 
+# MODIFIED: Refactored to use realpath for robust path manipulation
 choose_sftp_path() {
     local initial_path="${SFTP_BACKUP_PATH:-/}"
     local current_remote_path="$initial_path"
     local final_selected_path=""
 
-    # Normalize initial path
-    if [[ "${current_remote_path:0:1}" != "/" ]]; then
-        current_remote_path="/$current_remote_path"
-    fi
-    if [[ "$current_remote_path" != "/" && "${current_remote_path: -1}" != "/" ]]; then
-        current_remote_path="${current_remote_path}/"
-    fi
-
     while true; do
+        # --- FIX: NORMALIZE PATH using realpath -m ---
+        current_remote_path=$(realpath -m "$current_remote_path")
+        if [[ "$current_remote_path" != "/" && "${current_remote_path: -1}" != "/" ]]; then
+            current_remote_path="${current_remote_path}/"
+        fi
+
         display_header
         echo -e "${BLUE}=== 设置 SFTP 备份目标路径 ===${NC}"
         echo -e "当前浏览路径: ${YELLOW}${current_remote_path:-/}${NC}\n"
@@ -1535,14 +1578,8 @@ choose_sftp_path() {
         case "$choice" in
             "m" | "M" )
                 if [[ "$current_remote_path" != "/" ]]; then
-                    current_remote_path="${current_remote_path%/}"
-                    current_remote_path="$(dirname "$current_remote_path")"
-                    if [[ "$current_remote_path" == "." ]]; then
-                        current_remote_path="/"
-                    else
-                        current_remote_path="${current_remote_path}/"
-                    fi
-                    log_and_display "已返回上一级目录: ${current_remote_path:-/}" "${BLUE}"
+                    current_remote_path=$(realpath -m "${current_remote_path}/../")
+                    log_and_display "已返回上一级目录: ${current_remote_path}" "${BLUE}"
                 else
                     log_and_display "${YELLOW}已在根目录，无法返回上一级。${NC}"
                 fi
@@ -1554,14 +1591,15 @@ choose_sftp_path() {
                     if echo "$chosen_item_with_type" | grep -q " (文件夹)$"; then
                         local chosen_folder="$(echo "$chosen_item_with_type" | sed 's/\ (文件夹)$//')"
                         current_remote_path="${current_remote_path}${chosen_folder}/"
-                        log_and_display "已进入目录: ${current_remote_path}" "${GREEN}"
+                        log_and_display "已进入目录..." "${GREEN}"
                     else
                         log_and_display "${YELLOW}您选择的是一个文件，不能进入。请选择一个文件夹或按 'k' 键确认当前目录。${NC}"
+                        press_enter_to_continue
                     fi
                 else
                     log_and_display "${RED}无效的数字序号，请重新输入。${NC}"
+                    press_enter_to_continue
                 fi
-                press_enter_to_continue
                 ;;
             [kK] )
                 final_selected_path="$current_remote_path"
@@ -1569,13 +1607,11 @@ choose_sftp_path() {
                 ;;
             [aA] )
                 read -rp "请输入新的 SFTP 目标路径（绝对路径或相对于 '${current_remote_path:-/}'）：" new_path_input
-                if [[ "$new_path_input" =~ ^/ ]]; then
-                    final_selected_path="$new_path_input"
-                else
-                    local base_for_relative="${current_remote_path%/}"
-                    final_selected_path="${base_for_relative}/${new_path_input}"
+                if [[ ! "$new_path_input" =~ ^/ ]]; then
+                    new_path_input="${current_remote_path}${new_path_input}"
                 fi
-                if [[ -n "$final_selected_path" && "$final_selected_path" != "/" && "${final_selected_path: -1}" != "/" ]]; then
+                final_selected_path=$(realpath -m "$new_path_input")
+                if [[ "$final_selected_path" != "/" && "${final_selected_path: -1}" != "/" ]]; then
                     final_selected_path="${final_selected_path}/"
                 fi
                 break
@@ -1605,7 +1641,7 @@ choose_sftp_path() {
 
 
 # ================================================================
-# ===         云存储账号管理菜单                             ===
+# ===         云存储账号管理菜单                      ===
 # ================================================================
 
 # 管理 S3/R2 账号设置
@@ -2272,7 +2308,7 @@ set_retention_policy() {
             "none") echo -e "  ${YELLOW}无保留策略（所有备份将保留）${NC}" ;;
             "count") echo -e "  ${YELLOW}保留最新 ${RETENTION_VALUE} 个备份${NC}" ;;
             "days")  echo -e "  ${YELLOW}保留最近 ${RETENTION_VALUE} 天内的备份${NC}" ;;
-            *)       echo -e "  ${YELLOW}未知策略或未设置${NC}" ;; # 添加默认情况
+            *)      echo -e "  ${YELLOW}未知策略或未设置${NC}" ;; # 添加默认情况
         esac
         echo ""
         echo "1. 设置按数量保留 (例如：保留最新的 5 个备份)"
