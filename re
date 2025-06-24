@@ -203,6 +203,8 @@ load_config() {
 check_dependencies() {
     local missing_deps=()
     command -v zip &> /dev/null || missing_deps+=("zip")
+    # [NEW] 恢复功能需要 unzip
+    command -v unzip &> /dev/null || missing_deps+=("unzip")
     command -v realpath &> /dev/null || missing_deps+=("realpath")
     command -v rclone &> /dev/null || missing_deps+=("rclone") # 主要依赖
 
@@ -212,7 +214,7 @@ check_dependencies() {
 
     if [ ${#missing_deps[@]} -gt 0 ]; then
         log_and_display "${RED}检测到以下依赖项缺失，请安装后重试：${missing_deps[*]}${NC}"
-        log_and_display "例如 (Debian/Ubuntu): sudo apt update && sudo apt install zip realpath curl" "${YELLOW}"
+        log_and_display "例如 (Debian/Ubuntu): sudo apt update && sudo apt install zip unzip realpath curl" "${YELLOW}"
         log_and_display "要安装 Rclone, 请运行: curl https://rclone.org/install.sh | sudo bash" "${YELLOW}"
         press_enter_to_continue
         return 1
@@ -247,12 +249,137 @@ send_telegram_message() {
     fi
 }
 
-# 1. 设置自动备份间隔
+# --- [NEW] 备份恢复功能 ---
+restore_backup() {
+    display_header
+    echo -e "${BLUE}=== 9. 从云端恢复到本地 ===${NC}"
+
+    if [ ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} -eq 0 ]; then
+        log_and_display "${RED}错误：没有已启用的备份目标可供恢复。${NC}"
+        press_enter_to_continue
+        return
+    fi
+
+    log_and_display "请选择要从哪个目标恢复："
+    local enabled_targets=()
+    for index in "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}"; do
+        enabled_targets+=("${RCLONE_TARGETS_ARRAY[$index]}")
+    done
+
+    for i in "${!enabled_targets[@]}"; do
+        echo " $((i+1)). ${enabled_targets[$i]}"
+    done
+    echo " 0. 返回"
+    read -rp "请输入选项: " target_choice
+
+    if ! [[ "$target_choice" =~ ^[0-9]+$ ]] || [ "$target_choice" -eq 0 ] || [ "$target_choice" -gt ${#enabled_targets[@]} ]; then
+        log_and_display "${RED}无效选项或已取消。${NC}"
+        press_enter_to_continue
+        return
+    fi
+    
+    local selected_target="${enabled_targets[$((target_choice-1))]}"
+    log_and_display "正在从 ${selected_target} 获取备份列表..."
+    
+    local backup_files_str
+    backup_files_str=$(rclone lsf --files-only "${selected_target}" | grep -E '_[0-9]{14}\.zip$' | sort -r)
+
+    if [[ -z "$backup_files_str" ]]; then
+        log_and_display "${RED}在 ${selected_target} 中未找到任何备份文件。${NC}"
+        press_enter_to_continue
+        return
+    fi
+    
+    local backup_files=()
+    mapfile -t backup_files <<< "$backup_files_str"
+    
+    log_and_display "发现以下备份文件（按最新排序）："
+    for i in "${!backup_files[@]}"; do
+        echo " $((i+1)). ${backup_files[$i]}"
+    done
+    echo " 0. 返回"
+    read -rp "请选择要恢复的备份文件序号: " file_choice
+
+    if ! [[ "$file_choice" =~ ^[0-9]+$ ]] || [ "$file_choice" -eq 0 ] || [ "$file_choice" -gt ${#backup_files[@]} ]; then
+        log_and_display "${RED}无效选项或已取消。${NC}"
+        press_enter_to_continue
+        return
+    fi
+
+    local selected_file="${backup_files[$((file_choice-1))]}"
+    local remote_file_path="${selected_target}"
+    if [[ "${remote_file_path: -1}" != "/" ]]; then
+        remote_file_path+="/"
+    fi
+    remote_file_path+="${selected_file}"
+
+    local temp_archive_path="${TEMP_DIR}/${selected_file}"
+    log_and_display "正在下载备份文件: ${selected_file}..." "${YELLOW}"
+    if ! rclone copyto "${remote_file_path}" "${temp_archive_path}" --progress; then
+        log_and_display "${RED}下载备份文件失败！${NC}"
+        press_enter_to_continue
+        return
+    fi
+    log_and_display "${GREEN}下载成功！${NC}"
+    
+    echo ""
+    echo "您想如何处理这个备份文件？"
+    echo " 1. 解压到指定目录"
+    echo " 2. 仅列出压缩包内容"
+    echo " 0. 取消"
+    read -rp "请输入选项: " action_choice
+    
+    case "$action_choice" in
+        1)
+            read -rp "请输入要解压到的绝对路径 (例如: /root/restore/): " restore_dir
+            if [[ -z "$restore_dir" ]]; then
+                log_and_display "${RED}路径不能为空！${NC}"
+            else
+                mkdir -p "$restore_dir"
+                log_and_display "正在解压到 ${restore_dir} ..." "${YELLOW}"
+                if unzip -o "${temp_archive_path}" -d "${restore_dir}"; then
+                     log_and_display "${GREEN}解压完成！${NC}"
+                else
+                     log_and_display "${RED}解压失败！${NC}"
+                fi
+            fi
+            ;;
+        2)
+            log_and_display "备份文件 '${selected_file}' 内容如下：" "${BLUE}"
+            unzip -l "${temp_archive_path}"
+            ;;
+        *)
+            log_and_display "已取消操作。"
+            ;;
+    esac
+    rm -f "${temp_archive_path}"
+    press_enter_to_continue
+}
+
+# --- [NEW] 自动备份与计划任务 ---
+manage_auto_backup_menu() {
+    while true; do
+        display_header
+        echo -e "${BLUE}=== 1. 自动备份与计划任务 ===${NC}"
+        echo -e "  1. ${YELLOW}设置自动备份间隔${NC} (当前: ${AUTO_BACKUP_INTERVAL_DAYS} 天)"
+        echo -e "  2. ${YELLOW}[助手] 配置 Cron 定时任务${NC}"
+        echo ""
+        echo -e "  0. ${RED}返回主菜单${NC}"
+        read -rp "请输入选项: " choice
+        
+        case $choice in
+            1) set_auto_backup_interval ;;
+            2) setup_cron_job ;;
+            0) break ;;
+            *) log_and_display "${RED}无效选项。${NC}"; press_enter_to_continue ;;
+        esac
+    done
+}
+
 set_auto_backup_interval() {
     display_header
-    echo -e "${BLUE}=== 1. 自动备份设定 ===${NC}"
-    echo "当前自动备份间隔: ${AUTO_BACKUP_INTERVAL_DAYS} 天"
-    read -rp "请输入新的自动备份间隔时间（天数，最小1天）: " interval_input
+    echo -e "${BLUE}--- 设置自动备份间隔 ---${NC}"
+    read -rp "请输入新的自动备份间隔时间（天数，最小1天）[当前: ${AUTO_BACKUP_INTERVAL_DAYS}]: " interval_input
     if [[ "$interval_input" =~ ^[0-9]+$ ]] && [ "$interval_input" -ge 1 ]; then
         AUTO_BACKUP_INTERVAL_DAYS="$interval_input"
         save_config
@@ -260,6 +387,53 @@ set_auto_backup_interval() {
     else
         log_and_display "${RED}输入无效。${NC}"
     fi
+    press_enter_to_continue
+}
+
+setup_cron_job() {
+    display_header
+    echo -e "${BLUE}--- Cron 定时任务助手 ---${NC}"
+    echo "此助手可以帮助您添加一个系统的定时任务，以实现无人值守自动备份。"
+    echo -e "${YELLOW}脚本将每天在您指定的时间运行一次，并根据您设置的间隔天数决定是否执行备份。${NC}"
+    
+    read -rp "请输入您希望每天执行检查的时间 (24小时制, HH:MM, 例如 03:00): " cron_time
+    if ! [[ "$cron_time" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
+        log_and_display "${RED}时间格式无效！请输入 HH:MM 格式。${NC}"
+        press_enter_to_continue
+        return
+    fi
+    
+    local cron_minute="${cron_time#*:}"
+    local cron_hour="${cron_time%%:*}"
+    
+    # 确保分钟和小时的前导零被正确处理
+    cron_minute=$(printf "%d" "$cron_minute")
+    cron_hour=$(printf "%d" "$cron_hour")
+
+    local script_path
+    script_path=$(readlink -f "$0")
+    local cron_command="${cron_minute} ${cron_hour} * * * ${script_path} check_auto_backup >/dev/null 2>&1"
+    
+    # 检查是否已存在相同的任务
+    if crontab -l 2>/dev/null | grep -qF "$script_path check_auto_backup"; then
+        log_and_display "${YELLOW}检测到已存在此脚本的定时任务。${NC}"
+        read -rp "您想用新的时间设置覆盖它吗？(y/N): " confirm_replace
+        if [[ "$confirm_replace" =~ ^[Yy]$ ]]; then
+            # 移除旧的，添加新的
+            local temp_crontab
+            temp_crontab=$(crontab -l 2>/dev/null | grep -vF "$script_path check_auto_backup")
+            (echo "${temp_crontab}"; echo "$cron_command") | crontab -
+            log_and_display "${GREEN}定时任务已更新！${NC}"
+        else
+            log_and_display "已取消操作。"
+        fi
+    else
+        # 直接添加新的
+        (crontab -l 2>/dev/null; echo "$cron_command") | crontab -
+        log_and_display "${GREEN}定时任务添加成功！${NC}"
+    fi
+
+    log_and_display "您可以使用 'crontab -l' 命令查看所有定时任务。"
     press_enter_to_continue
 }
 
@@ -1485,7 +1659,9 @@ perform_backup() {
     fi
 
     log_and_display "${BLUE}--- ${backup_type} 过程结束 ---${NC}"
-    if [[ "$backup_type" == "自动备份 (Cron)" ]]; then
+    
+    # [MODIFIED] Bug Fix: 任何成功的备份都会更新时间戳
+    if [ "$overall_succeeded_count" -gt 0 ]; then
         LAST_AUTO_BACKUP_TIMESTAMP=$(date +%s)
         save_config
     fi
@@ -1499,7 +1675,7 @@ perform_backup() {
     fi
 }
 
-# [NEW] Rclone 安装/卸载管理
+# Rclone 安装/卸载管理
 manage_rclone_installation() {
     while true; do
         display_header
@@ -1560,6 +1736,60 @@ manage_rclone_installation() {
     done
 }
 
+# [NEW] 配置导入/导出助手
+manage_config_import_export() {
+    display_header
+    echo -e "${BLUE}=== 10. [助手] 配置导入/导出 ===${NC}"
+    echo "此功能可将当前所有设置导出为便携文件，或从文件导入。"
+    echo ""
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  1. ${YELLOW}导出配置到文件${NC}"
+    echo -e "  2. ${YELLOW}从文件导入配置${NC}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  0. ${RED}返回主菜单${NC}"
+    read -rp "请输入选项: " choice
+
+    case $choice in
+        1) # 导出
+            local export_file
+            export_file="$(dirname "$0")/personal_backup.conf"
+            read -rp "确定要将当前配置导出到 ${export_file} 吗？(Y/n): " confirm_export
+            if [[ ! "$confirm_export" =~ ^[Nn]$ ]]; then
+                cp "$CONFIG_FILE" "$export_file"
+                log_and_display "${GREEN}配置已成功导出到: ${export_file}${NC}"
+            else
+                log_and_display "已取消导出。"
+            fi
+            press_enter_to_continue
+            ;;
+        2) # 导入
+            read -rp "请输入配置文件的绝对路径: " import_file
+            if [[ -f "$import_file" ]]; then
+                read -rp "${RED}警告：这将覆盖当前所有设置！确定要从 '${import_file}' 导入吗？(y/N): ${NC}" confirm_import
+                if [[ "$confirm_import" =~ ^[Yy]$ ]]; then
+                    # 备份当前配置
+                    if [[ -f "$CONFIG_FILE" ]]; then
+                        cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
+                        log_and_display "当前配置已备份到 ${CONFIG_FILE}.bak" "${YELLOW}"
+                    fi
+                    # 导入新配置
+                    cp "$import_file" "$CONFIG_FILE"
+                    log_and_display "${GREEN}配置导入成功！请重启脚本以使新配置生效。${NC}"
+                    press_enter_to_continue
+                    exit 0
+                else
+                    log_and_display "已取消导入。"
+                fi
+            else
+                log_and_display "${RED}错误：文件 '${import_file}' 不存在。${NC}"
+            fi
+            press_enter_to_continue
+            ;;
+        0) ;;
+        *) log_and_display "${RED}无效选项。${NC}"; press_enter_to_continue ;;
+    esac
+}
+
 # 99. 卸载脚本
 uninstall_script() {
     display_header
@@ -1583,8 +1813,24 @@ uninstall_script() {
 # 主菜单
 show_main_menu() {
     display_header
+
+    # [NEW] 状态总览面板
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━ 状态总览 ━━━━━━━━━━━━━━━━━━━${NC}"
+    local last_backup_str="从未"
+    if [[ "$LAST_AUTO_BACKUP_TIMESTAMP" -ne 0 ]]; then
+        last_backup_str=$(date -d "@$LAST_AUTO_BACKUP_TIMESTAMP" '+%Y-%m-%d %H:%M:%S')
+    fi
+    echo -e "上次备份: ${last_backup_str}"
+    local next_backup_str="取决于间隔设置"
+    if [[ "$LAST_AUTO_BACKUP_TIMESTAMP" -ne 0 ]]; then
+        local next_ts=$((LAST_AUTO_BACKUP_TIMESTAMP + AUTO_BACKUP_INTERVAL_DAYS * 86400))
+        next_backup_str=$(date -d "@$next_ts" '+%Y-%m-%d %H:%M:%S')
+    fi
+    echo -e "下次预估: ${next_backup_str}"
+    echo -e "备份源: ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个路径   已启用目标: ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} 个"
+
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 功能选项 ━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  1. ${YELLOW}自动备份设定${NC} (间隔: ${AUTO_BACKUP_INTERVAL_DAYS} 天)"
+    echo -e "  1. ${YELLOW}自动备份与计划任务${NC} (间隔: ${AUTO_BACKUP_INTERVAL_DAYS} 天)" # [MODIFIED]
     echo -e "  2. ${YELLOW}手动备份${NC}"
     echo -e "  3. ${YELLOW}自定义备份路径${NC} (数量: ${#BACKUP_SOURCE_PATHS_ARRAY[@]})"
     echo -e "  4. ${YELLOW}压缩包格式${NC} (ZIP)"
@@ -1618,6 +1864,9 @@ show_main_menu() {
     fi
     echo -e "  8. ${YELLOW}Rclone 安装/卸载${NC} ${rclone_version_text}"
     
+    echo -e "  9. ${YELLOW}从云端恢复到本地${NC}" # [MODIFIED]
+    echo -e "  10. ${YELLOW}[助手] 配置导入/导出${NC}" # [NEW]
+
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "  0. ${RED}退出脚本${NC}"
     echo -e "  99. ${RED}卸载脚本${NC}"
@@ -1628,14 +1877,16 @@ show_main_menu() {
 process_menu_choice() {
     read -rp "请输入选项: " choice
     case $choice in
-        1) set_auto_backup_interval ;;
+        1) manage_auto_backup_menu ;; # [MODIFIED]
         2) manual_backup ;;
         3) set_backup_path ;;
         4) display_compression_info ;;
         5) set_cloud_storage ;;
         6) set_telegram_notification ;;
         7) set_retention_policy ;;
-        8) manage_rclone_installation ;; # [NEW]
+        8) manage_rclone_installation ;; 
+        9) restore_backup ;;
+        10) manage_config_import_export ;; # [NEW]
         0) log_and_display "${GREEN}感谢使用！${NC}"; exit 0 ;;
         99) uninstall_script ;;
         *) log_and_display "${RED}无效选项。${NC}"; press_enter_to_continue ;;
