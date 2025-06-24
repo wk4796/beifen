@@ -22,6 +22,11 @@ PACKAGING_STRATEGY="separate" # "separate" (独立打包) or "single" (合并打
 BACKUP_MODE="archive"           # "archive" (归档模式) or "sync" (同步模式)
 ENABLE_INTEGRITY_CHECK="true"   # "true" or "false"，备份后完整性校验
 
+# 压缩格式配置
+COMPRESSION_FORMAT="zip"      # "zip" or "tar.gz"
+COMPRESSION_LEVEL=6           # 1 (fastest) to 9 (best)
+ZIP_PASSWORD=""               # Password for zip files, empty for none
+
 AUTO_BACKUP_INTERVAL_DAYS=7 # 默认自动备份间隔天数
 LAST_AUTO_BACKUP_TIMESTAMP=0 # 上次自动备份的 Unix 时间戳
 
@@ -167,7 +172,9 @@ save_config() {
         echo "PACKAGING_STRATEGY=\"$PACKAGING_STRATEGY\""
         echo "BACKUP_MODE=\"$BACKUP_MODE\""
         echo "ENABLE_INTEGRITY_CHECK=\"$ENABLE_INTEGRITY_CHECK\""
-
+        echo "COMPRESSION_FORMAT=\"$COMPRESSION_FORMAT\""
+        echo "COMPRESSION_LEVEL=$COMPRESSION_LEVEL"
+        echo "ZIP_PASSWORD=\"$ZIP_PASSWORD\""
         echo "RCLONE_BWLIMIT=\"$RCLONE_BWLIMIT\""
         echo "AUTO_BACKUP_INTERVAL_DAYS=$AUTO_BACKUP_INTERVAL_DAYS"
         echo "LAST_AUTO_BACKUP_TIMESTAMP=$LAST_AUTO_BACKUP_TIMESTAMP"
@@ -246,6 +253,7 @@ check_dependencies() {
     local apt_packages=()
     command -v zip &> /dev/null || { missing_deps+=("zip"); apt_packages+=("zip"); }
     command -v unzip &> /dev/null || { missing_deps+=("unzip"); apt_packages+=("unzip"); }
+    command -v tar &> /dev/null || { missing_deps+=("tar"); apt_packages+=("tar"); }
     command -v realpath &> /dev/null || { missing_deps+=("realpath"); apt_packages+=("coreutils"); }
     command -v rclone &> /dev/null || missing_deps+=("rclone")
     command -v df &> /dev/null || { missing_deps+=("df (coreutils)"); apt_packages+=("coreutils"); }
@@ -328,8 +336,7 @@ send_telegram_message() {
 restore_backup() {
     display_header
     echo -e "${BLUE}=== 从云端恢复到本地 ===${NC}"
-    log_and_display "${YELLOW}请注意：此功能仅适用于“归档模式”创建的 .zip 备份文件。${NC}"
-
+    log_and_display "${YELLOW}请注意：此功能仅适用于“归档模式”创建的备份文件。${NC}"
 
     if [ ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} -eq 0 ]; then
         log_and_display "${RED}错误：没有已启用的备份目标可供恢复。${NC}"
@@ -365,10 +372,10 @@ restore_backup() {
     log_and_display "正在从 ${selected_target} 获取备份列表..."
     
     local backup_files_str
-    backup_files_str=$(rclone lsf --files-only "${selected_target}" | grep '\.zip$' | sort -r)
+    backup_files_str=$(rclone lsf --files-only "${selected_target}" | grep -E '\.zip$|\.tar\.gz$' | sort -r)
 
     if [[ -z "$backup_files_str" ]]; then
-        log_and_display "${RED}在 ${selected_target} 中未找到任何 .zip 备份文件。${NC}"
+        log_and_display "${RED}在 ${selected_target} 中未找到任何 .zip 或 .tar.gz 备份文件。${NC}"
         press_enter_to_continue
         return
     fi
@@ -433,16 +440,40 @@ restore_backup() {
             else
                 mkdir -p "$restore_dir"
                 log_and_display "正在解压到 ${restore_dir} ..." "${YELLOW}"
-                if unzip -o "${temp_archive_path}" -d "${restore_dir}"; then
-                    log_and_display "${GREEN}解压完成！${NC}"
+                if [[ "$selected_file" == *.zip ]]; then
+                    if unzip -o "${temp_archive_path}" -d "${restore_dir}" &>/dev/null; then
+                        log_and_display "${GREEN}解压完成！${NC}"
+                    else
+                        read -s -p "解压失败，文件可能已加密。请输入密码 (留空则跳过): " restore_pass
+                        echo ""
+                        if [[ -n "$restore_pass" ]]; then
+                            if unzip -o -P "$restore_pass" "${temp_archive_path}" -d "${restore_dir}"; then
+                                log_and_display "${GREEN}解压完成！${NC}"
+                            else
+                                log_and_display "${RED}密码错误或文件损坏，解压失败！${NC}"
+                            fi
+                        else
+                            log_and_display "${RED}解压失败！${NC}"
+                        fi
+                    fi
+                elif [[ "$selected_file" == *.tar.gz ]]; then
+                    if tar -xzf "${temp_archive_path}" -C "${restore_dir}"; then
+                        log_and_display "${GREEN}解压完成！${NC}"
+                    else
+                        log_and_display "${RED}解压失败！${NC}"
+                    fi
                 else
-                    log_and_display "${RED}解压失败！${NC}"
+                    log_and_display "${RED}未知的压缩格式！${NC}"
                 fi
             fi
             ;;
         2)
             log_and_display "备份文件 '${selected_file}' 内容如下：" "${BLUE}"
-            unzip -l "${temp_archive_path}"
+            if [[ "$selected_file" == *.zip ]]; then
+                unzip -l "${temp_archive_path}"
+            elif [[ "$selected_file" == *.tar.gz ]]; then
+                tar -tzvf "${temp_archive_path}"
+            fi
             ;;
         *)
             log_and_display "已取消操作。"
@@ -759,13 +790,73 @@ set_backup_path_and_mode() {
     done
 }
 
+# [NEW] 管理压缩设置的菜单
+manage_compression_settings() {
+    while true; do
+        display_header
+        echo -e "${BLUE}=== 4. 压缩包格式与选项 ===${NC}"
+        echo -e "当前格式: ${GREEN}${COMPRESSION_FORMAT}${NC}"
+        echo -e "压缩级别: ${GREEN}${COMPRESSION_LEVEL}${NC} (1=最快, 9=最高)"
+        local pass_status="未设置"
+        if [[ -n "$ZIP_PASSWORD" ]]; then
+            pass_status="${YELLOW}已设置${NC}"
+        fi
+        echo -e "ZIP 密码: ${pass_status}"
+        echo ""
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  1. ${YELLOW}切换压缩格式 (zip / tar.gz)${NC}"
+        echo -e "  2. ${YELLOW}设置压缩级别${NC}"
+        echo -e "  3. ${YELLOW}设置/清除 ZIP 密码${NC} (仅对 zip 格式有效)"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  0. ${RED}返回主菜单${NC}"
+        read -rp "请输入选项: " choice
 
-display_compression_info() {
-    display_header
-    echo -e "${BLUE}=== 4. 压缩包格式 ===${NC}"
-    log_and_display "本脚本在“归档模式”下使用的压缩格式为：${GREEN}ZIP${NC}。"
-    press_enter_to_continue
+        case "$choice" in
+            1)
+                if [[ "$COMPRESSION_FORMAT" == "zip" ]]; then
+                    COMPRESSION_FORMAT="tar.gz"
+                    log_and_display "${GREEN}压缩格式已切换为 tar.gz${NC}"
+                else
+                    COMPRESSION_FORMAT="zip"
+                    log_and_display "${GREEN}压缩格式已切换为 zip${NC}"
+                fi
+                save_config
+                press_enter_to_continue
+                ;;
+            2)
+                read -rp "请输入新的压缩级别 (1-9) [当前: ${COMPRESSION_LEVEL}]: " level_input
+                if [[ "$level_input" =~ ^[1-9]$ ]]; then
+                    COMPRESSION_LEVEL="$level_input"
+                    save_config
+                    log_and_display "${GREEN}压缩级别已设置为 ${COMPRESSION_LEVEL}${NC}"
+                else
+                    log_and_display "${RED}无效输入，请输入 1 到 9 之间的数字。${NC}"
+                fi
+                press_enter_to_continue
+                ;;
+            3)
+                if [[ "$COMPRESSION_FORMAT" != "zip" ]]; then
+                     log_and_display "${YELLOW}警告：密码保护仅对 zip 格式有效。${NC}"
+                     press_enter_to_continue
+                     continue
+                fi
+                read -s -p "请输入新的 ZIP 密码 (留空则清除密码): " pass_input
+                echo ""
+                ZIP_PASSWORD="$pass_input"
+                save_config
+                if [[ -n "$ZIP_PASSWORD" ]]; then
+                    log_and_display "${GREEN}ZIP 密码已设置。${NC}"
+                else
+                    log_and_display "${GREEN}ZIP 密码已清除。${NC}"
+                fi
+                press_enter_to_continue
+                ;;
+            0) break ;;
+            *) log_and_display "${RED}无效选项。${NC}"; press_enter_to_continue ;;
+        esac
+    done
 }
+
 
 set_bandwidth_limit() {
     display_header
@@ -933,7 +1024,7 @@ set_retention_policy() {
     while true; do
         display_header
         echo -e "${BLUE}=== 7. 设置备份保留策略 (云端) ===${NC}"
-        echo -e "${YELLOW}请注意：此策略仅对“归档模式”生成的 .zip 文件有效。${NC}"
+        echo -e "${YELLOW}请注意：此策略仅对“归档模式”生成的备份文件有效。${NC}"
         echo "当前策略: "
         case "$RETENTION_POLICY_TYPE" in
             "none") echo -e "  ${YELLOW}无保留策略（所有备份将保留）${NC}" ;;
@@ -1005,10 +1096,10 @@ apply_retention_policy() {
         log_and_display "正在为目标 ${rclone_target} 应用保留策略..."
 
         local backups_list
-        backups_list=$(rclone lsf --files-only "${rclone_target}" | grep '\.zip$' || true)
+        backups_list=$(rclone lsf --files-only "${rclone_target}" | grep -E '\.zip$|\.tar\.gz$' || true)
         
         if [[ -z "$backups_list" ]]; then
-            log_and_display "在 ${rclone_target} 中未找到 .zip 备份文件，跳过。" "${YELLOW}"
+            log_and_display "在 ${rclone_target} 中未找到备份文件，跳过。" "${YELLOW}"
             continue
         fi
 
@@ -1191,24 +1282,33 @@ perform_archive_backup() {
     local timestamp
     timestamp=$(date +%Y%m%d%H%M%S)
     
+    local archive_ext=".zip"
+    if [[ "$COMPRESSION_FORMAT" == "tar.gz" ]]; then
+        archive_ext=".tar.gz"
+    fi
+
     if [[ "$PACKAGING_STRATEGY" == "single" ]]; then
-        log_and_display "打包策略: [所有源打包成一个]。正在创建合并压缩包..." "${BLUE}"
-        local archive_name="all_sources_${timestamp}.zip"
+        log_and_display "打包策略: [所有源打包成一个]。" "${BLUE}"
+        local archive_name="all_sources_${timestamp}${archive_ext}"
         local temp_archive_path="${TEMP_DIR}/${archive_name}"
 
-        # 修改点: 添加 -q 参数实现静默压缩
-        zip -rq "$temp_archive_path" "${BACKUP_SOURCE_PATHS_ARRAY[@]}"
-        
-        if [ $? -eq 0 ]; then
-            local backup_file_size
-            backup_file_size=$(du -h "$temp_archive_path" | awk '{print $1}')
-            log_and_display "合并压缩完成 (大小: ${backup_file_size})。准备上传..." "${GREEN}"
-            
+        log_and_display "正在压缩到 '$archive_name'..."
+        local compress_success=true
+        if [[ "$COMPRESSION_FORMAT" == "zip" ]]; then
+            local zip_args=(-rq -${COMPRESSION_LEVEL})
+            if [[ -n "$ZIP_PASSWORD" ]]; then
+                zip_args+=(-P "$ZIP_PASSWORD")
+            fi
+            zip "${zip_args[@]}" "$temp_archive_path" "${BACKUP_SOURCE_PATHS_ARRAY[@]}" || compress_success=false
+        else # tar.gz
+            GZIP="-${COMPRESSION_LEVEL}" tar -czf "$temp_archive_path" "${BACKUP_SOURCE_PATHS_ARRAY[@]}" || compress_success=false
+        fi
+
+        if $compress_success; then
             if upload_archive "$temp_archive_path" "$archive_name" "所有源"; then
                 any_upload_succeeded="true"
                 overall_succeeded_count=$((total_paths_to_backup))
             fi
-            
             rm -f "$temp_archive_path"
         else
             log_and_display "${RED}创建合并压缩包失败！${NC}"
@@ -1223,7 +1323,7 @@ perform_archive_backup() {
             path_display_name=$(basename "$current_backup_path")
             local sanitized_path_name
             sanitized_path_name=$(echo "$path_display_name" | sed 's/[^a-zA-Z0-9_-]/_/g')
-            local archive_name="${sanitized_path_name}_${timestamp}.zip"
+            local archive_name="${sanitized_path_name}_${timestamp}${archive_ext}"
             local temp_archive_path="${TEMP_DIR}/${archive_name}"
             
             log_and_display "${BLUE}--- 正在处理路径 $((i+1))/${total_paths_to_backup}: ${current_backup_path} ---${NC}"
@@ -1235,15 +1335,18 @@ perform_archive_backup() {
             fi
 
             log_and_display "正在压缩到 '$archive_name'..."
-            if [[ -d "$current_backup_path" ]]; then
-                # 修改点: 添加 -q 参数实现静默压缩
-                (cd "$(dirname "$current_backup_path")" && zip -rq "$temp_archive_path" "$(basename "$current_backup_path")")
-            else
-                # 修改点: 添加 -q 参数实现静默压缩
-                (cd "$(dirname "$current_backup_path")" && zip -q "$temp_archive_path" "$(basename "$current_backup_path")")
+            local compress_success=true
+            if [[ "$COMPRESSION_FORMAT" == "zip" ]]; then
+                local zip_args=(-rq -${COMPRESSION_LEVEL})
+                if [[ -n "$ZIP_PASSWORD" ]]; then
+                    zip_args+=(-P "$ZIP_PASSWORD")
+                fi
+                (cd "$(dirname "$current_backup_path")" && zip "${zip_args[@]}" "$temp_archive_path" "$(basename "$current_backup_path")") || compress_success=false
+            else # tar.gz
+                (cd "$(dirname "$current_backup_path")" && GZIP="-${COMPRESSION_LEVEL}" tar -czf "$temp_archive_path" "$(basename "$current_backup_path")") || compress_success=false
             fi
 
-            if [ $? -ne 0 ]; then
+            if ! $compress_success; then
                 log_and_display "${RED}文件压缩失败！${NC}"
                 send_telegram_message "*${SCRIPT_NAME}：压缩失败*\n路径: \`${current_backup_path}\`"
                 continue
@@ -1548,7 +1651,12 @@ show_main_menu() {
     echo -e "  1. ${YELLOW}自动备份与计划任务${NC} (间隔: ${AUTO_BACKUP_INTERVAL_DAYS} 天)"
     echo -e "  2. ${YELLOW}手动备份${NC}"
     echo -e "  3. ${YELLOW}自定义备份路径与模式${NC}"
-    echo -e "  4. ${YELLOW}压缩包格式${NC} (ZIP)"
+    
+    local format_text="$COMPRESSION_FORMAT"
+    if [[ "$COMPRESSION_FORMAT" == "zip" && -n "$ZIP_PASSWORD" ]]; then
+        format_text+=" (有密码)"
+    fi
+    echo -e "  4. ${YELLOW}压缩包格式与选项${NC} (当前: ${format_text})"
     echo -e "  5. ${YELLOW}云存储设定${NC} (Rclone)"
 
     local telegram_status_text="已禁用"
@@ -1589,7 +1697,7 @@ process_menu_choice() {
         1) manage_auto_backup_menu ;;
         2) manual_backup ;;
         3) set_backup_path_and_mode ;;
-        4) display_compression_info ;;
+        4) manage_compression_settings ;;
         5) set_cloud_storage ;;
         6) set_telegram_notification ;;
         7) set_retention_policy ;;
