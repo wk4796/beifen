@@ -29,6 +29,11 @@ RCLONE_TARGETS_STRING=""
 declare -a ENABLED_RCLONE_TARGET_INDICES_ARRAY=()
 # 用于配置文件保存的已启用目标的索引字符串
 ENABLED_RCLONE_TARGET_INDICES_STRING=""
+# [NEW] 数组，用于为每个目标存储元数据（例如来源）
+declare -a RCLONE_TARGETS_METADATA_ARRAY=()
+# [NEW] 用于配置文件保存的元数据字符串
+RCLONE_TARGETS_METADATA_STRING=""
+
 
 # Telegram 通知变量
 TELEGRAM_BOT_TOKEN=""
@@ -112,6 +117,8 @@ save_config() {
     BACKUP_SOURCE_PATHS_STRING=$(IFS=';;'; echo "${BACKUP_SOURCE_PATHS_ARRAY[*]}")
     RCLONE_TARGETS_STRING=$(IFS=';;'; echo "${RCLONE_TARGETS_ARRAY[*]}")
     ENABLED_RCLONE_TARGET_INDICES_STRING=$(IFS=';;'; echo "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[*]}")
+    # [NEW] 转换元数据数组为字符串
+    RCLONE_TARGETS_METADATA_STRING=$(IFS=';;'; echo "${RCLONE_TARGETS_METADATA_ARRAY[*]}")
 
     {
         echo "BACKUP_SOURCE_PATHS_STRING=\"$BACKUP_SOURCE_PATHS_STRING\""
@@ -121,6 +128,8 @@ save_config() {
         echo "RETENTION_VALUE=$RETENTION_VALUE"
         echo "RCLONE_TARGETS_STRING=\"$RCLONE_TARGETS_STRING\""
         echo "ENABLED_RCLONE_TARGET_INDICES_STRING=\"$ENABLED_RCLONE_TARGET_INDICES_STRING\""
+        # [NEW] 保存元数据
+        echo "RCLONE_TARGETS_METADATA_STRING=\"$RCLONE_TARGETS_METADATA_STRING\""
         echo "TELEGRAM_BOT_TOKEN=\"$TELEGRAM_BOT_TOKEN\""
         echo "TELEGRAM_CHAT_ID=\"$TELEGRAM_CHAT_ID\""
     } > "$CONFIG_FILE"
@@ -164,6 +173,25 @@ load_config() {
         else
             ENABLED_RCLONE_TARGET_INDICES_ARRAY=()
         fi
+        
+        # [NEW] 加载元数据，并处理向后兼容
+        if [[ -n "$RCLONE_TARGETS_METADATA_STRING" ]]; then
+            IFS=';;'; read -r -a RCLONE_TARGETS_METADATA_ARRAY <<< "$RCLONE_TARGETS_METADATA_STRING"
+        fi
+        
+        # 确保元数据数组和目标数组长度一致，以兼容旧配置文件
+        if [[ ${#RCLONE_TARGETS_METADATA_ARRAY[@]} -ne ${#RCLONE_TARGETS_ARRAY[@]} ]]; then
+            log_and_display "检测到旧版配置，正在更新目标元数据..." "${YELLOW}"
+            local temp_meta_array=()
+            for i in "${!RCLONE_TARGETS_ARRAY[@]}"; do
+                # 如果某个位置的元数据不存在，则填充默认值
+                local meta="${RCLONE_TARGETS_METADATA_ARRAY[$i]:-手动添加}"
+                temp_meta_array+=("$meta")
+            done
+            RCLONE_TARGETS_METADATA_ARRAY=("${temp_meta_array[@]}")
+            save_config # 立即保存以更新配置文件
+        fi
+
     else
         log_and_display "未找到配置文件 $CONFIG_FILE，将使用默认配置。" "${YELLOW}"
     fi
@@ -378,6 +406,26 @@ display_compression_info() {
 # ===         在脚本内创建 Rclone 远程端 (增强版)           ===
 # ================================================================
 
+# [NEW] 创建远程端后，提示并添加为备份目标的辅助函数
+prompt_and_add_target() {
+    local remote_name="$1"
+    local source_of_creation="$2" # "由助手创建"
+
+    read -rp "您想现在就为此新远程端设置一个备份目标路径吗? (Y/n): " confirm_add_target
+    if [[ ! "$confirm_add_target" =~ ^[Nn]$ ]]; then
+        log_and_display "正在为远程端 '${remote_name}' 选择路径..." "${BLUE}"
+        if choose_rclone_path "$remote_name"; then
+            local remote_path="$CHOSEN_RCLONE_PATH"
+            RCLONE_TARGETS_ARRAY+=("${remote_name}:${remote_path}")
+            RCLONE_TARGETS_METADATA_ARRAY+=("${source_of_creation}")
+            save_config # 立即保存
+            log_and_display "${GREEN}已成功添加并保存备份目标: ${remote_name}:${remote_path}${NC}"
+        else
+            log_and_display "${YELLOW}已取消为 '${remote_name}' 添加备份目标。您可以稍后在“查看/管理目标”菜单中添加。${NC}"
+        fi
+    fi
+}
+
 # 通用函数: 获取远程端名称
 get_remote_name() {
     local prompt_message="$1"
@@ -430,7 +478,7 @@ create_rclone_s3_remote() {
 
     if "${rclone_create_cmd[@]}"; then
         log_and_display "${GREEN}远程端 '${remote_name}' 创建成功！${NC}"
-        log_and_display "${YELLOW}Rclone 会自动将凭证存储在 $HOME/.config/rclone/rclone.conf 中。${NC}"
+        prompt_and_add_target "$remote_name" "由助手创建"
     else
         log_and_display "${RED}远程端创建失败！请检查您的输入或 Rclone 的错误提示。${NC}"
     fi
@@ -451,6 +499,7 @@ create_rclone_b2_remote() {
     log_and_display "正在创建 Rclone 远程端: ${remote_name}..." "${BLUE}"
     if rclone config create "$remote_name" b2 account "$account_id" key "$app_key"; then
         log_and_display "${GREEN}远程端 '${remote_name}' 创建成功！${NC}"
+        prompt_and_add_target "$remote_name" "由助手创建"
     else
         log_and_display "${RED}远程端创建失败！${NC}"
     fi
@@ -471,6 +520,7 @@ create_rclone_azureblob_remote() {
     log_and_display "正在创建 Rclone 远程端: ${remote_name}..." "${BLUE}"
     if rclone config create "$remote_name" azureblob account "$account_name" key "$account_key"; then
         log_and_display "${GREEN}远程端 '${remote_name}' 创建成功！${NC}"
+        prompt_and_add_target "$remote_name" "由助手创建"
     else
         log_and_display "${RED}远程端创建失败！${NC}"
     fi
@@ -492,6 +542,7 @@ create_rclone_mega_remote() {
     log_and_display "正在创建 Rclone 远程端: ${remote_name}..." "${BLUE}"
     if rclone config create "$remote_name" mega user "$user" pass "$obscured_pass"; then
         log_and_display "${GREEN}远程端 '${remote_name}' 创建成功！${NC}"
+        prompt_and_add_target "$remote_name" "由助手创建"
     else
         log_and_display "${RED}远程端创建失败！${NC}"
     fi
@@ -515,6 +566,7 @@ create_rclone_pcloud_remote() {
 
     if rclone config create "$remote_name" pcloud username "$user" password "$obscured_pass"; then
         log_and_display "${GREEN}远程端 '${remote_name}' 创建成功！${NC}"
+        prompt_and_add_target "$remote_name" "由助手创建"
     else
         log_and_display "${RED}远程端创建失败！可能是密码错误或需要双因素认证。${NC}"
     fi
@@ -537,6 +589,7 @@ create_rclone_webdav_remote() {
     log_and_display "正在创建 Rclone 远程端: ${remote_name}..." "${BLUE}"
     if rclone config create "$remote_name" webdav url "$url" user "$user" pass "$obscured_pass"; then
         log_and_display "${GREEN}远程端 '${remote_name}' 创建成功！${NC}"
+        prompt_and_add_target "$remote_name" "由助手创建"
     else
         log_and_display "${RED}远程端创建失败！${NC}"
     fi
@@ -584,6 +637,7 @@ create_rclone_sftp_remote() {
 
     if "${rclone_create_cmd[@]}"; then
         log_and_display "${GREEN}远程端 '${remote_name}' 创建成功！${NC}"
+        prompt_and_add_target "$remote_name" "由助手创建"
         log_and_display "${YELLOW}提示: 首次连接 SFTP 服务器时，Rclone 可能需要您确认主机的密钥指纹。${NC}"
     else
         log_and_display "${RED}远程端创建失败！${NC}"
@@ -609,6 +663,7 @@ create_rclone_ftp_remote() {
     log_and_display "正在创建 Rclone 远程端: ${remote_name}..." "${BLUE}"
     if rclone config create "$remote_name" ftp host "$host" user "$user" pass "$obscured_pass" port "$port"; then
         log_and_display "${GREEN}远程端 '${remote_name}' 创建成功！${NC}"
+        prompt_and_add_target "$remote_name" "由助手创建"
     else
         log_and_display "${RED}远程端创建失败！${NC}"
     fi
@@ -652,6 +707,7 @@ create_rclone_crypt_remote() {
     log_and_display "正在创建 Rclone 远程端: ${remote_name}..." "${BLUE}"
     if rclone config create "$remote_name" crypt remote "$target_remote" password "$obscured_pass1" password2 "$obscured_pass2"; then
         log_and_display "${GREEN}加密远程端 '${remote_name}' 创建成功！${NC}"
+        prompt_and_add_target "$remote_name" "由助手创建"
         log_and_display "现在您可以像使用普通远程端一样使用 '${remote_name}:'，所有数据都会在后台自动加解密。"
     else
         log_and_display "${RED}远程端创建失败！${NC}"
@@ -676,6 +732,7 @@ create_rclone_alias_remote() {
     log_and_display "正在创建 Rclone 远程端: ${remote_name}..." "${BLUE}"
     if rclone config create "$remote_name" alias remote "$target_remote"; then
         log_and_display "${GREEN}别名远程端 '${remote_name}' 创建成功！${NC}"
+        prompt_and_add_target "$remote_name" "由助手创建"
         log_and_display "现在 '${remote_name}:' 就等同于 '${target_remote}'。"
     else
         log_and_display "${RED}远程端创建失败！${NC}"
@@ -873,7 +930,13 @@ view_and_manage_rclone_targets() {
                     fi
                 done
 
+                # [MODIFIED] 显示目标和其来源元数据
+                local metadata="${RCLONE_TARGETS_METADATA_ARRAY[$i]}"
                 echo -n "$((i+1)). ${RCLONE_TARGETS_ARRAY[$i]} "
+                if [[ -n "$metadata" ]]; then
+                    echo -n -e "(${BLUE}${metadata}${NC}) "
+                fi
+
                 if [[ "$is_enabled" == "true" ]]; then
                     echo -e "[${GREEN}已启用${NC}]"
                 else
@@ -901,6 +964,8 @@ view_and_manage_rclone_targets() {
                 elif choose_rclone_path "$remote_name"; then
                     local remote_path="$CHOSEN_RCLONE_PATH"
                     RCLONE_TARGETS_ARRAY+=("${remote_name}:${remote_path}")
+                    # [NEW] 为手动添加的目标设置元数据
+                    RCLONE_TARGETS_METADATA_ARRAY+=("手动添加")
                     needs_saving="true"
                     log_and_display "${GREEN}已成功添加目标: ${remote_name}:${remote_path}${NC}"
                 else
@@ -917,7 +982,10 @@ view_and_manage_rclone_targets() {
                     read -rp "确定要删除目标 '${RCLONE_TARGETS_ARRAY[$deleted_index]}' 吗? (y/N): " confirm
                     if [[ "$confirm" =~ ^[Yy]$ ]]; then
                         unset 'RCLONE_TARGETS_ARRAY[$deleted_index]'
+                        # [NEW] 同时删除对应的元数据
+                        unset 'RCLONE_TARGETS_METADATA_ARRAY[$deleted_index]'
                         RCLONE_TARGETS_ARRAY=("${RCLONE_TARGETS_ARRAY[@]}")
+                        RCLONE_TARGETS_METADATA_ARRAY=("${RCLONE_TARGETS_METADATA_ARRAY[@]}")
 
                         local new_enabled_indices=()
                         for enabled_idx in "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}"; do
