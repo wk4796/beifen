@@ -26,13 +26,13 @@ BACKUP_SOURCE_PATHS_STRING="" # 用于配置文件保存的路径字符串
 PACKAGING_STRATEGY="separate" # "separate" (独立打包) or "single" (合并打包)
 
 # 新增功能配置
-BACKUP_MODE="archive"        # "archive" (归档模式) or "sync" (同步模式)
+BACKUP_MODE="archive"         # "archive" (归档模式) or "sync" (同步模式)
 ENABLE_INTEGRITY_CHECK="true" # "true" or "false"，备份后完整性校验
 
 # 压缩格式配置
-COMPRESSION_FORMAT="zip"     # "zip" or "tar.gz"
-COMPRESSION_LEVEL=6          # 1 (fastest) to 9 (best)
-ZIP_PASSWORD=""              # Password for zip files, empty for none
+COMPRESSION_FORMAT="zip"      # "zip" or "tar.gz"
+COMPRESSION_LEVEL=6           # 1 (fastest) to 9 (best)
+ZIP_PASSWORD=""               # Password for zip files, empty for none
 
 # 日志配置
 CONSOLE_LOG_LEVEL=$LOG_LEVEL_INFO # 终端输出的日志级别
@@ -60,6 +60,12 @@ RCLONE_BWLIMIT="" # 带宽限制 (例如 "8M" 代表 8 MByte/s)
 TELEGRAM_ENABLED="false"
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
+
+# [新增] Telegram 报告生成用的全局变量
+GLOBAL_TELEGRAM_REPORT_BODY=""
+GLOBAL_TELEGRAM_FAILURE_REASON=""
+GLOBAL_TELEGRAM_OVERALL_STATUS="success"
+
 
 # 颜色定义
 RED='\033[0;31m'
@@ -177,7 +183,7 @@ clear_screen() {
 display_header() {
     clear_screen
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}      $SCRIPT_NAME        ${NC}"
+    echo -e "${GREEN}      $SCRIPT_NAME      ${NC}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 }
@@ -422,6 +428,7 @@ check_dependencies() {
 }
 
 
+# [修改] 移除 parse_mode，发送纯文本消息
 send_telegram_message() {
     if [[ "$TELEGRAM_ENABLED" != "true" ]]; then
         return 0
@@ -437,10 +444,10 @@ send_telegram_message() {
         return 1
     fi
     log_info "正在发送 Telegram 消息..."
+    # [修改] 移除 parse_mode=Markdown，现在以纯文本格式发送消息，以支持更自由的格式和 Emoji。
     if curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
         --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-        --data-urlencode "text=${message_content}" \
-        --data-urlencode "parse_mode=Markdown" > /dev/null; then
+        --data-urlencode "text=${message_content}" > /dev/null; then
         log_info "Telegram 消息发送成功。"
     else
         log_error "Telegram 消息发送失败！"
@@ -1203,6 +1210,7 @@ set_retention_policy() {
 }
 
 
+# [修改] 不再直接发送消息，而是构建报告片段并附加到全局变量
 apply_retention_policy() {
     log_info "--- 正在应用备份保留策略 (Rclone) ---"
 
@@ -1211,8 +1219,7 @@ apply_retention_policy() {
         return 0
     fi
 
-    local retention_summary="*${SCRIPT_NAME}：保留策略完成*"
-    retention_summary+=$'\n'"保留策略执行完毕。"
+    local retention_block=$'\n\n'"🧹 保留策略执行完毕"
 
     for enabled_idx in "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}"; do
         local rclone_target="${RCLONE_TARGETS_ARRAY[$enabled_idx]}"
@@ -1279,9 +1286,11 @@ apply_retention_policy() {
             done
         fi
         log_info "${rclone_target} 清理完成，删除 ${deleted_count} 个文件。"
-        retention_summary+=$'\n'"- ${rclone_target}: 找到 ${total_found} 个, 删除 ${deleted_count} 个。"
+        retention_block+=$'\n'"路径：${rclone_target}"
+        retention_block+=$'\n'"共检测到：${total_found} 个归档文件"
+        retention_block+=$'\n'"删除旧文件：${deleted_count} 个 🗑️"
     done
-    send_telegram_message "${retention_summary}"
+    GLOBAL_TELEGRAM_REPORT_BODY+="${retention_block}"
 }
 
 check_temp_space() {
@@ -1309,21 +1318,20 @@ check_temp_space() {
 
     if [[ "$available_space_kb" -lt "$required_space_kb" ]]; then
         log_error "临时目录空间不足！"
-        send_telegram_message "*${SCRIPT_NAME}：备份失败*\n原因: 临时目录空间不足。需要约 ${required_hr}，但只有 ${available_hr} 可用。"
+        # [修改] 不再发送消息，而是设置全局失败原因
+        GLOBAL_TELEGRAM_FAILURE_REASON="临时目录空间不足 (需要 ~${required_hr}, 可用 ${available_hr})"
         return 1
     fi
     return 0
 }
 
+# [修改] 重构以支持新的报告系统
 perform_sync_backup() {
     local backup_type="$1"
-    local readable_time=$(date '+%Y-%m-%d %H:%M:%S')
     local total_paths_to_backup=${#BACKUP_SOURCE_PATHS_ARRAY[@]}
-    local overall_succeeded_count=0
-    local any_sync_succeeded="false"
+    local any_sync_failed="false"
 
     log_info "--- ${backup_type} 过程开始 (同步模式) ---"
-    send_telegram_message "*${SCRIPT_NAME}：开始 (${backup_type} - 同步模式)*\n时间: ${readable_time}\n将同步 ${total_paths_to_backup} 个路径。"
     log_warn "备份模式: [同步模式]。保留策略和恢复功能在此模式下不可用。"
 
     local bw_limit_arg=""
@@ -1341,12 +1349,15 @@ perform_sync_backup() {
         
         if [[ ! -e "$path_to_sync" ]]; then
             log_error "路径 '$path_to_sync' 不存在，跳过。"
-            send_telegram_message "*${SCRIPT_NAME}：路径同步失败*\n路径: \`${path_to_sync}\`\n原因: 路径不存在。"
+            GLOBAL_TELEGRAM_REPORT_BODY+=$'\n\n'"🔄 路径同步"$'\n'"源目录：${path_to_sync}"$'\n'"状态：❌ 失败 (路径不存在)"
+            any_sync_failed="true"
             continue
         fi
-
-        local path_sync_succeeded="false"
-        local sync_statuses=""
+        
+        local path_sync_block=$'\n\n'"🔄 路径同步"$'\n'"源目录：${path_to_sync}"
+        path_sync_block+=$'\n'"☁️ 上传状态"
+        
+        local path_has_failure="false"
         for enabled_idx in "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}"; do
             local rclone_target="${RCLONE_TARGETS_ARRAY[$enabled_idx]}"
             local sync_destination="${rclone_target%/}/${path_basename}"
@@ -1354,48 +1365,30 @@ perform_sync_backup() {
             log_info "正在同步 ${path_to_sync} 到 ${sync_destination}..."
             if rclone sync "$path_to_sync" "$sync_destination" --progress ${bw_limit_arg}; then
                 log_info "同步到 ${rclone_target} 成功！"
-                path_sync_succeeded="true"
-                any_sync_succeeded="true"
-                sync_statuses+="\n- \`${rclone_target}\`: 同步成功"
+                path_sync_block+=$'\n'"${rclone_target} ✅ 同步成功"
             else
                 log_error "同步到 ${rclone_target} 失败！"
-                sync_statuses+="\n- \`${rclone_target}\`: 同步失败"
+                path_sync_block+=$'\n'"${rclone_target} ❌ 同步失败"
+                path_has_failure="true"
+                any_sync_failed="true"
             fi
         done
-
-        if [[ "$path_sync_succeeded" == "true" ]]; then
-            overall_succeeded_count=$((overall_succeeded_count + 1))
-            send_telegram_message "*${SCRIPT_NAME}：路径同步 (成功)*\n源: \`${path_to_sync}\`\n*目标状态:*${sync_statuses}"
-        else
-            send_telegram_message "*${SCRIPT_NAME}：路径同步 (失败)*\n源: \`${path_to_sync}\`\n*目标状态:*${sync_statuses}"
-        fi
+        GLOBAL_TELEGRAM_REPORT_BODY+="${path_sync_block}"
     done
 
-    local overall_status="失败"
-    if [ "$overall_succeeded_count" -eq "$total_paths_to_backup" ] && [ "$total_paths_to_backup" -gt 0 ]; then
-        overall_status="全部成功"
-    elif [ "$overall_succeeded_count" -gt 0 ]; then
-        overall_status="部分成功"
+    if [[ "$any_sync_failed" == "true" ]]; then
+        GLOBAL_TELEGRAM_OVERALL_STATUS="failure"
+        return 1
     fi
-
-    log_info "--- ${backup_type} (同步模式) 过程结束 ---"
-    
-    if [[ "$any_sync_succeeded" == "true" ]]; then
-        LAST_AUTO_BACKUP_TIMESTAMP=$(date +%s)
-        save_config
-    fi
-    send_telegram_message "*${SCRIPT_NAME}：同步总览 (${overall_status})*\n成功同步路径数: ${overall_succeeded_count}/${total_paths_to_backup}"
+    return 0
 }
 
+# [修改] 重构以支持新的报告系统
 perform_archive_backup() {
     local backup_type="$1"
-    local readable_time=$(date '+%Y-%m-%d %H:%M:%S')
-    local overall_succeeded_count=0
     local total_paths_to_backup=${#BACKUP_SOURCE_PATHS_ARRAY[@]}
-    local any_upload_succeeded="false"
 
     log_info "--- ${backup_type} 过程开始 (归档模式) ---"
-    send_telegram_message "*${SCRIPT_NAME}：开始 (${backup_type} - 归档模式)*\n时间: ${readable_time}\n将备份 ${total_paths_to_backup} 个路径。"
 
     if ! check_temp_space; then
         return 1
@@ -1408,6 +1401,8 @@ perform_archive_backup() {
     if [[ "$COMPRESSION_FORMAT" == "tar.gz" ]]; then
         archive_ext=".tar.gz"
     fi
+
+    local any_op_failed="false"
 
     if [[ "$PACKAGING_STRATEGY" == "single" ]]; then
         log_info "打包策略: [所有源打包成一个]。"
@@ -1427,14 +1422,14 @@ perform_archive_backup() {
         fi
 
         if $compress_success; then
-            if upload_archive "$temp_archive_path" "$archive_name" "所有源"; then
-                any_upload_succeeded="true"
-                overall_succeeded_count=$((total_paths_to_backup))
+            if ! upload_archive "$temp_archive_path" "$archive_name" "所有源"; then
+                any_op_failed="true"
             fi
             rm -f "$temp_archive_path"
         else
             log_error "创建合并压缩包失败！"
-            send_telegram_message "*${SCRIPT_NAME}：压缩失败*\n打包所有源时出错。"
+            GLOBAL_TELEGRAM_REPORT_BODY+=$'\n\n'"❌ 错误：创建合并压缩包失败！"
+            any_op_failed="true"
         fi
 
     else # separate
@@ -1452,7 +1447,8 @@ perform_archive_backup() {
 
             if [[ ! -e "$current_backup_path" ]]; then
                 log_error "路径 '$current_backup_path' 不存在，跳过。"
-                send_telegram_message "*${SCRIPT_NAME}：路径失败*\n路径: \`${current_backup_path}\`\n原因: 路径不存在。"
+                GLOBAL_TELEGRAM_REPORT_BODY+=$'\n\n'"📂 路径归档"$'\n'"源目录：${current_backup_path}"$'\n'"状态：❌ 失败 (路径不存在)"
+                any_op_failed="true"
                 continue
             fi
 
@@ -1470,55 +1466,106 @@ perform_archive_backup() {
 
             if ! $compress_success; then
                 log_error "文件压缩失败！"
-                send_telegram_message "*${SCRIPT_NAME}：压缩失败*\n路径: \`${current_backup_path}\`"
+                GLOBAL_TELEGRAM_REPORT_BODY+=$'\n\n'"📂 路径归档"$'\n'"源目录：${current_backup_path}"$'\n'"状态：❌ 压缩失败"
+                any_op_failed="true"
                 continue
             fi
             
-            if upload_archive "$temp_archive_path" "$archive_name" "$current_backup_path"; then
-                overall_succeeded_count=$((overall_succeeded_count + 1))
-                any_upload_succeeded="true"
+            if ! upload_archive "$temp_archive_path" "$archive_name" "$current_backup_path"; then
+                any_op_failed="true"
             fi
             
             rm -f "$temp_archive_path"
         done
     fi
 
-    local overall_status="失败"
-    if [ "$overall_succeeded_count" -eq "$total_paths_to_backup" ] && [ "$total_paths_to_backup" -gt 0 ]; then
-        overall_status="全部成功"
-    elif [ "$overall_succeeded_count" -gt 0 ]; then
-        overall_status="部分成功"
-    fi
-
-    log_info "--- ${backup_type} (归档模式) 过程结束 ---"
-    
-    if [[ "$any_upload_succeeded" == "true" ]]; then
-        LAST_AUTO_BACKUP_TIMESTAMP=$(date +%s)
-        save_config
+    if [[ "$any_op_failed" == "false" ]]; then
         apply_retention_policy
+        return 0 # Success
     else
-        log_warn "无成功上传，跳过保留策略。"
+        GLOBAL_TELEGRAM_OVERALL_STATUS="failure"
+        return 1 # Failure
     fi
 }
 
 
+# [修改] 核心备份函数，现在负责发送开始和结束的 Telegram 摘要
 perform_backup() {
     local backup_type="$1"
     
+    # --- Telegram 报告生成 ---
+    # 初始化全局报告变量
+    GLOBAL_TELEGRAM_REPORT_BODY=""
+    GLOBAL_TELEGRAM_FAILURE_REASON=""
+    GLOBAL_TELEGRAM_OVERALL_STATUS="success" # 假设成功，直到有失败发生
+
+    local readable_time
+    readable_time=$(date '+%Y-%m-%d %H:%M:%S')
+
+    # 预检
     if [ ${#BACKUP_SOURCE_PATHS_ARRAY[@]} -eq 0 ]; then
         log_error "未设置任何备份源路径。"
-        send_telegram_message "*${SCRIPT_NAME}：失败*\n原因: 未设置备份源路径。"
+        local error_message="📦 ${SCRIPT_NAME}"$'\n'"🕒 时间：${readable_time}"$'\n'"❌ 状态：备份失败"$'\n'"原因：未设置任何备份源路径。"
+        send_telegram_message "$error_message"
         return 1
     fi
-
+    if [ ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} -eq 0 ]; then
+        log_error "未启用任何 Rclone 目标。"
+        local error_message="📦 ${SCRIPT_NAME}"$'\n'"🕒 时间：${readable_time}"$'\n'"❌ 状态：备份失败"$'\n'"原因：未启用任何 Rclone 备份目标。"
+        send_telegram_message "$error_message"
+        return 1
+    fi
+    
+    # 发送 "开始" 消息
+    local mode_name=$([[ "$BACKUP_MODE" == "sync" ]] && echo "同步模式" || echo "归档模式")
+    local start_message="📦 ${SCRIPT_NAME}"$'\n'"🕒 时间：${readable_time}"$'\n'"🔧 模式：${backup_type} · ${mode_name}"$'\n'"▶️ 状态：备份已开始..."
+    send_telegram_message "$start_message"
+    
+    # 执行备份
+    local backup_result=0
     if [[ "$BACKUP_MODE" == "sync" ]]; then
         perform_sync_backup "$backup_type"
+        backup_result=$?
     else
         perform_archive_backup "$backup_type"
+        backup_result=$?
     fi
+
+    # --- 构建并发送最终报告 ---
+    local final_status_emoji="✅"
+    local final_status_text="备份完成"
+
+    # 检查由子函数设置的全局状态标志
+    if [[ "$GLOBAL_TELEGRAM_OVERALL_STATUS" != "success" ]] || [[ "$backup_result" -ne 0 ]]; then
+        final_status_emoji="❌"
+        final_status_text="备份失败"
+        if [[ -n "$GLOBAL_TELEGRAM_FAILURE_REASON" ]]; then
+             GLOBAL_TELEGRAM_REPORT_BODY+=$'\n\n'"原因：${GLOBAL_TELEGRAM_FAILURE_REASON}"
+        fi
+    fi
+
+    local final_header="📦 ${SCRIPT_NAME}"$'\n'"🕒 时间：${readable_time}"$'\n'"🔧 模式：${backup_type} · ${mode_name}"$'\n'"📁 备份路径：共 ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个"
+
+    local final_footer="${final_status_emoji} 状态：${final_status_text}"
+
+    # 移除可能存在的前导换行符
+    GLOBAL_TELEGRAM_REPORT_BODY="${GLOBAL_TELEGRAM_REPORT_BODY#"${GLOBAL_TELEGRAM_REPORT_BODY%%[![:space:]]*}"}"
+    
+    local final_message="${final_header}"$'\n\n'"${GLOBAL_TELEGRAM_REPORT_BODY}"$'\n\n'"${final_footer}"
+
+    send_telegram_message "$final_message"
+
+    # 只有在完全成功时才更新时间戳
+    if [[ "$final_status_text" == "备份完成" ]]; then
+        LAST_AUTO_BACKUP_TIMESTAMP=$(date +%s)
+        save_config
+    fi
+    
+    return $backup_result
 }
 
 
+# [修改] 不再直接发送消息，而是构建报告片段并附加到全局变量
 upload_archive() {
     local temp_archive_path="$1"
     local archive_name="$2"
@@ -1531,7 +1578,9 @@ upload_archive() {
     local num_enabled_targets=${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}
     log_info "压缩完成 (大小: ${backup_file_size})。准备上传到 ${num_enabled_targets} 个已启用的目标..."
 
-    local path_summary_message="*${SCRIPT_NAME}：路径归档*\n源: \`${source_description}\`\n文件: \`${archive_name}\` (${backup_file_size})\n\n*上传状态:*"
+    local archive_block=$'\n\n'"📂 路径归档"$'\n'"源目录：${source_description}"$'\n'"归档文件：${archive_name}（${backup_file_size}）"
+    local upload_block=$'\n'"☁️ 上传状态"
+    local has_upload_failure="false"
 
     local bw_limit_arg=""
     if [[ -n "$RCLONE_BWLIMIT" ]]; then
@@ -1539,7 +1588,6 @@ upload_archive() {
         log_info "上传将使用带宽限制: ${RCLONE_BWLIMIT}"
     fi
 
-    local upload_statuses=""
     for enabled_idx in "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}"; do
         local rclone_target="${RCLONE_TARGETS_ARRAY[$enabled_idx]}"
         
@@ -1551,7 +1599,7 @@ upload_archive() {
         log_info "正在上传到 Rclone 目标: ${destination_path}"
         if rclone copyto "$temp_archive_path" "${destination_path}${archive_name}" --progress ${bw_limit_arg}; then
             log_info "上传到 ${rclone_target} 成功！"
-            upload_statuses+="\n- \`${rclone_target}\`: 上传成功"
+            upload_block+=$'\n'"${rclone_target} ✅ 上传成功"
             any_upload_succeeded_for_path="true"
 
             if [[ "$ENABLE_INTEGRITY_CHECK" == "true" ]]; then
@@ -1559,23 +1607,31 @@ upload_archive() {
                 local check_output=""
                 if ! check_output=$(rclone check "$temp_archive_path" "${destination_path}${archive_name}" 2>&1); then
                     log_error "校验失败！云端文件可能已损坏！详细信息:\n${check_output}"
-                    upload_statuses+=" (**校验失败 ❌**)\n\`\`\`\n${check_output}\n\`\`\`"
+                    upload_block+=" (校验失败 ❌)"
+                    has_upload_failure="true"
                 else
                     log_info "校验成功！文件完整。"
-                    upload_statuses+=" (校验通过 ✔️)"
+                    upload_block+=" (校验通过 ✔️)"
                 fi
             fi
         else
             log_error "上传到 ${rclone_target} 失败！"
-            upload_statuses+="\n- \`${rclone_target}\`: 失败"
+            upload_block+=$'\n'"${rclone_target} ❌ 上传失败"
+            has_upload_failure="true"
         fi
     done
 
-    send_telegram_message "${path_summary_message}${upload_statuses}"
+    # 附加到全局报告
+    GLOBAL_TELEGRAM_REPORT_BODY+="${archive_block}${upload_block}"
     
+    if [[ "$has_upload_failure" == "true" ]]; then
+        GLOBAL_TELEGRAM_OVERALL_STATUS="failure"
+    fi
+
     if [[ "$any_upload_succeeded_for_path" == "true" ]]; then
         return 0 # Success
     else
+        GLOBAL_TELEGRAM_OVERALL_STATUS="failure"
         return 1 # Failure
     fi
 }
@@ -1842,7 +1898,7 @@ show_main_menu() {
     if [[ "$BACKUP_MODE" == "sync" ]]; then
         mode_text="同步模式"
     fi
-    echo -e "备份模式: ${GREEN}${mode_text}${NC}    备份源: ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个  已启用目标: ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} 个"
+    echo -e "备份模式: ${GREEN}${mode_text}${NC}   备份源: ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个  已启用目标: ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} 个"
 
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 功能选项 ━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "  1. ${YELLOW}自动备份与计划任务${NC} (间隔: ${AUTO_BACKUP_INTERVAL_DAYS} 天)"
@@ -1919,12 +1975,12 @@ check_auto_backup() {
 
     if [ ${#BACKUP_SOURCE_PATHS_ARRAY[@]} -eq 0 ]; then
         log_error "自动备份失败：未设置备份源。"
-        send_telegram_message "*${SCRIPT_NAME}：自动备份失败*\n原因: 未设置备份源。"
+        # [修改] 此处错误已在 perform_backup 中处理，无需重复发送消息
         return 1
     fi
     if [ ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} -eq 0 ]; then
         log_error "自动备份失败：未启用 Rclone 目标。"
-        send_telegram_message "*${SCRIPT_NAME}：自动备份失败*\n原因: 未启用 Rclone 目标。"
+        # [修改] 此处错误已在 perform_backup 中处理，无需重复发送消息
         return 1
     fi
 
@@ -1970,7 +2026,7 @@ main() {
 }
 
 # ================================================================
-# ===          RCLONE 云存储管理函数 (无需修改)                  ===
+# ===         RCLONE 云存储管理函数 (无需修改)               ===
 # ================================================================
 
 prompt_and_add_target() {
