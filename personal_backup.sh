@@ -26,13 +26,13 @@ BACKUP_SOURCE_PATHS_STRING="" # 用于配置文件保存的路径字符串
 PACKAGING_STRATEGY="separate" # "separate" (独立打包) or "single" (合并打包)
 
 # 新增功能配置
-BACKUP_MODE="archive"           # "archive" (归档模式) or "sync" (同步模式)
-ENABLE_INTEGRITY_CHECK="true"   # "true" or "false"，备份后完整性校验
+BACKUP_MODE="archive"        # "archive" (归档模式) or "sync" (同步模式)
+ENABLE_INTEGRITY_CHECK="true" # "true" or "false"，备份后完整性校验
 
 # 压缩格式配置
 COMPRESSION_FORMAT="zip"      # "zip" or "tar.gz"
-COMPRESSION_LEVEL=6           # 1 (fastest) to 9 (best)
-ZIP_PASSWORD=""               # Password for zip files, empty for none
+COMPRESSION_LEVEL=6          # 1 (fastest) to 9 (best)
+ZIP_PASSWORD=""              # Password for zip files, empty for none
 
 # 日志配置
 CONSOLE_LOG_LEVEL=$LOG_LEVEL_INFO # 终端输出的日志级别
@@ -358,7 +358,7 @@ check_dependencies() {
                             log_error "Rclone 安装失败。"
                         fi
                     else
-                         log_error "安装 Rclone 需要 'curl'，但它也缺失了。请先安装 curl。"
+                        log_error "安装 Rclone 需要 'curl'，但它也缺失了。请先安装 curl。"
                     fi
                 elif command -v apt-get &> /dev/null; then
                     if sudo apt-get update -qq >/dev/null && sudo apt-get install -y "$pkg"; then
@@ -368,7 +368,7 @@ check_dependencies() {
                         log_error "'${pkg}' 安装失败。"
                     fi
                 elif command -v yum &> /dev/null; then
-                     if sudo yum install -y "$pkg"; then
+                    if sudo yum install -y "$pkg"; then
                         log_info "'${pkg}' 安装成功。"
                         install_ok=true
                     else
@@ -948,9 +948,9 @@ manage_compression_settings() {
                 ;;
             3)
                 if [[ "$COMPRESSION_FORMAT" != "zip" ]]; then
-                     log_warn "警告：密码保护仅对 zip 格式有效。"
-                     press_enter_to_continue
-                     continue
+                    log_warn "警告：密码保护仅对 zip 格式有效。"
+                    press_enter_to_continue
+                    continue
                 fi
                 read -s -p "请输入新的 ZIP 密码 (留空则清除密码): " pass_input
                 echo ""
@@ -1049,6 +1049,8 @@ set_cloud_storage() {
             check_status_text="已关闭"
         fi
         echo -e "  5. ${YELLOW}备份后完整性校验${NC} (当前: ${check_status_text})"
+        # --- 颜色已改为黄色 ---
+        echo -e "  6. ${YELLOW}启动 Rclone 官方配置工具${NC} (用于 Google Drive, Dropbox 等)"
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo -e "  0. ${RED}返回主菜单${NC}"
         read -rp "请输入选项: " choice
@@ -1059,6 +1061,13 @@ set_cloud_storage() {
             3) test_rclone_remotes ;;
             4) set_bandwidth_limit ;;
             5) toggle_integrity_check ;;
+            6) 
+                log_info "正在启动 Rclone 官方配置工具。请根据 Rclone 提示进行操作。"
+                log_info "完成后，您可以将配置好的远程端在选项 [1] 中添加为备份目标。"
+                press_enter_to_continue # 让用户先看完提示
+                rclone config
+                press_enter_to_continue
+                ;;
             0) break ;;
             *) log_error "无效选项。"; press_enter_to_continue ;;
         esac
@@ -1545,12 +1554,13 @@ upload_archive() {
 
             if [[ "$ENABLE_INTEGRITY_CHECK" == "true" ]]; then
                 log_info "正在对 ${rclone_target} 上的文件进行完整性校验..."
-                if rclone check "$temp_archive_path" "${destination_path}${archive_name}"; then
+                local check_output=""
+                if ! check_output=$(rclone check "$temp_archive_path" "${destination_path}${archive_name}" 2>&1); then
+                    log_error "校验失败！云端文件可能已损坏！详细信息:\n${check_output}"
+                    upload_statuses+=" (**校验失败 ❌**)\n\`\`\`\n${check_output}\n\`\`\`"
+                else
                     log_info "校验成功！文件完整。"
                     upload_statuses+=" (校验通过 ✔️)"
-                else
-                    log_error "校验失败！云端文件可能已损坏！"
-                    upload_statuses+=" (**校验失败 ❌**)"
                 fi
             fi
         else
@@ -1830,7 +1840,7 @@ show_main_menu() {
     if [[ "$BACKUP_MODE" == "sync" ]]; then
         mode_text="同步模式"
     fi
-    echo -e "备份模式: ${GREEN}${mode_text}${NC}   备份源: ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个  已启用目标: ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} 个"
+    echo -e "备份模式: ${GREEN}${mode_text}${NC}    备份源: ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个  已启用目标: ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} 个"
 
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 功能选项 ━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "  1. ${YELLOW}自动备份与计划任务${NC} (间隔: ${AUTO_BACKUP_INTERVAL_DAYS} 天)"
@@ -1958,7 +1968,7 @@ main() {
 }
 
 # ================================================================
-# ===           RCLONE 云存储管理函数 (无需修改)               ===
+# ===         RCLONE 云存储管理函数 (无需修改)                 ===
 # ================================================================
 
 prompt_and_add_target() {
@@ -2304,8 +2314,10 @@ create_rclone_remote_wizard() {
         echo -e "  9. ${YELLOW}Crypt (加密一个现有远程端)${NC}"
         echo -e "  10. ${YELLOW}Alias (为一个远程路径创建别名)${NC}"
         echo ""
-        echo "对于 Google Drive, Dropbox 等需要浏览器授权的类型,"
-        echo "请在终端中运行 'rclone config' 命令进行配置。"
+        # --- 优化点 2: 更加明确的提示 ---
+        echo -e "${YELLOW}重要提示: 对于 Google Drive, Dropbox, OneDrive 等需要${NC}"
+        echo -e "${YELLOW}浏览器授权的云服务，请在主菜单 (选项 5) 中选择${NC}"
+        echo -e "${YELLOW}*启动 Rclone 官方配置工具* 来进行设置。${NC}"
         echo ""
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo -e "  0. ${RED}返回上一级菜单${NC}"
