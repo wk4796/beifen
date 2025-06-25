@@ -3,22 +3,24 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>个人自用数据备份脚本 - 交互式指南</title>
-    <meta name="description" content="一个强大的 Bash 脚本，用于自动化和手动备份数据到云存储（支持 S3 兼容服务和 WebDAV），提供详细的 Telegram 消息通知和云端备份保留策略。">
+    <title>个人自用数据备份脚本 (Rclone) - 交互式指南</title>
+    <meta name="description" content="一个强大、灵活且高度可配置的命令行工具，通过 Rclone 将您的重要数据安全地备份到多个云端，并提供详细的 Telegram 消息通知和云端备份保留策略。">
 
+    <!-- Google Fonts: Inter for general text (Tailwind's default, but explicit for consistency) -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
     
+    <!-- Tailwind CSS CDN for utility classes -->
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Chart.js CDN for the comparison chart -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <!-- Chosen Palette: Fresh Green (Background: #f0fdf4, Text: #14532d, Accent: #22c55e, Dark Green: #166534, Light Green Hover: #dcfce7) -->
-    <!-- Application Structure Plan: A single-page interactive guide with a fixed top navigation bar. The structure is organized into thematic sections (Home, Install, Usage, FAQ) with content dynamically displayed via JavaScript based on navigation clicks. The Home section provides an overview and core features including a comparison chart. The Install section details setup steps with OS-specific tabs for dependencies. The Usage section uses an accordion to detail each script menu option. The FAQ section is also an accordion. This design focuses on a clean, guided user flow, enabling easy access to specific information without page reloads, and enhancing the understanding of the script's features and operation. -->
-    <!-- Visualization & Content Choices: - **Feature Highlights:** Goal: Inform. Method: HTML/CSS styled cards with icons and descriptive text. Interaction: N/A (static display). Justification: Quickly conveys key benefits. - **Backup Process Flow:** Goal: Inform. Method: HTML/CSS diagram with Unicode emojis. Interaction: N/A (static display). Justification: Visually simplifies the high-level workflow. - **Mode Comparison (Archive vs. Sync):** Goal: Compare. Method: Chart.js horizontal bar chart. Interaction: Tooltips for detailed explanations. Justification: Clearly contrasts the two main operational modes and their implications. - **Setup Steps:** Goal: Organize. Method: HTML list with code blocks and copy buttons. Interaction: Click to copy code; Tabs for OS-specific commands. Justification: Breaks down installation into actionable steps, improving usability for technical users. - **Usage Details:** Goal: Inform/Organize. Method: HTML/CSS accordion. Interaction: Click to expand/collapse detailed explanations for each script menu option. Justification: Reduces initial information overload while allowing on-demand access to specifics. - **FAQ:** Goal: Organize. Method: HTML/CSS accordion. Interaction: Click to expand/collapse answers. Justification: Provides a clean way to present common questions and solutions. All charts use Canvas (Chart.js) and other visuals are HTML/CSS/Unicode, strictly adhering to NO SVG/Mermaid. -->
-    <!-- CONFIRMATION: NO SVG graphics used. NO Mermaid JS used. -->
+
     <style>
+        /* Custom styles to enhance aesthetics and override some Tailwind defaults if needed */
         body {
-            font-family: 'Noto Sans SC', sans-serif;
+            /* Using Noto Sans SC for Chinese characters, Inter for general text (via font-family stack) */
+            font-family: 'Inter', 'Noto Sans SC', sans-serif;
             background-color: #f0fdf4; /* Lightest green background */
             color: #14532d; /* Dark green text */
         }
@@ -26,6 +28,7 @@
             transition: all 0.3s ease;
             position: relative;
         }
+        /* Underline effect for navigation links */
         .nav-link:after {
             content: '';
             position: absolute;
@@ -37,12 +40,14 @@
             background-color: #22c55e; /* Accent green */
             transition: width 0.3s ease;
         }
+        /* Active and hover states for navigation links */
         .nav-link.active, .nav-link:hover {
             color: #22c55e; /* Accent green */
         }
         .nav-link.active:after, .nav-link:hover:after {
             width: 100%;
         }
+        /* Content section display control for tab-like navigation */
         .content-section {
             display: none;
             opacity: 0;
@@ -52,15 +57,18 @@
             display: block;
             opacity: 1;
         }
+        /* Accordion content animation */
         .accordion-content {
             max-height: 0;
             overflow: hidden;
             transition: max-height 0.5s ease-in-out, padding 0.5s ease-in-out;
         }
+        /* Expand accordion content and add padding */
         .accordion-button.open + .accordion-content {
             padding-top: 1rem;
             padding-bottom: 1rem;
         }
+        /* Code block styling with copy button positioning */
         .code-block {
             position: relative;
         }
@@ -83,6 +91,7 @@
             background-color: #22c55e; /* Accent green for copied state */
             color: white;
         }
+        /* Chart container responsive sizing */
         .chart-container {
             position: relative;
             width: 100%;
@@ -97,6 +106,7 @@
                 height: 400px;
             }
         }
+        /* Tab button styling for install section */
         .tab-button.active {
             border-bottom-color: #22c55e; /* Accent green */
             color: #14532d; /* Dark green text */
@@ -105,6 +115,7 @@
 </head>
 <body class="antialiased">
 
+    <!-- Fixed Header Navigation -->
     <header class="bg-white/80 backdrop-blur-md shadow-sm sticky top-0 z-50">
         <nav class="container mx-auto px-6 py-4">
             <ul class="flex justify-center space-x-6 md:space-x-10 text-base md:text-lg font-medium text-green-800">
@@ -116,14 +127,17 @@
         </nav>
     </header>
 
+    <!-- Main Content Area -->
     <main class="container mx-auto px-6 py-8 md:py-16">
         
+        <!-- Home Section -->
         <section id="home" class="content-section active">
             <div class="text-center mb-12">
                 <h1 class="text-4xl md:text-5xl font-bold text-green-900 mb-4">个人自用数据备份脚本 (Rclone)</h1>
                 <p class="text-lg md:text-xl text-green-700 max-w-3xl mx-auto">一个强大、灵活且高度可配置的命令行工具，通过 Rclone 将您的重要数据安全地备份到多个云端。</p>
             </div>
 
+            <!-- Core Backup Process Flow Diagram -->
             <div class="my-12 text-center">
                 <h3 class="text-2xl font-bold text-green-900 mb-6">核心备份流程</h3>
                 <div class="flex flex-col md:flex-row items-center justify-center space-y-4 md:space-y-0 md:space-x-4">
@@ -150,6 +164,7 @@
                 </div>
             </div>
 
+            <!-- Feature Highlights as Cards -->
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8 mt-12">
                 <div class="bg-white p-6 rounded-xl shadow-lg border border-green-200/50">
                     <div class="flex items-center mb-4">
@@ -195,6 +210,7 @@
                 </div>
             </div>
 
+            <!-- Mode Comparison Chart -->
             <div class="mt-16 bg-white p-8 rounded-lg shadow-lg border border-green-200/50">
                 <h3 class="text-2xl font-bold text-center text-green-900 mb-6">归档模式 vs. 同步模式</h3>
                 <div class="chart-container">
@@ -204,6 +220,7 @@
             </div>
         </section>
 
+        <!-- Install Section -->
         <section id="install" class="content-section">
             <div class="text-center mb-12">
                 <h2 class="text-3xl md:text-4xl font-bold text-green-900 mb-3">安装与设置</h2>
@@ -212,10 +229,10 @@
             <div class="max-w-4xl mx-auto space-y-6">
                 <div class="bg-white p-6 rounded-xl shadow-lg border border-green-200/50">
                     <h3 class="text-xl font-bold text-green-900 mb-3">第一步：保存脚本文件</h3>
-                    <p class="text-green-800 mb-4">在您的终端中，创建一个名为 `personal_backup.sh` 的文件。例如，将其保存在您的主目录 (`~`) 下：</p>
+                    <p class="text-green-800 mb-4">在您的终端中，创建一个名为 `personal_backup_rclone.sh` 的文件。例如，将其保存在您的主目录 (`~`) 下：</p>
                     <div class="code-block bg-green-900 text-green-100 rounded-lg p-4 font-mono text-sm">
-                        <button class="copy-button" data-clipboard-text="nano ~/personal_backup.sh">复制</button>
-                        <p>nano ~/personal_backup.sh</p>
+                        <button class="copy-button" data-clipboard-text="nano ~/personal_backup_rclone.sh">复制</button>
+                        <pre><code class="language-bash">nano ~/personal_backup_rclone.sh</code></pre>
                     </div>
                     <p class="text-green-800 mt-4">将脚本的最新代码完整复制并粘贴到 `nano` 编辑器中。保存并退出 `nano`：按下 `Ctrl + X`，输入 `Y`，然后按 `Enter`。</p>
                 </div>
@@ -223,8 +240,8 @@
                     <h3 class="text-xl font-bold text-green-900 mb-3">第二步：给予脚本执行权限</h3>
                     <p class="text-green-800 mb-4">在终端中执行以下命令，使脚本可运行：</p>
                     <div class="code-block bg-green-900 text-green-100 rounded-lg p-4 font-mono text-sm">
-                        <button class="copy-button" data-clipboard-text="chmod +x ~/personal_backup.sh">复制</button>
-                        <p>chmod +x ~/personal_backup.sh</p>
+                        <button class="copy-button" data-clipboard-text="chmod +x ~/personal_backup_rclone.sh">复制</button>
+                        <pre><code class="language-bash">chmod +x ~/personal_backup_rclone.sh</code></pre>
                     </div>
                 </div>
                 <div class="bg-white p-6 rounded-xl shadow-lg border border-green-200/50">
@@ -232,17 +249,17 @@
                     <p class="text-green-800 mb-4">为了方便每次输入 `bf` 即可运行脚本，请在您常用的 Shell 配置文件（如 `~/.bashrc` 或 `~/.zshrc`）中添加一个别名：</p>
                     <div class="code-block bg-green-900 text-green-100 rounded-lg p-4 font-mono text-sm">
                         <button class="copy-button" data-clipboard-text="nano ~/.bashrc  # 或 nano ~/.zshrc">复制</button>
-                        <p>nano ~/.bashrc  # 或 nano ~/.zshrc</p>
+                        <pre><code class="language-bash">nano ~/.bashrc  # 或 nano ~/.zshrc</code></pre>
                     </div>
                     <p class="text-green-800 mt-4 mb-4">滚动到文件底部，添加以下行：</p>
-                     <div class="code-block bg-green-900 text-green-100 rounded-lg p-4 font-mono text-sm">
-                        <button class="copy-button" data-clipboard-text="alias bf='bash ~/personal_backup.sh'">复制</button>
-                        <p>alias bf='bash ~/personal_backup.sh'</p>
+                    <div class="code-block bg-green-900 text-green-100 rounded-lg p-4 font-mono text-sm">
+                        <button class="copy-button" data-clipboard-text="alias bf='bash ~/personal_backup_rclone.sh'">复制</button>
+                        <pre><code class="language-bash">alias bf='bash ~/personal_backup_rclone.sh'</code></pre>
                     </div>
-                    <p class="text-green-800 mt-4">**注意**：如果 `personal_backup.sh` 文件不在您的主目录，请替换为其实际的完整路径。保存并退出 (`Ctrl + X`, `Y`, `Enter`)。使配置立即生效：</p>
+                    <p class="text-green-800 mt-4"><strong>注意</strong>：如果 `personal_backup_rclone.sh` 文件不在您的主目录，请替换为其实际的完整路径。保存并退出 (`Ctrl + X`, `Y`, `Enter`)。使配置立即生效：</p>
                     <div class="code-block bg-green-900 text-green-100 rounded-lg p-4 font-mono text-sm">
                         <button class="copy-button" data-clipboard-text="source ~/.bashrc  # 或 source ~/.zshrc">复制</button>
-                        <p>source ~/.bashrc  # 或 source ~/.zshrc</p>
+                        <pre><code class="language-bash">source ~/.bashrc  # 或 source ~/.zshrc</code></pre>
                     </div>
                     <p class="text-green-800 mt-4">或者，直接关闭并重新打开终端。</p>
                 </div>
@@ -250,30 +267,44 @@
                     <h3 class="text-xl font-bold text-green-900 mb-3">第四步：安装脚本依赖</h3>
                     <p class="text-green-800 mb-4">首次运行脚本时，它会检测并提示您安装缺失的依赖项。您也可以手动安装。</p>
                     <div class="mt-2">
-                         <div class="border-b border-green-200">
+                        <div class="border-b border-green-200">
                             <nav class="-mb-px flex space-x-6" aria-label="Tabs">
                                 <button class="tab-button active whitespace-nowrap py-3 px-1 border-b-2 font-medium text-sm text-green-900" data-tab-target="install-debian">Debian/Ubuntu</button>
                                 <button class="tab-button whitespace-nowrap py-3 px-1 border-b-2 border-transparent font-medium text-sm text-green-700 hover:text-green-900 hover:border-green-300" data-tab-target="install-centos">CentOS/RHEL</button>
+                                <button class="tab-button whitespace-nowrap py-3 px-1 border-b-2 border-transparent font-medium text-sm text-green-700 hover:text-green-900 hover:border-green-300" data-tab-target="install-macos">macOS</button>
                             </nav>
                         </div>
                         <div class="mt-4">
                             <div data-tab-content id="install-debian" class="active">
                                 <p class="font-semibold text-green-800 mb-2">Debian/Ubuntu 系统:</p>
                                 <div class="code-block bg-green-900 text-green-100 rounded-lg p-4 font-mono text-sm mb-4">
-                                    <button class="copy-button" data-clipboard-text="sudo apt update && sudo apt install zip unzip tar coreutils less curl -y">复制</button>
-                                    <p>sudo apt update && sudo apt install zip unzip tar coreutils less curl -y</p>
+                                    <button class="copy-button" data-clipboard-text="sudo apt update && sudo apt install zip unzip tar realpath coreutils curl rclone less -y">复制</button>
+                                    <pre><code class="language-bash">sudo apt update && sudo apt install zip unzip tar realpath coreutils curl rclone less -y</code></pre>
                                 </div>
                             </div>
                             <div data-tab-content id="install-centos">
                                 <p class="font-semibold text-green-800 mb-2">CentOS/RHEL 系统:</p>
                                 <div class="code-block bg-green-900 text-green-100 rounded-lg p-4 font-mono text-sm">
-                                    <button class="copy-button" data-clipboard-text="sudo yum install zip unzip tar coreutils less curl -y">复制</button>
-                                    <p>sudo yum install zip unzip tar coreutils less curl -y</p>
+                                    <button class="copy-button" data-clipboard-text="sudo yum install zip unzip tar coreutils curl rclone less -y">复制</button>
+                                    <pre><code class="language-bash">sudo yum install zip unzip tar coreutils curl rclone less -y</code></pre>
+                                    <p class="text-green-800 mt-2">或</p>
+                                    <div class="code-block bg-green-900 text-green-100 rounded-lg p-4 font-mono text-sm mt-2">
+                                        <button class="copy-button" data-clipboard-text="sudo dnf install zip unzip tar coreutils curl rclone less -y">复制</button>
+                                        <pre><code class="language-bash">sudo dnf install zip unzip tar coreutils curl rclone less -y</code></pre>
+                                    </div>
+                                </div>
+                            </div>
+                            <div data-tab-content id="install-macos">
+                                <p class="font-semibold text-green-800 mb-2">macOS 系统 (使用 Homebrew):</p>
+                                <div class="code-block bg-green-900 text-green-100 rounded-lg p-4 font-mono text-sm">
+                                    <button class="copy-button" data-clipboard-text="brew install zip unzip tar coreutils curl rclone less">复制</button>
+                                    <pre><code class="language-bash">brew install zip unzip tar coreutils curl rclone less</code></pre>
                                 </div>
                             </div>
                         </div>
                     </div>
                     <p class="text-green-800 mt-4">在执行安装命令时，系统可能会要求输入 `root` 密码。</p>
+                    <p class="text-green-800 mt-2">Rclone 的安装也可以通过脚本的 `[8. Rclone 安装/卸载]` 菜单选项来完成。</p>
                 </div>
                 <div class="bg-white p-6 rounded-xl shadow-lg border border-green-200/50">
                     <h3 class="text-xl font-bold text-green-900 mb-3">第五步：设置 Cron Job (实现自动备份)</h3>
@@ -281,18 +312,31 @@
                     <p class="text-green-800 mb-4">在终端中打开 Cron 表编辑器：</p>
                     <div class="code-block bg-green-900 text-green-100 rounded-lg p-4 font-mono text-sm">
                         <button class="copy-button" data-clipboard-text="crontab -e">复制</button>
-                        <p>crontab -e</p>
+                        <pre><code class="language-bash">crontab -e</code></pre>
                     </div>
                     <p class="text-green-800 mt-4 mb-4">如果之前有设置过旧的备份 Cron 任务，请务必将其删除。在文件底部添加以下一行新的 Cron Job 条目：</p>
                     <div class="code-block bg-green-900 text-green-100 rounded-lg p-4 font-mono text-sm">
-                        <button class="copy-button" data-clipboard-text="0 0 * * * bash /root/personal_backup.sh check_auto_backup > /dev/null 2>&1">复制</button>
-                        <p>0 0 * * * bash /root/personal_backup.sh check_auto_backup > /dev/null 2>&1</p>
+                        <button class="copy-button" data-clipboard-text="0 0 * * * bash /root/personal_backup_rclone.sh check_auto_backup > /dev/null 2>&1">复制</button>
+                        <pre><code class="language-cron">0 0 * * * bash /root/personal_backup_rclone.sh check_auto_backup > /dev/null 2>&1</code></pre>
                     </div>
-                    <p class="text-green-800 mt-4">**重要**：请务必将 `/root/personal_backup.sh` 替换为您脚本的**实际完整路径**。这行 Cron Job 的含义是：每天的午夜 00:00，执行您的备份脚本并带上 `check_auto_backup` 参数。脚本会根据您设定的间隔智能判断是否需要备份。保存并退出 Cron 表 (`Ctrl + X`, `Y`, `Enter`)。</p>
+                    <p class="text-green-800 mt-4"><strong>重要</strong>：请务必将 `/root/personal_backup_rclone.sh` 替换为您脚本的**实际完整路径**。这行 Cron Job 的含义是：每天的午夜 00:00，执行您的备份脚本并带上 `check_auto_backup` 参数。脚本会根据您设定的间隔智能判断是否需要备份。保存并退出 Cron 表 (`Ctrl + X`, `Y`, `Enter`)。</p>
+                    <p class="text-green-800 mt-4"><strong>解释这行 Cron Job：</strong></p>
+                    <ul class="list-disc list-inside mt-2 space-y-1 text-green-800">
+                        <li>`0 0 * * *`: 这表示每天的午夜 00:00（即凌晨 12 点）执行。
+                            <ul class="list-circle list-inside ml-4 space-y-1 text-green-800">
+                                <li>第一个 `0`: 每小时的第 0 分钟。</li>
+                                <li>第二个 `0`: 每天的第 0 小时。</li>
+                                <li>`* * *`: 每天、每月、每周的每一天。</li>
+                            </ul>
+                        </li>
+                        <li>`bash /root/personal_backup_rclone.sh check_auto_backup`: 这是要执行的命令，即运行您的 Bash 脚本，并传递 `check_auto_backup` 参数，让脚本以自动备份模式运行。</li>
+                        <li>`> /dev/null 2>&1`: 这会将脚本的所有标准输出 (stdout) 和标准错误 (stderr) 重定向到 `/dev/null`，意味着这些输出将不会显示在终端或邮件中，以避免 Cron 任务产生过多的输出。</li>
+                    </ul>
                 </div>
             </div>
         </section>
 
+        <!-- Usage Section -->
         <section id="usage" class="content-section">
             <div class="text-center mb-12">
                 <h2 class="text-3xl md:text-4xl font-bold text-green-900 mb-3">使用方法</h2>
@@ -310,7 +354,7 @@
 ━━━━━━━━━━━━━━━━━━━ 状态总览 ━━━━━━━━━━━━━━━━━━━
 上次备份: 202X-XX-XX XX:XX:XX 或 从未
 下次预估: 202X-XX-XX XX:XX:XX 或 取决于间隔设置
-备份模式: 归档模式/同步模式   备份源: X 个   已启用目标: X 个
+备份模式: 归档模式/同步模式    备份源: X 个    已启用目标: X 个
 ━━━━━━━━━━━━━━━━━━ 功能选项 ━━━━━━━━━━━━━━━━━━
  1. 自动备份与计划任务 (间隔: X 天)
  2. 手动备份
@@ -359,7 +403,7 @@
                         <span class="text-2xl text-green-500 transform transition-transform duration-500">&#x2795;</span>
                     </button>
                     <div class="accordion-content px-6 text-green-800">
-                         <p class="text-green-800 leading-relaxed">这是配置备份“什么”和“如何备”的关键。您可以：</p>
+                        <p class="text-green-800 leading-relaxed">这是配置备份“什么”和“如何备”的关键。您可以：</p>
                         <ul class="list-disc list-inside mt-4 space-y-2 text-green-800">
                             <li><strong>添加/管理备份路径</strong>：指定一个或多个要备份的文件或文件夹的绝对路径。</li>
                             <li><strong>设置备份模式</strong>：在“归档模式”（打包压缩后上传）和“同步模式”（直接同步文件结构）之间切换。</li>
@@ -377,7 +421,7 @@
                         <ul class="list-disc list-inside mt-4 space-y-2 text-green-800">
                             <li><strong>切换压缩格式</strong>：在 `.zip` 和 `.tar.gz` 之间选择。</li>
                             <li><strong>设置压缩级别</strong>：范围从 1（最快，压缩率低）到 9（最慢，压缩率高）。</li>
-                             <li><strong>设置 ZIP 密码</strong>：为您的 `.zip` 备份文件添加一层额外的密码保护。</li>
+                            <li><strong>设置 ZIP 密码</strong>：为您的 `.zip` 备份文件添加一层额外的密码保护。</li>
                         </ul>
                     </div>
                 </div>
@@ -388,16 +432,16 @@
                     </button>
                     <div class="accordion-content px-6 text-green-800 space-y-2">
                         <p class="text-green-800 leading-relaxed">这是脚本的“大脑”，负责连接和管理所有云端目的地。一个“备份目标”由两部分组成：`远程端名称:路径`。</p>
-                         <ul class="list-disc list-inside mt-4 space-y-2 text-green-800">
+                        <ul class="list-disc list-inside mt-4 space-y-2 text-green-800">
                             <li><strong>管理备份目标</strong>：添加、删除、修改和启用/禁用您的云端备份路径。您可以同时向多个已启用的目标进行备份。</li>
-                             <li><strong>Rclone 远程端创建助手</strong>：一个交互式向导，能帮助您快速配置 S3、WebDAV、SFTP 等多种常见的云存储服务，无需深入了解 Rclone 的复杂命令。</li>
-                             <li><strong>连接测试</strong>：验证您配置的远程端是否可以正常连接。</li>
-                             <li><strong>带宽限制</strong>：如果您的服务器带宽有限，可以设置此项来限制备份时占用的上传/下载速度。</li>
-                             <li><strong>完整性校验</strong>：强烈建议开启。上传完成后，脚本会再次检查云端文件与本地文件是否一致，确保数据在传输过程中没有损坏。</li>
+                            <li><strong>Rclone 远程端创建助手</strong>：一个交互式向导，能帮助您快速配置 S3、WebDAV、SFTP 等多种常见的云存储服务，无需深入了解 Rclone 的复杂命令。</li>
+                            <li><strong>连接测试</strong>：验证您配置的远程端是否可以正常连接。</li>
+                            <li><strong>带宽限制</strong>：如果您的服务器带宽有限，可以设置此项来限制备份时占用的上传/下载速度。</li>
+                            <li><strong>完整性校验</strong>：强烈建议开启。上传完成后，脚本会再次检查云端文件与本地文件是否一致，确保数据在传输过程中没有损坏。</li>
                         </ul>
                     </div>
                 </div>
-                 <div class="bg-white rounded-xl shadow-lg border border-green-200/50 overflow-hidden">
+                <div class="bg-white rounded-xl shadow-lg border border-green-200/50 overflow-hidden">
                     <button class="accordion-button w-full text-left p-6 flex justify-between items-center hover:bg-green-50/50 transition-colors" aria-expanded="false">
                         <span class="text-lg font-semibold text-green-900">6. 消息通知设定 (Telegram)</span>
                         <span class="text-2xl text-green-500 transform transition-transform duration-500">&#x2795;</span>
@@ -414,7 +458,7 @@
                         </ul>
                     </div>
                 </div>
-                 <div class="bg-white rounded-xl shadow-lg border border-green-200/50 overflow-hidden">
+                <div class="bg-white rounded-xl shadow-lg border border-green-200/50 overflow-hidden">
                     <button class="accordion-button w-full text-left p-6 flex justify-between items-center hover:bg-green-50/50 transition-colors" aria-expanded="false">
                         <span class="text-lg font-semibold text-green-900">7. 设置备份保留策略 (云端)</span>
                         <span class="text-2xl text-green-500 transform transition-transform duration-500">&#x2795;</span>
@@ -426,7 +470,7 @@
                             <li><strong>按数量保留</strong>：只保留最新的 N 个备份文件。例如，设置为 5，则在每次新备份完成后，如果总数超过 5 个，最旧的备份将被删除。</li>
                             <li><strong>按天数保留</strong>：只保留最近 N 天内的备份文件。例如，设置为 30，则任何创建时间超过 30 天的备份文件都将被删除。</li>
                         </ul>
-                        <p class="mt-2">您也可以选择**关闭保留策略**，这意味着所有上传到云端的备份都将一直保留，直到您手动删除。此设置会保存到 `~/.personal_backup_config` 文件中。</p>
+                        <p class="mt-2">您也可以选择<strong>关闭保留策略</strong>，这意味着所有上传到云端的备份都将一直保留，直到您手动删除。此设置会保存到 `~/.personal_backup_config` 文件中。</p>
                     </div>
                 </div>
                 <div class="bg-white rounded-xl shadow-lg border border-green-200/50 overflow-hidden">
@@ -442,14 +486,14 @@
                         </ul>
                     </div>
                 </div>
-                 <div class="bg-white rounded-xl shadow-lg border border-green-200/50 overflow-hidden">
+                <div class="bg-white rounded-xl shadow-lg border border-green-200/50 overflow-hidden">
                     <button class="accordion-button w-full text-left p-6 flex justify-between items-center hover:bg-green-50/50 transition-colors" aria-expanded="false">
                         <span class="text-lg font-semibold text-green-900">9. 从云端恢复到本地</span>
                         <span class="text-2xl text-green-500 transform transition-transform duration-500">&#x2795;</span>
                     </button>
                     <div class="accordion-content px-6 text-green-800">
                         <p class="text-green-800 leading-relaxed">如果发生数据丢失，您可以使用此功能轻松地从云端恢复数据。该功能仅适用于“归档模式”下创建的备份文件。</p>
-                         <ul class="list-disc list-inside mt-4 space-y-2 text-green-800">
+                        <ul class="list-disc list-inside mt-4 space-y-2 text-green-800">
                             <li>脚本会列出您所有已启用的 Rclone 目标。</li>
                             <li>选择一个目标后，脚本会列出该目标下的所有归档备份文件（`.zip` 或 `.tar.gz`）。</li>
                             <li>选择您要恢复的文件，脚本会将其下载到本地。</li>
@@ -470,7 +514,7 @@
                         </ul>
                     </div>
                 </div>
-                 <div class="bg-white rounded-xl shadow-lg border border-green-200/50 overflow-hidden">
+                <div class="bg-white rounded-xl shadow-lg border border-green-200/50 overflow-hidden">
                     <button class="accordion-button w-full text-left p-6 flex justify-between items-center hover:bg-green-50/50 transition-colors" aria-expanded="false">
                         <span class="text-lg font-semibold text-green-900">11. 日志与维护</span>
                         <span class="text-2xl text-green-500 transform transition-transform duration-500">&#x2795;</span>
@@ -478,7 +522,7 @@
                     <div class="accordion-content px-6 text-green-800">
                         <p class="text-green-800 leading-relaxed">管理脚本的日志行为和查看日志文件：</p>
                         <ul class="list-disc list-inside mt-4 space-y-2 text-green-800">
-                            <li><strong>设置日志级别</strong>：分别设置终端输出和文件记录的日志详细程度（DEBUG, INFO, WARN, ERROR）。</li>
+                            <li><strong>设置日志级别</strong>：分别为终端输出和文件记录的日志详细程度（DEBUG, INFO, WARN, ERROR）。</li>
                             <li><strong>查看日志文件</strong>：使用 `less` 命令分页查看脚本的运行日志。</li>
                         </ul>
                     </div>
@@ -492,25 +536,26 @@
                         <p>安全退出脚本。</p>
                     </div>
                 </div>
-                 <div class="bg-white rounded-xl shadow-lg border border-green-200/50 overflow-hidden">
+                <div class="bg-white rounded-xl shadow-lg border border-green-200/50 overflow-hidden">
                     <button class="accordion-button w-full text-left p-6 flex justify-between items-center hover:bg-green-50/50 transition-colors" aria-expanded="false">
                         <span class="text-lg font-semibold text-green-900">99. 卸载脚本</span>
                         <span class="text-2xl text-green-500 transform transition-transform duration-500">&#x2795;</span>
                     </button>
                     <div class="accordion-content px-6 text-green-800">
-                        <p>此选项会提示您是否确认卸载脚本。如果确认，脚本将删除自身文件、配置文件 (`~/.personal_backup_config`) 和日志文件 (`~/.personal_backup_log.txt`)。</p>
-                        <p class="mt-2">**注意**：如果您通过别名 (`alias bf=...`) 或将脚本移动到 `PATH` 目录来启动它，您需要手动删除这些别名或文件。</p>
+                        <p>此选项会提示您是否确认卸载脚本。如果确认，脚本将删除自身文件、配置文件 (`~/.config/personal_backup_rclone/config`) 和日志文件 (`~/.local/share/personal_backup_rclone/log.txt`)。</p>
+                        <p class="mt-2"><strong>注意</strong>：如果您通过别名 (`alias bf=...`) 或将脚本移动到 `PATH` 目录来启动它，您需要手动删除这些别名或文件。</p>
                     </div>
                 </div>
             </div>
         </section>
 
+        <!-- FAQ Section -->
         <section id="faq" class="content-section">
             <div class="text-center mb-12">
                 <h2 class="text-3xl md:text-4xl font-bold text-green-900 mb-3">常见问题与故障排除</h2>
                 <p class="text-lg text-green-700">遇到问题了？在这里查找解决方案。</p>
             </div>
-                <div class="max-w-4xl mx-auto space-y-4">
+            <div class="max-w-4xl mx-auto space-y-4">
                 <div class="bg-white rounded-xl shadow-lg border border-green-200/50 overflow-hidden">
                     <button class="accordion-button w-full text-left p-6 flex justify-between items-center hover:bg-green-50/50 transition-colors" aria-expanded="false">
                         <span class="text-lg font-semibold text-green-900">问题：运行脚本时提示 “/root/personal_backup.sh: line X: command not found” 或 “syntax error”</span>
@@ -520,69 +565,50 @@
                         <p><strong>原因:</strong> 这通常是由于在复制粘贴脚本代码时，引入了不可见的特殊字符（如不间断空格 `\u00A0`），或者文件编码/换行符格式问题（例如在 Windows 系统下编辑后上传到 Linux）。Bash 无法识别这些隐藏字符。</p>
                         <p class="mt-2"><strong>解决方案:</strong></p>
                         <ul class="list-disc list-inside mt-1 space-y-1">
-                            <li><strong>重新复制粘贴</strong>：最彻底的方法是再次从 GitHub 仓库中复制 `personal_backup.sh` 的内容。</li>
-                            <li><strong>使用 `nano` 编辑器</strong>：在 Linux 终端中，用 `nano ~/personal_backup.sh` 打开文件。</li>
+                            <li><strong>重新复制粘贴</strong>：最彻底的方法是再次从 GitHub 仓库中复制 `personal_backup_rclone.sh` 的内容。</li>
+                            <li><strong>使用 `nano` 编辑器</strong>：在 Linux 终端中，用 `nano ~/personal_backup_rclone.sh` 打开文件。</li>
                             <li><strong>清空内容</strong>：在 `nano` 中按住 `Ctrl + K` 连续删除所有旧代码。</li>
                             <li><strong>粘贴新代码</strong>：使用 `Ctrl + Shift + V` (Linux) 或 `Cmd + V` (macOS) 粘贴最新、干净的代码。</li>
-                            <li><strong>清除换行符 (可选)</strong>：保存并退出后，可以尝试运行 `dos2unix ~/personal_backup.sh` 命令（如果系统没有，先安装 `sudo apt install dos2unix`）。</li>
+                            <li><strong>清除换行符 (可选)</strong>：保存并退出后，可以尝试运行 `dos2unix ~/personal_backup_rclone.sh` 命令（如果系统没有，先安装 `sudo apt install dos2unix`）。</li>
                             <li><strong>避免跨系统编辑</strong>：尽量避免在 Windows 系统上编辑此脚本，直接在 Linux 终端中操作。</li>
                         </ul>
                     </div>
                 </div>
                 <div class="bg-white rounded-xl shadow-lg border border-green-200/50 overflow-hidden">
                     <button class="accordion-button w-full text-left p-6 flex justify-between items-center hover:bg-green-50/50 transition-colors" aria-expanded="false">
-                        <span class="text-lg font-semibold text-green-900">问题：提示 “检测到以下依赖项缺失：zip awscli 或 s3cmd (用于S3/R2)”</span>
+                        <span class="text-lg font-semibold text-green-900">问题：提示 “检测到以下依赖项缺失：rclone, zip 等”</span>
                         <span class="text-2xl text-green-500 transform transition-transform duration-500">&#x2795;</span>
                     </button>
                     <div class="accordion-content px-6 text-green-800">
-                        <p><strong>原因:</strong> 您的系统缺少运行备份功能（如压缩、上传到云存储）所需的工具。</p>
+                        <p><strong>原因:</strong> 您的系统缺少运行备份功能所需的工具。</p>
                         <p class="mt-2"><strong>解决方案:</strong> 按照脚本提示，根据您的操作系统类型，在终端中运行相应的安装命令。</p>
                         <ul class="list-disc list-inside mt-1 space-y-1">
-                            <li><strong>Debian/Ubuntu</strong>：`sudo apt update && sudo apt install zip awscli curl`</li>
-                            <li><strong>CentOS/RHEL</strong>：`sudo yum install zip awscli curl` (或 `sudo dnf install zip awscli curl`)</li>
+                            <li><strong>Debian/Ubuntu</strong>：`sudo apt update && sudo apt install zip unzip tar realpath coreutils curl rclone less -y`</li>
+                            <li><strong>CentOS/RHEL</strong>：`sudo yum install zip unzip tar coreutils curl rclone less -y` (或 `sudo dnf install zip unzip tar coreutils curl rclone less -y`)</li>
+                            <li><strong>macOS (使用 Homebrew)</strong>：`brew install zip unzip tar coreutils curl rclone less`</li>
                         </ul>
                         <p class="mt-2">确保所有必要的工具都被安装后，再次运行脚本。</p>
                     </div>
                 </div>
                 <div class="bg-white rounded-xl shadow-lg border border-green-200/50 overflow-hidden">
                     <button class="accordion-button w-full text-left p-6 flex justify-between items-center hover:bg-green-50/50 transition-colors" aria-expanded="false">
-                        <span class="text-lg font-semibold text-green-900">问题：S3/R2 上传失败，提示“配置、凭证和网络连接”问题</span>
+                        <span class="text-lg font-semibold text-green-900">问题：Rclone 连接/上传失败，提示“配置、凭证和网络连接”问题</span>
                         <span class="text-2xl text-green-500 transform transition-transform duration-500">&#x2795;</span>
                     </button>
                     <div class="accordion-content px-6 text-green-800">
                         <p><strong>原因:</strong></p>
                         <ul class="list-disc list-inside mt-1 space-y-1">
-                            <li>S3/R2 Access Key ID 或 Secret Access Key 输入错误。</li>
-                            <li>S3/R2 Endpoint URL 不正确（尤其对于 Cloudflare R2，确保 `&lt;ACCOUNT_ID&gt;` 部分正确）。</li>
-                            <li>S3/R2 Bucket 名称不正确。</li>
-                            <li>网络连接问题，无法访问 S3/R2 服务。</li>
-                            <li>AWS CLI 未正确配置或凭证已过期。</li>
-                        </ul>
-                            <p class="mt-2"><strong>解决方案:</strong></p>
-                        <ul class="list-disc list-inside mt-1 space-y-1">
-                            <li>仔细检查您在“云存储设定”中输入的各项信息，确保它们与您的云服务提供商提供的信息完全一致。</li>
-                            <li>如果您使用 `awscli`，考虑通过 `aws configure` 命令配置持久性凭证，这样更稳定和安全。对于 R2，确保 `~/.aws/config` 中的 `endpoint_url` 配置正确。</li>
-                        </ul>
-                    </div>
-                </div>
-                <div class="bg-white rounded-xl shadow-lg border border-green-200/50 overflow-hidden">
-                    <button class="accordion-button w-full text-left p-6 flex justify-between items-center hover:bg-green-50/50 transition-colors" aria-expanded="false">
-                        <span class="text-lg font-semibold text-green-900">问题：WebDAV 上传失败</span>
-                        <span class="text-2xl text-green-500 transform transition-transform duration-500">&#x2795;</span>
-                    </button>
-                    <div class="accordion-content px-6 text-green-800">
-                        <p><strong>原因:</strong></p>
-                        <ul class="list-disc list-inside mt-1 space-y-1">
-                            <li>WebDAV URL 不正确，或路径不正确（例如，缺少末尾的 `/`）。</li>
-                            <li>WebDAV 用户名或密码错误。</li>
-                            <li>WebDAV 服务器未启动或无法访问。</li>
-                            <li>服务器防火墙阻止了对外访问。</li>
+                            <li>Rclone 远程端配置信息（如 Access Key, Secret Key, Endpoint URL, 用户名, 密码等）输入错误。</li>
+                            <li>Rclone 远程端名称或目标路径不正确。</li>
+                            <li>网络连接问题，无法访问云存储服务。</li>
+                            <li>云服务提供商的防火墙规则阻止了连接。</li>
                         </ul>
                         <p class="mt-2"><strong>解决方案:</strong></p>
                         <ul class="list-disc list-inside mt-1 space-y-1">
-                            <li>检查 WebDAV URL 的格式和可访问性。</li>
-                            <li>验证用户名和密码是否正确。</li>
-                            <li>确保您的 WebDAV 服务器正常运行，并且从您的备份服务器可以访问到它。</li>
+                            <li>仔细检查您在脚本菜单 [5. 云存储设定 (Rclone)] -> [1. 查看、管理和启用备份目标] 或 [2. [助手] 创建新的 Rclone 远程端] 中输入的各项信息，确保它们与您的云服务提供商提供的信息完全一致。</li>
+                            <li>使用菜单 [5. 云存储设定 (Rclone)] -> [3. 测试 Rclone 远程端连接] 来诊断连接问题。</li>
+                            <li>对于某些需要浏览器认证的 Rclone 类型（如 Google Drive, Dropbox），您可能需要手动在终端运行 `rclone config` 命令进行配置。</li>
+                            <li>检查服务器的防火墙设置，确保允许对外访问云存储服务端口。</li>
                         </ul>
                     </div>
                 </div>
@@ -606,127 +632,151 @@
                         </ul>
                     </div>
                 </div>
+                <div class="bg-white rounded-xl shadow-lg border border-green-200/50 overflow-hidden">
+                    <button class="accordion-button w-full text-left p-6 flex justify-between items-center hover:bg-green-50/50 transition-colors" aria-expanded="false">
+                        <span class="text-lg font-semibold text-green-900">问题：临时目录空间不足导致备份失败</span>
+                        <span class="text-2xl text-green-500 transform transition-transform duration-500">&#x2795;</span>
+                    </button>
+                    <div class="accordion-content px-6 text-green-800">
+                        <p><strong>原因:</strong> 在“归档模式”下，脚本会在临时目录创建压缩文件。如果待备份的数据量很大，临时目录所在的分区可能没有足够的空间。</p>
+                        <p class="mt-2"><strong>解决方案:</strong></p>
+                        <ul class="list-disc list-inside mt-1 space-y-1">
+                            <li>清理临时目录所在分区的空间。</li>
+                            <li>更改临时目录的默认位置（这需要修改脚本中的 `TEMP_DIR` 变量，并确保新位置有足够的读写权限和空间）。</li>
+                        </ul>
+                    </div>
+                </div>
             </div>
         </section>
 
     </main>
     
+    <!-- Footer Section -->
     <footer class="text-center py-8 mt-12 border-t border-green-200">
         <p class="text-green-700">由个人自用数据备份脚本提供支持 | <a href="https://github.com/wk4796/123" id="github-link" class="text-green-600 hover:text-green-800 font-semibold" target="_blank" rel="noopener noreferrer">查看 GitHub 仓库</a></p>
     </footer>
 
+    <!-- JavaScript for interactivity and chart -->
     <script defer>
         document.addEventListener('DOMContentLoaded', function () {
+            // Select all navigation links and content sections
             const navLinks = document.querySelectorAll('.nav-link');
             const sections = document.querySelectorAll('.content-section');
 
-            // Navigation handler
+            // Function to set the active section based on hash
             function setActiveSection(hash) {
-                const targetHash = hash || '#home';
+                const targetHash = hash || '#home'; // Default to #home if no hash
                 
+                // Update active class for navigation links
                 navLinks.forEach(link => {
                     link.classList.toggle('active', link.hash === targetHash);
                 });
 
+                // Show/hide content sections
                 sections.forEach(section => {
                     section.classList.toggle('active', '#' + section.id === targetHash);
                 });
             }
             
-            // Handle hash changes on page load
+            // Handle hash changes on page load (e.g., if user navigates directly to a #hash)
             setActiveSection(window.location.hash);
 
+            // Add click event listeners to navigation links for smooth section switching
             navLinks.forEach(link => {
                 link.addEventListener('click', function (e) {
-                    e.preventDefault();
+                    e.preventDefault(); // Prevent default anchor link behavior
                     const targetHash = this.hash;
-                    window.history.pushState(null, null, targetHash);
+                    window.history.pushState(null, null, targetHash); // Update URL hash without page reload
                     setActiveSection(targetHash);
-                    // Smooth scroll to top of the section (optional, as sections are full-width)
+                    // Smooth scroll to the top of the section (optional, as sections are full-width)
                     document.querySelector(targetHash).scrollIntoView({ behavior: 'smooth' });
                 });
             });
             
-            // Accordion handler
+            // Accordion functionality for Usage and FAQ sections
             document.querySelectorAll('.accordion-button').forEach(button => {
                 button.addEventListener('click', () => {
-                    const content = button.nextElementSibling;
-                    const icon = button.querySelector('span:last-child');
+                    const content = button.nextElementSibling; // Get the content div immediately after the button
+                    const icon = button.querySelector('span:last-child'); // Get the plus/minus icon
 
-                    const isOpen = button.classList.toggle('open');
-                    button.setAttribute('aria-expanded', isOpen); // Accessibility
+                    const isOpen = button.classList.toggle('open'); // Toggle 'open' class on the button
+                    button.setAttribute('aria-expanded', isOpen); // Update accessibility attribute
 
+                    // Animate max-height for smooth expand/collapse
                     if (isOpen) {
-                        content.style.maxHeight = content.scrollHeight + "px";
-                        icon.style.transform = 'rotate(45deg)';
+                        content.style.maxHeight = content.scrollHeight + "px"; // Set max-height to content's actual height
+                        icon.style.transform = 'rotate(45deg)'; // Rotate icon for 'open' state
                     } else {
-                        content.style.maxHeight = '0';
-                        icon.style.transform = 'rotate(0deg)';
+                        content.style.maxHeight = '0'; // Collapse content
+                        icon.style.transform = 'rotate(0deg)'; // Reset icon rotation
                     }
                 });
             });
 
-            // Copy to clipboard handler
+            // Copy to clipboard functionality for code blocks
             document.querySelectorAll('.copy-button').forEach(button => {
                 button.addEventListener('click', async () => {
-                    const textToCopy = button.dataset.clipboardText;
+                    const textToCopy = button.dataset.clipboardText; // Get text from data-clipboard-text attribute
                     
                     try {
-                        // Use document.execCommand('copy') as navigator.clipboard.writeText() may not work due to iFrame restrictions.
+                        // Using document.execCommand('copy') as navigator.clipboard.writeText() may not work reliably in some iframe environments.
                         const textArea = document.createElement('textarea');
                         textArea.value = textToCopy;
-                        textArea.style.position = 'fixed'; // Avoid scrolling to bottom
-                        textArea.style.left = '-9999px';
-                        document.body.appendChild(textArea);
-                        textArea.select();
-                        document.execCommand('copy');
+                        textArea.style.position = 'fixed'; // Prevent scrolling to bottom of page
+                        textArea.style.left = '-9999px'; // Move out of view
+                        document.body.appendChild(textArea); // Append to DOM
+                        textArea.select(); // Select the text
+                        document.execCommand('copy'); // Execute copy command
+                        document.body.removeChild(textArea); // Remove the temporary textarea
 
+                        // Provide visual feedback to the user
                         button.textContent = '已复制!';
                         button.classList.add('copied');
                         setTimeout(() => {
                             button.textContent = '复制';
                             button.classList.remove('copied');
-                        }, 2000);
+                        }, 2000); // Reset button text after 2 seconds
                     } catch (err) {
-                        console.error('复制失败:', err);
+                        console.error('复制失败:', err); // Log any errors to console
                     }
                 });
             });
 
-            // Chart.js initialization
+            // Chart.js initialization for "Archive vs. Sync" comparison
             const chartCtx = document.getElementById('modeComparisonChart').getContext('2d');
             new Chart(chartCtx, {
-                type: 'bar',
+                type: 'bar', // Bar chart type
                 data: {
-                    labels: ['版本控制与恢复', '备份效率', '存储空间占用', '适用场景'],
+                    labels: ['版本控制与恢复', '备份效率', '存储空间占用', '适用场景'], // Categories
                     datasets: [{
-                        label: '归档模式',
-                        data: [9, 5, 6, 7],
-                        backgroundColor: 'rgba(34, 197, 94, 0.6)', // emerald-500 (accent green)
+                        label: '归档模式', // Dataset for Archive Mode
+                        data: [9, 5, 6, 7], // Data points (higher is generally better for positive aspects, lower for negative)
+                        backgroundColor: 'rgba(34, 197, 94, 0.6)', // emerald-500 with transparency
                         borderColor: 'rgba(34, 197, 94, 1)',
                         borderWidth: 1
                     }, {
-                        label: '同步模式',
-                        data: [2, 9, 8, 5],
-                        backgroundColor: 'rgba(251, 191, 36, 0.6)', // amber-400 (contrasting yellow)
+                        label: '同步模式', // Dataset for Sync Mode
+                        data: [2, 9, 8, 5], // Data points
+                        backgroundColor: 'rgba(251, 191, 36, 0.6)', // amber-400 with transparency
                         borderColor: 'rgba(251, 191, 36, 1)',
                         borderWidth: 1
                     }]
                 },
                 options: {
-                    indexAxis: 'y',
+                    indexAxis: 'y', // Make it a horizontal bar chart
                     responsive: true,
-                    maintainAspectRatio: false,
+                    maintainAspectRatio: false, // Allow canvas to resize freely within container
                     scales: {
                         x: {
                             beginAtZero: true,
-                            max: 10,
+                            max: 10, // Max value for the scale
                             ticks: {
+                                // Custom labels for X-axis ticks (e.g., Low, Medium, High)
                                 callback: function(value, index, values) {
                                     if (value === 2) return '低';
                                     if (value === 5) return '中';
                                     if (value === 9) return '高';
-                                    return '';
+                                    return ''; // Hide other tick labels
                                 }
                             }
                         }
@@ -734,11 +784,13 @@
                     plugins: {
                         tooltip: {
                             callbacks: {
+                                // Custom tooltips to show detailed explanations for each bar
                                 label: function(context) {
                                     let label = context.dataset.label || '';
                                     if (label) {
                                         label += ': ';
                                     }
+                                    // Define detailed explanations for each mode and category
                                     const details = {
                                         '归档模式': {
                                             '版本控制与恢复': '高 - 每个备份都是一个独立版本，易于恢复到特定时间点。',
@@ -761,17 +813,20 @@
                 }
             });
 
-            // Tabs for installation section
+            // Tab functionality for installation section (OS-specific commands)
             const tabButtons = document.querySelectorAll('.tab-button');
             tabButtons.forEach(button => {
                 button.addEventListener('click', () => {
+                    // Deactivate all tab buttons
                     tabButtons.forEach(btn => {
                         btn.classList.remove('active', 'text-green-900');
                         btn.classList.add('border-transparent', 'text-green-700', 'hover:text-green-900', 'hover:border-green-300');
                     });
+                    // Activate the clicked button
                     button.classList.add('active', 'text-green-900');
                     button.classList.remove('border-transparent', 'text-green-700', 'hover:text-green-900', 'hover:border-green-300');
 
+                    // Show/hide tab content
                     const targetId = button.dataset.tabTarget;
                     document.querySelectorAll('[data-tab-content]').forEach(content => {
                         if (content.id === targetId) {
@@ -783,9 +838,9 @@
                 });
             });
 
-            // GitHub link update
+            // Update GitHub link in footer (if necessary, though hardcoded here)
             const githubLink = document.getElementById('github-link');
-            const realGithubUrl = 'https://github.com/wk4796/123';
+            const realGithubUrl = 'https://github.com/wk4796/123'; // Replace with your actual GitHub URL
             if (githubLink) {
                 githubLink.href = realGithubUrl;
             }
