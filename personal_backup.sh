@@ -34,9 +34,10 @@ COMPRESSION_FORMAT="zip"      # "zip" or "tar.gz"
 COMPRESSION_LEVEL=6           # 1 (fastest) to 9 (best)
 ZIP_PASSWORD=""               # Password for zip files, empty for none
 
-# 日志配置
+# 日志与维护配置
 CONSOLE_LOG_LEVEL=$LOG_LEVEL_INFO # 终端输出的日志级别
 FILE_LOG_LEVEL=$LOG_LEVEL_DEBUG   # 文件记录的日志级别
+ENABLE_SPACE_CHECK="true"         # [新增] "true" or "false", 备份前临时空间检查
 
 
 AUTO_BACKUP_INTERVAL_DAYS=7 # 默认自动备份间隔天数
@@ -229,6 +230,7 @@ save_config() {
         echo "ZIP_PASSWORD=\"$ZIP_PASSWORD\""
         echo "CONSOLE_LOG_LEVEL=${CONSOLE_LOG_LEVEL:-$LOG_LEVEL_INFO}"
         echo "FILE_LOG_LEVEL=${FILE_LOG_LEVEL:-$LOG_LEVEL_DEBUG}"
+        echo "ENABLE_SPACE_CHECK=\"${ENABLE_SPACE_CHECK}\"" # [新增] 保存空间检查配置
         echo "RCLONE_BWLIMIT=\"$RCLONE_BWLIMIT\""
         echo "AUTO_BACKUP_INTERVAL_DAYS=$AUTO_BACKUP_INTERVAL_DAYS"
         echo "LAST_AUTO_BACKUP_TIMESTAMP=$LAST_AUTO_BACKUP_TIMESTAMP"
@@ -1390,9 +1392,15 @@ perform_archive_backup() {
 
     log_info "--- ${backup_type} 过程开始 (归档模式) ---"
 
-    if ! check_temp_space; then
-        return 1
+    # [新增] 根据配置决定是否检查空间
+    if [[ "$ENABLE_SPACE_CHECK" == "true" ]]; then
+        if ! check_temp_space; then
+            return 1
+        fi
+    else
+        log_warn "已跳过备份前临时空间检查。"
     fi
+
 
     local timestamp
     timestamp=$(date +%Y%m%d%H%M%S)
@@ -1750,7 +1758,36 @@ manage_config_import_export() {
     done
 }
 
-# [NEW] 日志与维护菜单
+# [新增] 切换空间检查功能的函数
+toggle_space_check() {
+    display_header
+    echo -e "${BLUE}--- 备份前临时空间检查 ---${NC}"
+    echo "开启后，在“归档模式”开始前，脚本会先计算所需空间并与可用空间对比。"
+    echo -e "${YELLOW}关闭此选项可略微加快备份启动速度，但有因空间不足导致备份中途失败的风险。${NC}"
+
+    local check_status="已开启"
+    if [[ "$ENABLE_SPACE_CHECK" != "true" ]]; then
+        check_status="已关闭"
+    fi
+    echo -e "当前状态: ${GREEN}${check_status}${NC}"
+
+    read -rp "您想切换状态吗？ (y/N): " choice
+    if [[ "$choice" =~ ^[Yy]$ ]]; then
+        if [[ "$ENABLE_SPACE_CHECK" == "true" ]]; then
+            ENABLE_SPACE_CHECK="false"
+            log_warn "备份前临时空间检查已关闭。"
+        else
+            ENABLE_SPACE_CHECK="true"
+            log_info "备份前临时空间检查已开启。"
+        fi
+        save_config
+    else
+        log_info "状态未改变。"
+    fi
+    press_enter_to_continue
+}
+
+# [修改] 增加切换空间检查的选项
 system_maintenance_menu() {
     while true; do
         display_header
@@ -1769,6 +1806,8 @@ system_maintenance_menu() {
 
         echo -e "  1. ${YELLOW}设置日志级别${NC} (终端: ${console_level_name}, 文件: ${file_level_name})"
         echo -e "  2. ${YELLOW}查看日志文件${NC} ${log_info_str}"
+        local space_check_status=$([[ "$ENABLE_SPACE_CHECK" == "true" ]] && echo "已开启" || echo "已关闭")
+        echo -e "  3. ${YELLOW}切换备份前空间检查${NC} (当前: ${space_check_status})"
         echo ""
         echo -e "  0. ${RED}返回主菜单${NC}"
         read -rp "请输入选项: " choice
@@ -1783,6 +1822,7 @@ system_maintenance_menu() {
                     press_enter_to_continue
                 fi
                 ;;
+            3) toggle_space_check ;;
             0) break ;;
             *) log_error "无效选项。"; press_enter_to_continue ;;
         esac
