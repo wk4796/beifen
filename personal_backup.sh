@@ -681,13 +681,13 @@ manual_backup() {
         log_error "没有设置任何备份源路径。"
         log_warn "请先在选项 [3] 中添加要备份的路径。"
         press_enter_to_continue
-        return 1
+        return 1 # 返回非零状态，表示未满足条件，但我们将在调用处处理以返回主菜单
     fi
     if [ ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} -eq 0 ]; then
         log_error "没有启用任何 Rclone 备份目标。"
         log_warn "请先在选项 [5] 中配置并启用一个或多个目标。"
         press_enter_to_continue
-        return 1
+        return 1 # 返回非零状态，表示未满足条件，但我们将在调用处处理以返回主菜单
     fi
 
     perform_backup "手动备份"
@@ -1059,7 +1059,7 @@ set_cloud_storage() {
 
         case $choice in
             1) view_and_manage_rclone_targets ;;
-            2) create_rclone_remote_wizard ;;
+            2) create_rclone_remote_wizard || true ;; # Added || true to prevent script exit on sub-function error
             3) test_rclone_remotes ;;
             4) set_bandwidth_limit ;;
             5) toggle_integrity_check ;;
@@ -1892,7 +1892,7 @@ process_menu_choice() {
     read -rp "请输入选项: " choice
     case $choice in
         1) manage_auto_backup_menu ;;
-        2) manual_backup ;;
+        2) manual_backup || true ;; # Modified: Added || true to prevent script exit
         3) set_backup_path_and_mode ;;
         4) manage_compression_settings ;;
         5) set_cloud_storage ;;
@@ -1970,7 +1970,7 @@ main() {
 }
 
 # ================================================================
-# ===           RCLONE 云存储管理函数 (无需修改)                 ===
+# ===          RCLONE 云存储管理函数 (无需修改)                  ===
 # ================================================================
 
 prompt_and_add_target() {
@@ -2044,6 +2044,7 @@ create_rclone_s3_remote() {
         prompt_and_add_target "$remote_name" "由助手创建"
     else
         log_error "远程端创建失败！请检查您的输入或 Rclone 的错误提示。"
+        return 1 # Ensure this function returns an error if creation fails
     fi
     press_enter_to_continue
 }
@@ -2064,6 +2065,7 @@ create_rclone_b2_remote() {
         prompt_and_add_target "$remote_name" "由助手创建"
     else
         log_error "远程端创建失败！"
+        return 1 # Ensure this function returns an error if creation fails
     fi
     press_enter_to_continue
 }
@@ -2084,6 +2086,7 @@ create_rclone_azureblob_remote() {
         prompt_and_add_target "$remote_name" "由助手创建"
     else
         log_error "远程端创建失败！"
+        return 1 # Ensure this function returns an error if creation fails
     fi
     press_enter_to_continue
 }
@@ -2105,6 +2108,7 @@ create_rclone_mega_remote() {
         prompt_and_add_target "$remote_name" "由助手创建"
     else
         log_error "远程端创建失败！"
+        return 1 # Ensure this function returns an error if creation fails
     fi
     press_enter_to_continue
 }
@@ -2128,6 +2132,7 @@ create_rclone_pcloud_remote() {
         prompt_and_add_target "$remote_name" "由助手创建"
     else
         log_error "远程端创建失败！可能是密码错误或需要双因素认证。"
+        return 1 # Ensure this function returns an error if creation fails
     fi
     press_enter_to_continue
 }
@@ -2150,6 +2155,7 @@ create_rclone_webdav_remote() {
         prompt_and_add_target "$remote_name" "由助手创建"
     else
         log_error "远程端创建失败！"
+        return 1 # Ensure this function returns an error if creation fails
     fi
     press_enter_to_continue
 }
@@ -2198,6 +2204,7 @@ create_rclone_sftp_remote() {
         log_warn "提示: 首次连接 SFTP 服务器时，Rclone 可能需要您确认主机的密钥指纹。"
     else
         log_error "远程端创建失败！"
+        return 1 # Ensure this function returns an error if creation fails
     fi
     press_enter_to_continue
 }
@@ -2222,6 +2229,7 @@ create_rclone_ftp_remote() {
         prompt_and_add_target "$remote_name" "由助手创建"
     else
         log_error "远程端创建失败！"
+        return 1 # Ensure this function returns an error if creation fails
     fi
     press_enter_to_continue
 }
@@ -2266,6 +2274,7 @@ create_rclone_crypt_remote() {
         log_info "现在您可以像使用普通远程端一样使用 '${remote_name}:'，所有数据都会在后台自动加解密。"
     else
         log_error "远程端创建失败！"
+        return 1 # Ensure this function returns an error if creation fails
     fi
     press_enter_to_continue
 }
@@ -2290,6 +2299,7 @@ create_rclone_alias_remote() {
         log_info "现在 '${remote_name}:' 就等同于 '${target_remote}'。"
     else
         log_error "远程端创建失败！"
+        return 1 # Ensure this function returns an error if creation fails
     fi
     press_enter_to_continue
 }
@@ -2326,16 +2336,16 @@ create_rclone_remote_wizard() {
         read -rp "请输入选项: " choice
 
         case "$choice" in
-            1) create_rclone_s3_remote ;;
-            2) create_rclone_b2_remote ;;
-            3) create_rclone_azureblob_remote ;;
-            4) create_rclone_mega_remote ;;
-            5) create_rclone_pcloud_remote ;;
-            6) create_rclone_webdav_remote ;;
-            7) create_rclone_sftp_remote ;;
-            8) create_rclone_ftp_remote ;;
-            9) create_rclone_crypt_remote ;;
-            10) create_rclone_alias_remote ;;
+            1) create_rclone_s3_remote || true ;; # Modified: Added || true
+            2) create_rclone_b2_remote || true ;; # Modified: Added || true
+            3) create_rclone_azureblob_remote || true ;; # Modified: Added || true
+            4) create_rclone_mega_remote || true ;; # Modified: Added || true
+            5) create_rclone_pcloud_remote || true ;; # Modified: Added || true
+            6) create_rclone_webdav_remote || true ;; # Modified: Added || true
+            7) create_rclone_sftp_remote || true ;; # Modified: Added || true
+            8) create_rclone_ftp_remote || true ;; # Modified: Added || true
+            9) create_rclone_crypt_remote || true ;; # Modified: Added || true
+            10) create_rclone_alias_remote || true ;; # Modified: Added || true
             0) break ;;
             *) log_error "无效选项。"; press_enter_to_continue ;;
         esac
