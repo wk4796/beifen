@@ -30,7 +30,7 @@ BACKUP_MODE="archive"        # "archive" (归档模式) or "sync" (同步模式)
 ENABLE_INTEGRITY_CHECK="true" # "true" or "false"，备份后完整性校验
 
 # 压缩格式配置
-COMPRESSION_FORMAT="zip"      # "zip" or "tar.gz"
+COMPRESSION_FORMAT="zip"     # "zip" or "tar.gz"
 COMPRESSION_LEVEL=6          # 1 (fastest) to 9 (best)
 ZIP_PASSWORD=""              # Password for zip files, empty for none
 
@@ -282,6 +282,8 @@ load_config() {
             done
             RCLONE_TARGETS_METADATA_ARRAY=("${temp_meta_array[@]}")
             save_config
+            # [新增] 日志提示
+            log_info "配置已自动更新以兼容新版本，下次运行将使用最新配置。"
         fi
 
     else
@@ -1968,7 +1970,7 @@ main() {
 }
 
 # ================================================================
-# ===         RCLONE 云存储管理函数 (无需修改)                 ===
+# ===           RCLONE 云存储管理函数 (无需修改)                 ===
 # ================================================================
 
 prompt_and_add_target() {
