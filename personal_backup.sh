@@ -45,7 +45,7 @@ LAST_AUTO_BACKUP_TIMESTAMP=0 # 上次自动备份的 Unix 时间戳
 
 # 备份保留策略默认值
 RETENTION_POLICY_TYPE="none" # "none", "count", "days"
-RETention_VALUE=0            # 要保留的备份数量或天数
+RETENTION_VALUE=0            # 要保留的备份数量或天数
 
 # --- Rclone 配置 ---
 declare -a RCLONE_TARGETS_ARRAY=()
@@ -57,23 +57,22 @@ RCLONE_TARGETS_METADATA_STRING=""
 RCLONE_BWLIMIT="" # 带宽限制 (例如 "8M" 代表 8 MByte/s)
 
 
-# --- 【修改】通知配置 ---
-# 移除了 NOTIFICATION_METHOD，现在两者可以独立启用
+# --- 【重大重构】通知配置 ---
+# 使用数组支持多个机器人和邮件发件人
+# 内部字段分隔符
+NOTIFICATION_FIELD_DELIMITER="_#_"
+# 记录之间的分隔符
+NOTIFICATION_RECORD_DELIMITER=";;"
 
 # --- Telegram 通知变量 ---
-TELEGRAM_ENABLED="false"
-TELEGRAM_BOT_TOKEN=""
-TELEGRAM_CHAT_ID=""
+declare -a TELEGRAM_BOTS_ARRAY=()
+TELEGRAM_BOTS_STRING=""
+# 格式: "别名_#_BOT_TOKEN_#_CHAT_ID_#_enabled(true/false)"
 
 # --- 邮件通知变量 ---
-EMAIL_ENABLED="false"
-EMAIL_HOST=""         # SMTP 服务器地址, e.g., smtp.example.com
-EMAIL_PORT=""         # SMTP 端口, e.g., 587
-EMAIL_USER=""         # SMTP 用户名
-EMAIL_PASSWORD=""     # SMTP 密码
-EMAIL_FROM=""         # 发件人地址
-EMAIL_TO=""           # 收件人地址
-EMAIL_USE_TLS="true"  # 是否使用 TLS 加密 ('true' or 'false')
+declare -a EMAIL_SENDERS_ARRAY=()
+EMAIL_SENDERS_STRING=""
+# 格式: "别名_#_HOST_#_PORT_#_USER_#_PASSWORD_#_FROM_#_USE_TLS_#_enabled_#_recipient1,recipient2,..."
 
 
 # [新增] 通知报告生成用的全局变量
@@ -198,7 +197,7 @@ clear_screen() {
 display_header() {
     clear_screen
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}       $SCRIPT_NAME       ${NC}"
+    echo -e "${GREEN}        $SCRIPT_NAME        ${NC}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 }
@@ -233,6 +232,8 @@ save_config() {
     RCLONE_TARGETS_STRING=$(IFS=';;'; echo "${RCLONE_TARGETS_ARRAY[*]}")
     ENABLED_RCLONE_TARGET_INDICES_STRING=$(IFS=';;'; echo "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[*]}")
     RCLONE_TARGETS_METADATA_STRING=$(IFS=';;'; echo "${RCLONE_TARGETS_METADATA_ARRAY[*]}")
+    TELEGRAM_BOTS_STRING=$(IFS="$NOTIFICATION_RECORD_DELIMITER"; echo "${TELEGRAM_BOTS_ARRAY[*]}")
+    EMAIL_SENDERS_STRING=$(IFS="$NOTIFICATION_RECORD_DELIMITER"; echo "${EMAIL_SENDERS_ARRAY[*]}")
 
     {
         echo "BACKUP_SOURCE_PATHS_STRING=\"$BACKUP_SOURCE_PATHS_STRING\""
@@ -254,19 +255,9 @@ save_config() {
         echo "ENABLED_RCLONE_TARGET_INDICES_STRING=\"$ENABLED_RCLONE_TARGET_INDICES_STRING\""
         echo "RCLONE_TARGETS_METADATA_STRING=\"$RCLONE_TARGETS_METADATA_STRING\""
         
-        # --- 【修改】保存通知配置 ---
-        # 移除了 NOTIFICATION_METHOD
-        echo "TELEGRAM_ENABLED=\"$TELEGRAM_ENABLED\""
-        echo "TELEGRAM_BOT_TOKEN=\"$TELEGRAM_BOT_TOKEN\""
-        echo "TELEGRAM_CHAT_ID=\"$TELEGRAM_CHAT_ID\""
-        echo "EMAIL_ENABLED=\"$EMAIL_ENABLED\""
-        echo "EMAIL_HOST=\"$EMAIL_HOST\""
-        echo "EMAIL_PORT=\"$EMAIL_PORT\""
-        echo "EMAIL_USER=\"$EMAIL_USER\""
-        echo "EMAIL_PASSWORD=\"$EMAIL_PASSWORD\""
-        echo "EMAIL_FROM=\"$EMAIL_FROM\""
-        echo "EMAIL_TO=\"$EMAIL_TO\""
-        echo "EMAIL_USE_TLS=\"$EMAIL_USE_TLS\""
+        # --- 【重构】保存新的通知配置 ---
+        echo "TELEGRAM_BOTS_STRING=\"$TELEGRAM_BOTS_STRING\""
+        echo "EMAIL_SENDERS_STRING=\"$EMAIL_SENDERS_STRING\""
 
     } > "$CONFIG_FILE"
 
@@ -284,8 +275,47 @@ load_config() {
             chmod 600 "$CONFIG_FILE" 2>/dev/null
         fi
 
+        # shellcheck source=/dev/null
         source "$CONFIG_FILE"
         log_info "配置已从 $CONFIG_FILE 加载。"
+
+        # --- 【新增】旧版通知配置迁移逻辑 ---
+        local needs_resave=false
+        if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+            log_warn "检测到旧版 Telegram 配置，正在自动迁移..."
+            local migrated_tg_enabled="${TELEGRAM_ENABLED:-false}"
+            local new_bot_entry="默认机器人${NOTIFICATION_FIELD_DELIMITER}${TELEGRAM_BOT_TOKEN}${NOTIFICATION_FIELD_DELIMITER}${TELEGRAM_CHAT_ID}${NOTIFICATION_FIELD_DELIMITER}${migrated_tg_enabled}"
+            TELEGRAM_BOTS_ARRAY+=("$new_bot_entry")
+            # 清理旧变量，防止下次加载时重复迁移
+            TELEGRAM_BOT_TOKEN=""
+            TELEGRAM_CHAT_ID=""
+            TELEGRAM_ENABLED=""
+            needs_resave=true
+        fi
+        
+        if [[ -n "${EMAIL_HOST:-}" ]]; then
+            log_warn "检测到旧版邮件配置，正在自动迁移..."
+            local migrated_email_enabled="${EMAIL_ENABLED:-false}"
+            local migrated_use_tls="${EMAIL_USE_TLS:-true}"
+            local new_sender_entry="默认发件人${NOTIFICATION_FIELD_DELIMITER}${EMAIL_HOST}${NOTIFICATION_FIELD_DELIMITER}${EMAIL_PORT}${NOTIFICATION_FIELD_DELIMITER}${EMAIL_USER}${NOTIFICATION_FIELD_DELIMITER}${EMAIL_PASSWORD}${NOTIFICATION_FIELD_DELIMITER}${EMAIL_FROM}${NOTIFICATION_FIELD_DELIMITER}${migrated_use_tls}${NOTIFICATION_FIELD_DELIMITER}${migrated_email_enabled}${NOTIFICATION_FIELD_DELIMITER}${EMAIL_TO}"
+            EMAIL_SENDERS_ARRAY+=("$new_sender_entry")
+            # 清理旧变量
+            EMAIL_HOST=""
+            EMAIL_PORT=""
+            EMAIL_USER=""
+            EMAIL_PASSWORD=""
+            EMAIL_FROM=""
+            EMAIL_TO=""
+            EMAIL_USE_TLS=""
+            EMAIL_ENABLED=""
+            needs_resave=true
+        fi
+
+        if [[ "$needs_resave" == "true" ]]; then
+            log_info "配置已自动迁移到新格式，并重新保存。"
+            save_config
+        fi
+        # --- 迁移逻辑结束 ---
 
         if [[ -n "$BACKUP_SOURCE_PATHS_STRING" ]]; then
             IFS=';;'; read -r -a BACKUP_SOURCE_PATHS_ARRAY <<< "$BACKUP_SOURCE_PATHS_STRING"
@@ -305,6 +335,14 @@ load_config() {
         
         if [[ -n "$RCLONE_TARGETS_METADATA_STRING" ]]; then
             IFS=';;'; read -r -a RCLONE_TARGETS_METADATA_ARRAY <<< "$RCLONE_TARGETS_METADATA_STRING"
+        fi
+        
+        # --- 【重构】加载新的通知配置 ---
+        if [[ -n "$TELEGRAM_BOTS_STRING" ]]; then
+            IFS="$NOTIFICATION_RECORD_DELIMITER"; read -r -a TELEGRAM_BOTS_ARRAY <<< "$TELEGRAM_BOTS_STRING"
+        fi
+        if [[ -n "$EMAIL_SENDERS_STRING" ]]; then
+            IFS="$NOTIFICATION_RECORD_DELIMITER"; read -r -a EMAIL_SENDERS_ARRAY <<< "$EMAIL_SENDERS_STRING"
         fi
         
         if [[ ${#RCLONE_TARGETS_METADATA_ARRAY[@]} -ne ${#RCLONE_TARGETS_ARRAY[@]} ]]; then
@@ -456,22 +494,16 @@ check_dependencies() {
 }
 
 
-# [修改] 移除 parse_mode，发送纯文本消息
-send_telegram_message() {
-    local message_content="$1"
-    # 此处不再检查 TELEGRAM_ENABLED，因为这个检查在 send_notification 中完成
-    if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
-        log_warn "Telegram 凭证未配置，跳过发送消息。"
-        return 0
-    fi
-    if ! command -v curl &> /dev/null; then
-        log_error "发送 Telegram 消息需要 'curl'，但未安装。"
-        return 1
-    fi
-    log_info "正在发送 Telegram 消息..."
-    # [修改] 移除 parse_mode=Markdown，现在以纯文本格式发送消息，以支持更自由的格式和 Emoji。
-    if curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-        --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+# --- 【重构】具体发送通知的 Worker 函数 ---
+_send_telegram_worker() {
+    local bot_token="$1"
+    local chat_id="$2"
+    local message_content="$3"
+    
+    log_info "正在通过 Bot (Token: ...${bot_token: -6}) 向 Chat ID (...${chat_id: -4}) 发送 Telegram 消息..."
+    
+    if curl -s -X POST "https://api.telegram.org/bot${bot_token}/sendMessage" \
+        --data-urlencode "chat_id=${chat_id}" \
         --data-urlencode "text=${message_content}" > /dev/null; then
         log_info "Telegram 消息发送成功。"
     else
@@ -479,30 +511,26 @@ send_telegram_message() {
     fi
 }
 
-# --- 发送邮件通知的函数 ---
-send_email_message() {
-    local message_content="$1"
-    local subject="$2" # 新增：邮件主题参数
-    # 此处不再检查 EMAIL_ENABLED
+_send_email_worker() {
+    local mail_host="$1"
+    local mail_port="$2"
+    local mail_user="$3"
+    local mail_pass="$4"
+    local mail_from="$5"
+    local mail_use_tls="$6"
+    local subject="$7"
+    local message_content="$8"
+    shift 8
+    local recipients_array=("$@")
 
-    if [[ -z "$EMAIL_HOST" || -z "$EMAIL_PORT" || -z "$EMAIL_USER" || -z "$EMAIL_PASSWORD" || -z "$EMAIL_FROM" || -z "$EMAIL_TO" ]]; then
-        log_warn "邮件通知配置不完整，跳过发送邮件。"
-        return 0
-    fi
-    
-    if ! command -v curl &> /dev/null; then
-        log_error "发送邮件需要 'curl'，但未安装。"
-        return 1
-    fi
-
-    log_info "正在发送邮件..."
+    log_info "正在通过 SMTP ${mail_host}:${mail_port} 发送邮件..."
 
     # 创建邮件内容临时文件
     local mail_body_file="${TEMP_DIR}/mail.txt"
     # From 和 To 地址可以包含名称，例如 "Sender Name <sender@example.com>"
     cat << EOF > "$mail_body_file"
-From: "$SCRIPT_NAME" <$EMAIL_FROM>
-To: <$EMAIL_TO>
+From: "$SCRIPT_NAME" <$mail_from>
+To: $(IFS=,; echo "${recipients_array[*]}")
 Subject: $subject
 Date: $(date -R)
 Content-Type: text/plain; charset=UTF-8
@@ -513,9 +541,9 @@ EOF
     local curl_protocol="smtp"
     local curl_tls_option="--ssl-reqd" # 默认为 STARTTLS
 
-    if [[ "$EMAIL_USE_TLS" == "true" ]]; then
+    if [[ "$mail_use_tls" == "true" ]]; then
         # 如果端口是 465 (通常的 SMTPS 端口)，则使用 smtps 协议
-        if [[ "$EMAIL_PORT" == "465" ]]; then
+        if [[ "$mail_port" == "465" ]]; then
             curl_protocol="smtps"
             curl_tls_option="" # SMTPS 协议隐含了 SSL/TLS
         fi
@@ -523,14 +551,19 @@ EOF
         curl_tls_option="" # 如果用户禁用 TLS
     fi
 
+    local curl_rcpt_args=()
+    for rcpt in "${recipients_array[@]}"; do
+        curl_rcpt_args+=(--mail-rcpt "<${rcpt}>")
+    done
+
     # 执行 curl 命令发送邮件
-    if curl --silent --show-error --url "${curl_protocol}://${EMAIL_HOST}:${EMAIL_PORT}" \
+    if curl --silent --show-error --url "${curl_protocol}://${mail_host}:${mail_port}" \
         ${curl_tls_option} \
-        --user "${EMAIL_USER}:${EMAIL_PASSWORD}" \
-        --mail-from "<${EMAIL_FROM}>" \
-        --mail-rcpt "<${EMAIL_TO}>" \
+        --user "${mail_user}:${mail_pass}" \
+        --mail-from "<${mail_from}>" \
+        "${curl_rcpt_args[@]}" \
         --upload-file "$mail_body_file"; then
-        log_info "邮件发送成功。"
+        log_info "邮件成功发送至 ${#recipients_array[@]} 个收件人。"
     else
         log_error "邮件发送失败！请检查邮件配置、网络或 curl 错误输出。"
     fi
@@ -538,21 +571,46 @@ EOF
     rm -f "$mail_body_file"
 }
 
-# --- 【重大修改】统一的通知发送函数，支持多通道 ---
+
+# --- 【重构】统一的通知发送函数，支持多通道 ---
 send_notification() {
     local message_content="$1"
-    local subject="$2" # 第二个参数作为邮件主题
+    local subject="$2"
 
-    # 检查并发送 Telegram
-    if [[ "$TELEGRAM_ENABLED" == "true" ]]; then
-        send_telegram_message "$message_content"
+    if ! command -v curl &> /dev/null; then
+        log_error "发送通知需要 'curl'，但未安装。"
+        return 1
     fi
+    
+    # 检查并发送 Telegram
+    for bot_config in "${TELEGRAM_BOTS_ARRAY[@]}"; do
+        IFS="$NOTIFICATION_FIELD_DELIMITER" read -r alias token chat_id enabled <<< "$bot_config"
+        if [[ "$enabled" == "true" ]]; then
+            if [[ -z "$token" || -z "$chat_id" ]]; then
+                log_warn "Telegram 机器人 '${alias}' 配置不完整，跳过。"
+                continue
+            fi
+            _send_telegram_worker "$token" "$chat_id" "$message_content"
+        fi
+    done
 
     # 检查并发送邮件
-    if [[ "$EMAIL_ENABLED" == "true" ]]; then
-        send_email_message "$message_content" "$subject"
-    fi
+    for sender_config in "${EMAIL_SENDERS_ARRAY[@]}"; do
+        IFS="$NOTIFICATION_FIELD_DELIMITER" read -r alias host port user pass from use_tls enabled recipients_str <<< "$sender_config"
+        if [[ "$enabled" == "true" ]]; then
+            if [[ -z "$host" || -z "$port" || -z "$user" || -z "$pass" || -z "$from" || -z "$recipients_str" ]]; then
+                log_warn "邮件发件人 '${alias}' 配置不完整，跳过。"
+                continue
+            fi
+            
+            local recipients_array=()
+            IFS=',' read -r -a recipients_array <<< "$recipients_str"
+            
+            _send_email_worker "$host" "$port" "$user" "$pass" "$from" "$use_tls" "$subject" "$message_content" "${recipients_array[@]}"
+        fi
+    done
 }
+
 
 restore_backup() {
     display_header
@@ -1011,7 +1069,6 @@ set_backup_path_and_mode() {
     done
 }
 
-# 【修改】压缩格式菜单，移除状态颜色
 manage_compression_settings() {
     while true; do
         display_header
@@ -1184,174 +1241,418 @@ set_cloud_storage() {
 }
 
 
-# --- 【重大修改】全新的通知设定菜单，支持多选和定向测试 ---
+# --- 【新功能】管理 Telegram 机器人的子菜单 ---
+manage_telegram_bots() {
+    while true; do
+        display_header
+        echo -e "${BLUE}--- 管理 Telegram 机器人 ---${NC}"
+
+        if [ ${#TELEGRAM_BOTS_ARRAY[@]} -eq 0 ]; then
+            log_warn "当前没有配置任何 Telegram 机器人。"
+        else
+            echo "已配置的机器人列表:"
+            for i in "${!TELEGRAM_BOTS_ARRAY[@]}"; do
+                IFS="$NOTIFICATION_FIELD_DELIMITER" read -r alias token chat_id enabled <<< "${TELEGRAM_BOTS_ARRAY[$i]}"
+                local status_text=$([[ "$enabled" == "true" ]] && echo -e "[${GREEN}已启用${NC}]" || echo -e "[${YELLOW}已禁用${NC}]")
+                echo "  $((i+1)). 别名: ${alias} ${status_text}"
+            done
+        fi
+
+        echo ""
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+        echo "  a - 添加新机器人"
+        echo "  m - 修改机器人"
+        echo "  d - 删除机器人"
+        echo "  t - 切换启用/禁用状态"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo "  0 - 返回"
+        read -rp "请输入选项: " choice
+
+        case "$choice" in
+            a|A)
+                read -rp "请输入机器人别名 (例如: 家庭服务器): " new_alias
+                read -rp "请输入机器人 Bot Token: " new_token
+                read -rp "请输入接收消息的 Chat ID: " new_chat_id
+                if [[ -z "$new_alias" || -z "$new_token" || -z "$new_chat_id" ]]; then
+                    log_error "错误: 别名、Token 和 Chat ID 均不能为空！"
+                else
+                    local new_bot_entry="${new_alias}${NOTIFICATION_FIELD_DELIMITER}${new_token}${NOTIFICATION_FIELD_DELIMITER}${new_chat_id}${NOTIFICATION_FIELD_DELIMITER}true"
+                    TELEGRAM_BOTS_ARRAY+=("$new_bot_entry")
+                    log_info "机器人 '${new_alias}' 已添加并默认启用。"
+                    save_config
+                fi
+                press_enter_to_continue
+                ;;
+            m|M)
+                if [ ${#TELEGRAM_BOTS_ARRAY[@]} -eq 0 ]; then log_warn "没有可修改的机器人。"; press_enter_to_continue; continue; fi
+                read -rp "请输入要修改的机器人序号: " index
+                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le ${#TELEGRAM_BOTS_ARRAY[@]} ]; then
+                    local mod_index=$((index - 1))
+                    IFS="$NOTIFICATION_FIELD_DELIMITER" read -r old_alias old_token old_chat_id old_enabled <<< "${TELEGRAM_BOTS_ARRAY[$mod_index]}"
+                    
+                    read -rp "请输入新别名 [${old_alias}]: " new_alias
+                    read -rp "请输入新 Bot Token [留空不修改]: " new_token
+                    read -rp "请输入新 Chat ID [留空不修改]: " new_chat_id
+                    
+                    new_alias="${new_alias:-$old_alias}"
+                    new_token="${new_token:-$old_token}"
+                    new_chat_id="${new_chat_id:-$old_chat_id}"
+
+                    TELEGRAM_BOTS_ARRAY[$mod_index]="${new_alias}${NOTIFICATION_FIELD_DELIMITER}${new_token}${NOTIFICATION_FIELD_DELIMITER}${new_chat_id}${NOTIFICATION_FIELD_DELIMITER}${old_enabled}"
+                    log_info "机器人 '${new_alias}' 信息已更新。"
+                    save_config
+                else
+                    log_error "无效序号。"
+                fi
+                press_enter_to_continue
+                ;;
+            d|D)
+                if [ ${#TELEGRAM_BOTS_ARRAY[@]} -eq 0 ]; then log_warn "没有可删除的机器人。"; press_enter_to_continue; continue; fi
+                read -rp "请输入要删除的机器人序号: " index
+                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le ${#TELEGRAM_BOTS_ARRAY[@]} ]; then
+                    local del_index=$((index - 1))
+                    IFS="$NOTIFICATION_FIELD_DELIMITER" read -r alias <<< "${TELEGRAM_BOTS_ARRAY[$del_index]}"
+                    read -rp "确定要删除机器人 '${alias}' 吗? (y/N): " confirm
+                    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                        unset 'TELEGRAM_BOTS_ARRAY[$del_index]'
+                        TELEGRAM_BOTS_ARRAY=("${TELEGRAM_BOTS_ARRAY[@]}")
+                        log_info "机器人已删除。"
+                        save_config
+                    fi
+                else
+                    log_error "无效序号。"
+                fi
+                press_enter_to_continue
+                ;;
+            t|T)
+                if [ ${#TELEGRAM_BOTS_ARRAY[@]} -eq 0 ]; then log_warn "没有可切换状态的机器人。"; press_enter_to_continue; continue; fi
+                read -rp "请输入要切换状态的机器人序号: " index
+                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le ${#TELEGRAM_BOTS_ARRAY[@]} ]; then
+                    local tog_index=$((index - 1))
+                    IFS="$NOTIFICATION_FIELD_DELIMITER" read -r alias token chat_id enabled <<< "${TELEGRAM_BOTS_ARRAY[$tog_index]}"
+                    if [[ "$enabled" == "true" ]]; then
+                        enabled="false"
+                        log_warn "机器人 '${alias}' 已禁用。"
+                    else
+                        enabled="true"
+                        log_info "机器人 '${alias}' 已启用。"
+                    fi
+                    TELEGRAM_BOTS_ARRAY[$tog_index]="${alias}${NOTIFICATION_FIELD_DELIMITER}${token}${NOTIFICATION_FIELD_DELIMITER}${chat_id}${NOTIFICATION_FIELD_DELIMITER}${enabled}"
+                    save_config
+                else
+                    log_error "无效序号。"
+                fi
+                press_enter_to_continue
+                ;;
+            0) break ;;
+            *) log_error "无效选项。"; press_enter_to_continue ;;
+        esac
+    done
+}
+
+# --- 【新功能】管理邮件收件人的子子菜单 ---
+manage_email_recipients() {
+    local sender_index="$1"
+    
+    while true; do
+        IFS="$NOTIFICATION_FIELD_DELIMITER" read -r alias host port user pass from use_tls enabled recipients_str <<< "${EMAIL_SENDERS_ARRAY[$sender_index]}"
+        
+        local recipients_array=()
+        if [[ -n "$recipients_str" ]]; then
+            IFS=',' read -r -a recipients_array <<< "$recipients_str"
+        fi
+
+        display_header
+        echo -e "${BLUE}--- 管理发件人 '${alias}' 的收件人 ---${NC}"
+        
+        if [ ${#recipients_array[@]} -eq 0 ]; then
+            log_warn "当前没有配置任何收件人。"
+        else
+            echo "收件人列表:"
+            for i in "${!recipients_array[@]}"; do
+                echo "  $((i+1)). ${recipients_array[$i]}"
+            done
+        fi
+        
+        echo ""
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+        echo "  a - 添加新收件人"
+        echo "  d - 删除收件人"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo "  0 - 返回"
+        read -rp "请输入选项: " choice
+        
+        case "$choice" in
+            a|A)
+                read -rp "请输入新的收件人邮箱地址: " new_recipient
+                if [[ -z "$new_recipient" ]]; then
+                    log_error "邮箱地址不能为空！"
+                else
+                    recipients_array+=("$new_recipient")
+                    recipients_str=$(IFS=,; echo "${recipients_array[*]}")
+                    EMAIL_SENDERS_ARRAY[$sender_index]="${alias}${NOTIFICATION_FIELD_DELIMITER}${host}${NOTIFICATION_FIELD_DELIMITER}${port}${NOTIFICATION_FIELD_DELIMITER}${user}${NOTIFICATION_FIELD_DELIMITER}${pass}${NOTIFICATION_FIELD_DELIMITER}${from}${NOTIFICATION_FIELD_DELIMITER}${use_tls}${NOTIFICATION_FIELD_DELIMITER}${enabled}${NOTIFICATION_FIELD_DELIMITER}${recipients_str}"
+                    log_info "收件人 '${new_recipient}' 已添加。"
+                    save_config
+                fi
+                press_enter_to_continue
+                ;;
+            d|D)
+                if [ ${#recipients_array[@]} -eq 0 ]; then log_warn "没有可删除的收件人。"; press_enter_to_continue; continue; fi
+                read -rp "请输入要删除的收件人序号: " del_idx
+                if [[ "$del_idx" =~ ^[0-9]+$ ]] && [ "$del_idx" -ge 1 ] && [ "$del_idx" -le ${#recipients_array[@]} ]; then
+                    unset 'recipients_array[$((del_idx-1))]'
+                    recipients_array=("${recipients_array[@]}")
+                    recipients_str=$(IFS=,; echo "${recipients_array[*]}")
+                    EMAIL_SENDERS_ARRAY[$sender_index]="${alias}${NOTIFICATION_FIELD_DELIMITER}${host}${NOTIFICATION_FIELD_DELIMITER}${port}${NOTIFICATION_FIELD_DELIMITER}${user}${NOTIFICATION_FIELD_DELIMITER}${pass}${NOTIFICATION_FIELD_DELIMITER}${from}${NOTIFICATION_FIELD_DELIMITER}${use_tls}${NOTIFICATION_FIELD_DELIMITER}${enabled}${NOTIFICATION_FIELD_DELIMITER}${recipients_str}"
+                    log_info "收件人已删除。"
+                    save_config
+                else
+                    log_error "无效序号。"
+                fi
+                press_enter_to_continue
+                ;;
+            0) break ;;
+            *) log_error "无效选项。"; press_enter_to_continue ;;
+        esac
+    done
+}
+
+# --- 【新功能】管理邮件发件人的子菜单 ---
+manage_email_senders() {
+    while true; do
+        display_header
+        echo -e "${BLUE}--- 管理邮件发件人 ---${NC}"
+
+        if [ ${#EMAIL_SENDERS_ARRAY[@]} -eq 0 ]; then
+            log_warn "当前没有配置任何邮件发件人。"
+        else
+            echo "已配置的发件人列表:"
+            for i in "${!EMAIL_SENDERS_ARRAY[@]}"; do
+                IFS="$NOTIFICATION_FIELD_DELIMITER" read -r alias host port user pass from use_tls enabled recipients_str <<< "${EMAIL_SENDERS_ARRAY[$i]}"
+                local status_text=$([[ "$enabled" == "true" ]] && echo -e "[${GREEN}已启用${NC}]" || echo -e "[${YELLOW}已禁用${NC}]")
+                local recipient_count=0
+                if [[ -n "$recipients_str" ]]; then
+                    recipient_count=$(grep -o "," <<< "$recipients_str" | wc -l)
+                    ((recipient_count++))
+                fi
+                echo "  $((i+1)). 别名: ${alias} (发件人: ${from}, 收件人: ${recipient_count}个) ${status_text}"
+            done
+        fi
+        
+        echo ""
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+        echo "  a - 添加新发件人"
+        echo "  m - 修改发件人配置"
+        echo "  r - 管理收件人列表"
+        echo "  d - 删除发件人"
+        echo "  t - 切换启用/禁用状态"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo "  0 - 返回"
+        read -rp "请输入选项: " choice
+
+        case "$choice" in
+            a|A)
+                echo -e "${RED}警告: 密码将以明文形式保存在本地配置文件中！请确保文件安全。${NC}"
+                read -rp "请输入发件人别名 (例如: QQ邮箱): " new_alias
+                read -rp "SMTP 服务器地址 (例如: smtp.qq.com): " new_host
+                read -rp "SMTP 端口 (例如: 465 或 587): " new_port
+                read -rp "发件人邮箱地址: " new_from
+                read -rp "SMTP 用户名 (通常等于发件人): " new_user
+                read -s -rp "SMTP 密码/授权码: " new_pass
+                echo ""
+                read -rp "是否使用 TLS/SSL 加密? (Y/n): " new_use_tls_choice
+                local new_use_tls=$([[ "$new_use_tls_choice" =~ ^[Nn]$ ]] && echo "false" || echo "true")
+                read -rp "请输入至少一个收件人邮箱地址 (多个用逗号','隔开): " new_recipients_str
+
+                if [[ -z "$new_alias" || -z "$new_host" || -z "$new_port" || -z "$new_from" || -z "$new_user" || -z "$new_pass" || -z "$new_recipients_str" ]]; then
+                    log_error "错误: 除密码外，所有字段都不能为空！"
+                else
+                    local new_sender_entry="${new_alias}${NOTIFICATION_FIELD_DELIMITER}${new_host}${NOTIFICATION_FIELD_DELIMITER}${new_port}${NOTIFICATION_FIELD_DELIMITER}${new_user}${NOTIFICATION_FIELD_DELIMITER}${new_pass}${NOTIFICATION_FIELD_DELIMITER}${new_from}${NOTIFICATION_FIELD_DELIMITER}${new_use_tls}${NOTIFICATION_FIELD_DELIMITER}true${NOTIFICATION_FIELD_DELIMITER}${new_recipients_str}"
+                    EMAIL_SENDERS_ARRAY+=("$new_sender_entry")
+                    log_info "发件人 '${new_alias}' 已添加并默认启用。"
+                    save_config
+                fi
+                press_enter_to_continue
+                ;;
+            m|M)
+                if [ ${#EMAIL_SENDERS_ARRAY[@]} -eq 0 ]; then log_warn "没有可修改的发件人。"; press_enter_to_continue; continue; fi
+                read -rp "请输入要修改的发件人序号: " index
+                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le ${#EMAIL_SENDERS_ARRAY[@]} ]; then
+                    local mod_index=$((index - 1))
+                    IFS="$NOTIFICATION_FIELD_DELIMITER" read -r old_alias old_host old_port old_user old_pass old_from old_use_tls old_enabled old_recipients_str <<< "${EMAIL_SENDERS_ARRAY[$mod_index]}"
+                    
+                    read -rp "新别名 [${old_alias}]: " new_alias
+                    read -rp "新SMTP地址 [${old_host}]: " new_host
+                    read -rp "新SMTP端口 [${old_port}]: " new_port
+                    read -rp "新发件人地址 [${old_from}]: " new_from
+                    read -rp "新SMTP用户名 [${old_user}]: " new_user
+                    read -s -rp "新SMTP密码 [留空不修改]: " new_pass
+                    echo ""
+                    
+                    new_alias="${new_alias:-$old_alias}"
+                    new_host="${new_host:-$old_host}"
+                    new_port="${new_port:-$old_port}"
+                    new_from="${new_from:-$old_from}"
+                    new_user="${new_user:-$old_user}"
+                    [[ -n "$new_pass" ]] && old_pass="$new_pass"
+
+                    EMAIL_SENDERS_ARRAY[$mod_index]="${new_alias}${NOTIFICATION_FIELD_DELIMITER}${new_host}${NOTIFICATION_FIELD_DELIMITER}${new_port}${NOTIFICATION_FIELD_DELIMITER}${new_user}${NOTIFICATION_FIELD_DELIMITER}${old_pass}${NOTIFICATION_FIELD_DELIMITER}${new_from}${NOTIFICATION_FIELD_DELIMITER}${old_use_tls}${NOTIFICATION_FIELD_DELIMITER}${old_enabled}${NOTIFICATION_FIELD_DELIMITER}${old_recipients_str}"
+                    log_info "发件人 '${new_alias}' 信息已更新。"
+                    save_config
+                else
+                    log_error "无效序号。"
+                fi
+                press_enter_to_continue
+                ;;
+            r|R)
+                if [ ${#EMAIL_SENDERS_ARRAY[@]} -eq 0 ]; then log_warn "没有可管理的发件人。"; press_enter_to_continue; continue; fi
+                read -rp "请输入要管理收件人的发件人序号: " index
+                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le ${#EMAIL_SENDERS_ARRAY[@]} ]; then
+                    manage_email_recipients "$((index - 1))"
+                else
+                    log_error "无效序号。"
+                    press_enter_to_continue
+                fi
+                ;;
+            d|D)
+                if [ ${#EMAIL_SENDERS_ARRAY[@]} -eq 0 ]; then log_warn "没有可删除的发件人。"; press_enter_to_continue; continue; fi
+                read -rp "请输入要删除的发件人序号: " index
+                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le ${#EMAIL_SENDERS_ARRAY[@]} ]; then
+                    local del_index=$((index - 1))
+                    IFS="$NOTIFICATION_FIELD_DELIMITER" read -r alias <<< "${EMAIL_SENDERS_ARRAY[$del_index]}"
+                    read -rp "确定要删除发件人 '${alias}' 吗? (y/N): " confirm
+                    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                        unset 'EMAIL_SENDERS_ARRAY[$del_index]'
+                        EMAIL_SENDERS_ARRAY=("${EMAIL_SENDERS_ARRAY[@]}")
+                        log_info "发件人已删除。"
+                        save_config
+                    fi
+                else
+                    log_error "无效序号。"
+                fi
+                press_enter_to_continue
+                ;;
+            t|T)
+                if [ ${#EMAIL_SENDERS_ARRAY[@]} -eq 0 ]; then log_warn "没有可切换状态的发件人。"; press_enter_to_continue; continue; fi
+                read -rp "请输入要切换状态的发件人序号: " index
+                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le ${#EMAIL_SENDERS_ARRAY[@]} ]; then
+                    local tog_index=$((index - 1))
+                    IFS="$NOTIFICATION_FIELD_DELIMITER" read -r alias host port user pass from use_tls enabled recipients_str <<< "${EMAIL_SENDERS_ARRAY[$tog_index]}"
+                    if [[ "$enabled" == "true" ]]; then
+                        enabled="false"
+                        log_warn "发件人 '${alias}' 已禁用。"
+                    else
+                        enabled="true"
+                        log_info "发件人 '${alias}' 已启用。"
+                    fi
+                    EMAIL_SENDERS_ARRAY[$tog_index]="${alias}${NOTIFICATION_FIELD_DELIMITER}${host}${NOTIFICATION_FIELD_DELIMITER}${port}${NOTIFICATION_FIELD_DELIMITER}${user}${NOTIFICATION_FIELD_DELIMITER}${pass}${NOTIFICATION_FIELD_DELIMITER}${from}${NOTIFICATION_FIELD_DELIMITER}${use_tls}${NOTIFICATION_FIELD_DELIMITER}${enabled}${NOTIFICATION_FIELD_DELIMITER}${recipients_str}"
+                    save_config
+                else
+                    log_error "无效序号。"
+                fi
+                press_enter_to_continue
+                ;;
+            0) break ;;
+            *) log_error "无效选项。"; press_enter_to_continue ;;
+        esac
+    done
+}
+
+
+# --- 【新功能】发送测试通知的子菜单 ---
+send_test_notification_menu() {
+    display_header
+    echo -e "${BLUE}--- 发送测试通知 ---${NC}"
+    
+    local testable_options=()
+    local testable_configs=()
+
+    # 收集可测试的 Telegram 机器人
+    for bot_config in "${TELEGRAM_BOTS_ARRAY[@]}"; do
+        IFS="$NOTIFICATION_FIELD_DELIMITER" read -r alias token chat_id enabled <<< "$bot_config"
+        if [[ "$enabled" == "true" ]]; then
+            testable_options+=("Telegram 机器人: ${alias}")
+            testable_configs+=("tg${NOTIFICATION_FIELD_DELIMITER}${token}${NOTIFICATION_FIELD_DELIMITER}${chat_id}")
+        fi
+    done
+
+    # 收集可测试的邮件发件人
+    for sender_config in "${EMAIL_SENDERS_ARRAY[@]}"; do
+        IFS="$NOTIFICATION_FIELD_DELIMITER" read -r alias host port user pass from use_tls enabled recipients_str <<< "$sender_config"
+        if [[ "$enabled" == "true" ]]; then
+            testable_options+=("邮件发件人: ${alias}")
+            testable_configs+=("email${NOTIFICATION_FIELD_DELIMITER}${sender_config}")
+        fi
+    done
+
+    if [ ${#testable_options[@]} -eq 0 ]; then
+        log_warn "没有已启用的通知方式可供测试。"
+        press_enter_to_continue
+        return
+    fi
+    
+    echo "请选择要测试的通知方式:"
+    for i in "${!testable_options[@]}"; do
+        echo "  $((i+1)). ${testable_options[$i]}"
+    done
+    echo "  0. 取消"
+    read -rp "请输入选项: " test_choice
+
+    if [[ "$test_choice" -eq 0 ]] || ! [[ "$test_choice" =~ ^[0-9]+$ ]] || [ "$test_choice" -gt ${#testable_options[@]} ]; then
+        log_info "已取消测试。"
+        press_enter_to_continue
+        return
+    fi
+
+    local selected_config="${testable_configs[$((test_choice-1))]}"
+
+    local test_subject="[${SCRIPT_NAME}] 测试通知"
+    local day_of_week_cn
+    case "$(date +%u)" in
+        1) day_of_week_cn="星期一";; 2) day_of_week_cn="星期二";; 3) day_of_week_cn="星期三";;
+        4) day_of_week_cn="星期四";; 5) day_of_week_cn="星期五";; 6) day_of_week_cn="星期六";;
+        7) day_of_week_cn="星期日";;
+    esac
+    local am_pm_cn=$([[ "$(date +%H)" -ge 12 ]] && echo "下午" || echo "上午")
+    local test_date_line="$(date "+%Y 年 %-m 月 %-d 日 ${day_of_week_cn} ${am_pm_cn} %-I 点 %-M 分 %-S 秒")"
+
+    if [[ "${selected_config}" == tg* ]]; then
+        IFS="$NOTIFICATION_FIELD_DELIMITER" read -r type token chat_id <<< "$selected_config"
+        local test_body="这是一条来自脚本的 Telegram 测试消息。如果您收到此消息，说明此机器人配置正确。"$'\n'"- ${test_date_line}"
+        _send_telegram_worker "$token" "$chat_id" "$test_body"
+    elif [[ "${selected_config}" == email* ]]; then
+        local sender_data="${selected_config#*${NOTIFICATION_FIELD_DELIMITER}}"
+        IFS="$NOTIFICATION_FIELD_DELIMITER" read -r alias host port user pass from use_tls enabled recipients_str <<< "$sender_data"
+        local recipients_array=()
+        IFS=',' read -r -a recipients_array <<< "$recipients_str"
+        local test_body="这是一条来自脚本的邮件测试消息。如果您收到此消息，说明此发件人配置正确。"$'\n'"- ${test_date_line}"
+        _send_email_worker "$host" "$port" "$user" "$pass" "$from" "$use_tls" "$test_subject" "$test_body" "${recipients_array[@]}"
+    fi
+    
+    press_enter_to_continue
+}
+
+
+# --- 【重大重构】全新的通知设定菜单 ---
 set_notification_settings() {
-    local needs_saving="false"
     while true; do
         display_header
         echo -e "${BLUE}=== 6. 消息通知设定 ===${NC}"
         
-        # 【修改】获取无颜色的状态文本
-        local tg_status_text=$([[ "$TELEGRAM_ENABLED" == "true" ]] && echo "已启用" || echo "已禁用")
-        local email_status_text=$([[ "$EMAIL_ENABLED" == "true" ]] && echo "已启用" || echo "已禁用")
-        
         echo ""
-        echo -e "${BLUE}━━━━━━━━━━━━━━ 通知方式状态与配置 ━━━━━━━━━━━━━━${NC}"
-        # 【修改】移除括号内文本的颜色
-        echo -e "  1. ${YELLOW}切换 Telegram 通知状态${NC} (当前: ${tg_status_text})"
-        echo -e "  2. ${YELLOW}切换 邮件 通知状态${NC} (当前: ${email_status_text})"
-        echo -e "  3. ${YELLOW}配置 Telegram 参数${NC}"
-        echo -e "  4. ${YELLOW}配置 邮件 参数${NC}"
-        echo -e "  5. ${YELLOW}发送测试通知${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━ 通知方式管理 ━━━━━━━━━━━━━━${NC}"
+        echo -e "  1. ${YELLOW}管理 Telegram 机器人${NC}"
+        echo -e "  2. ${YELLOW}管理 邮件 发件人${NC}"
+        echo -e "  3. ${YELLOW}发送测试通知${NC}"
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "  0. ${RED}保存并返回${NC}"
+        echo -e "  0. ${RED}返回主菜单${NC}"
         read -rp "请输入选项: " choice
 
         case $choice in
-            1) # 切换 Telegram 状态
-                if [[ "$TELEGRAM_ENABLED" == "true" ]]; then
-                    TELEGRAM_ENABLED="false"; log_warn "Telegram 通知已禁用。"
-                else
-                    TELEGRAM_ENABLED="true"; log_info "Telegram 通知已启用。"
-                fi
-                needs_saving="true"
-                press_enter_to_continue
-                ;;
-
-            2) # 切换 邮件 状态
-                if [[ "$EMAIL_ENABLED" == "true" ]]; then
-                    EMAIL_ENABLED="false"; log_warn "邮件通知已禁用。"
-                else
-                    EMAIL_ENABLED="true"; log_info "邮件通知已启用。"
-                fi
-                needs_saving="true"
-                press_enter_to_continue
-                ;;
-                
-            3) # 配置 Telegram
-                display_header
-                echo -e "${BLUE}--- 配置 Telegram ---${NC}"
-                local current_tg_status=$([[ "$TELEGRAM_ENABLED" == "true" ]] && echo -e "${GREEN}已启用${NC}" || echo -e "${YELLOW}已禁用${NC}")
-                echo -e "当前状态: ${current_tg_status}"
-                echo -e "Bot Token: ${TELEGRAM_BOT_TOKEN}"
-                echo -e "Chat ID:   ${TELEGRAM_CHAT_ID}"
-                echo ""
-                read -rp "请输入新的 Bot Token [留空不修改]: " input_token
-                if [[ -n "$input_token" ]]; then
-                    TELEGRAM_BOT_TOKEN="$input_token"
-                    needs_saving="true"
-                    log_info "Bot Token 已更新。"
-                fi
-
-                read -rp "请输入新的 Chat ID [留空不修改]: " input_chat_id
-                 if [[ -n "$input_chat_id" ]]; then
-                    TELEGRAM_CHAT_ID="$input_chat_id"
-                    needs_saving="true"
-                    log_info "Chat ID 已更新。"
-                fi
-                press_enter_to_continue
-                ;;
-
-            4) # 配置 邮件
-                display_header
-                echo -e "${BLUE}--- 配置 邮件 ---${NC}"
-                local current_email_status=$([[ "$EMAIL_ENABLED" == "true" ]] && echo -e "${GREEN}已启用${NC}" || echo -e "${YELLOW}已禁用${NC}")
-                echo -e "当前状态: ${current_email_status}"
-                echo ""
-                echo -e "${RED}警告: 密码将以明文形式保存在本地配置文件中！请确保文件安全。${NC}"
-                read -rp "SMTP 服务器地址 (例如: smtp.qq.com) [${EMAIL_HOST}]: " EMAIL_HOST_input
-                EMAIL_HOST="${EMAIL_HOST_input:-$EMAIL_HOST}"
-                read -rp "SMTP 端口 (例如: 465 或 587) [${EMAIL_PORT}]: " EMAIL_PORT_input
-                EMAIL_PORT="${EMAIL_PORT_input:-$EMAIL_PORT}"
-                read -rp "发件人邮箱地址 [${EMAIL_FROM}]: " EMAIL_FROM_input
-                EMAIL_FROM="${EMAIL_FROM_input:-$EMAIL_FROM}"
-                read -rp "收件人邮箱地址 [${EMAIL_TO}]: " EMAIL_TO_input
-                EMAIL_TO="${EMAIL_TO_input:-$EMAIL_TO}"
-                read -rp "SMTP 用户名 (通常等于发件人) [${EMAIL_USER}]: " EMAIL_USER_input
-                EMAIL_USER="${EMAIL_USER_input:-$EMAIL_USER}"
-                read -s -rp "SMTP 密码/授权码 [留空不修改]: " EMAIL_PASSWORD_input
-                echo ""
-                if [[ -n "$EMAIL_PASSWORD_input" ]]; then
-                    EMAIL_PASSWORD="$EMAIL_PASSWORD_input"
-                fi
-
-                log_info "邮件参数已更新。"
-                needs_saving="true"
-                press_enter_to_continue
-                ;;
-
-            5) # 发送测试
-                display_header
-                echo "请选择要测试的通知方式:"
-                echo " 1. Telegram"
-                echo " 2. 邮件"
-                echo " 0. 取消"
-                read -rp "请输入选项: " test_choice
-                
-                local test_subject="[${SCRIPT_NAME}] 测试通知"
-                
-                # 【修改】使用 case 语句生成中文星期，避免 locale 问题
-                local day_of_week_num
-                day_of_week_num=$(date +%u)
-                local day_of_week_cn
-                case "$day_of_week_num" in
-                    1) day_of_week_cn="星期一";;
-                    2) day_of_week_cn="星期二";;
-                    3) day_of_week_cn="星期三";;
-                    4) day_of_week_cn="星期四";;
-                    5) day_of_week_cn="星期五";;
-                    6) day_of_week_cn="星期六";;
-                    7) day_of_week_cn="星期日";;
-                esac
-
-                # ★★★★★ 修改点 ★★★★★
-                # 手动处理上午/下午 (AM/PM) 以确保显示中文，而不是依赖系统 locale
-                local current_hour
-                current_hour=$(date +%H)
-                local am_pm_cn="上午"
-                if [ "$current_hour" -ge 12 ]; then
-                    am_pm_cn="下午"
-                fi
-
-                local test_date_line
-                # 将 %p 替换为我们自己生成的 ${am_pm_cn} 变量
-                test_date_line="$(date "+%Y 年 %-m 月 %-d 日 ${day_of_week_cn} ${am_pm_cn} %-I 点 %-M 分 %-S 秒")（中国标准时间）"
-
-                case "$test_choice" in
-                    1)
-                        if [[ "$TELEGRAM_ENABLED" == "true" ]]; then
-                            log_info "正在发送 Telegram 测试消息..."
-                            local test_body="这是一条来自脚本的测试消息。如果您收到此消息，说明您的 'Telegram' 通知配置正确。"$'\n'"- ${test_date_line}"
-                            send_telegram_message "$test_body"
-                        else
-                            log_warn "Telegram 通知未启用，无法发送测试。"
-                        fi
-                        ;;
-                    2)
-                        if [[ "$EMAIL_ENABLED" == "true" ]]; then
-                             log_info "正在发送邮件测试消息..."
-                             local test_body="这是一条来自脚本的测试消息。如果您收到此消息，说明您的 '邮件' 通知配置正确。"$'\n'"- ${test_date_line}"
-                            send_email_message "$test_body" "$test_subject"
-                        else
-                             log_warn "邮件通知未启用，无法发送测试。"
-                        fi
-                        ;;
-                    0)
-                        log_info "已取消测试。"
-                        ;;
-                    *)
-                        log_error "无效选项。"
-                        ;;
-                esac
-                press_enter_to_continue
-                ;;
-                
-            0) 
-                if [[ "$needs_saving" == "true" ]]; then
-                    save_config
-                fi
-                break
-                ;;
+            1) manage_telegram_bots ;;
+            2) manage_email_senders ;;
+            3) send_test_notification_menu ;;
+            0) break ;;
             *)
                 log_error "无效选项。"
                 press_enter_to_continue
@@ -1760,7 +2061,7 @@ perform_backup() {
         final_status_text="备份失败"
         final_subject+="${final_status_text}"
         if [[ -n "$GLOBAL_NOTIFICATION_FAILURE_REASON" ]]; then
-             GLOBAL_NOTIFICATION_REPORT_BODY+=$'\n\n'"原因：${GLOBAL_NOTIFICATION_FAILURE_REASON}"
+                GLOBAL_NOTIFICATION_REPORT_BODY+=$'\n\n'"原因：${GLOBAL_NOTIFICATION_FAILURE_REASON}"
         fi
     else
         final_subject+="备份成功"
@@ -2176,21 +2477,27 @@ show_main_menu() {
     echo -e "  4. ${YELLOW}压缩包格式与选项${NC} (当前: ${format_text})"
     echo -e "  5. ${YELLOW}云存储设定 (Rclone)${NC}"
 
-    # --- 【重大修改】根据你的最新要求，优化通知状态的显示逻辑 ---
+    # --- 【重构】新的通知状态显示逻辑 ---
     local enabled_methods=()
-    if [[ "$TELEGRAM_ENABLED" == "true" ]]; then
-        enabled_methods+=("Telegram")
-    fi
-    if [[ "$EMAIL_ENABLED" == "true" ]]; then
-        enabled_methods+=("邮件")
-    fi
+    for bot_config in "${TELEGRAM_BOTS_ARRAY[@]}"; do
+        IFS="$NOTIFICATION_FIELD_DELIMITER" read -r _ _ _ enabled <<< "$bot_config"
+        if [[ "$enabled" == "true" ]]; then
+            enabled_methods+=("Telegram")
+            break
+        fi
+    done
+    for sender_config in "${EMAIL_SENDERS_ARRAY[@]}"; do
+        IFS="$NOTIFICATION_FIELD_DELIMITER" read -r _ _ _ _ _ _ _ enabled _ <<< "$sender_config"
+        if [[ "$enabled" == "true" ]]; then
+            enabled_methods+=("邮件")
+            break
+        fi
+    done
 
     local notification_status_display
     if [ ${#enabled_methods[@]} -gt 0 ]; then
-        # 如果有启用的方法，用逗号连接它们
         notification_status_display=$(IFS=,; echo "${enabled_methods[*]}")
     else
-        # 如果都没有启用，显示“已禁用”
         notification_status_display="已禁用"
     fi
     echo -e "  6. ${YELLOW}消息通知设定${NC} (当前: ${notification_status_display})"
@@ -2304,7 +2611,7 @@ main() {
 }
 
 # ================================================================
-# ===         RCLONE 云存储管理函数 (无需修改)               ===
+# ===           RCLONE 云存储管理函数 (无需修改)               ===
 # ================================================================
 
 prompt_and_add_target() {
