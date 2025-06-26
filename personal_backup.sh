@@ -1659,9 +1659,7 @@ send_test_notification_menu() {
         read -rp "请输入选项: " choice
 
         # --- 测试消息内容准备 ---
-        local day_of_week_cn; day_of_week_cn=$(LC_ALL=C date '+"%A"' | sed -e 's/Sunday/星期日/' -e 's/Monday/星期一/' -e 's/Tuesday/星期二/' -e 's/Wednesday/星期三/' -e 's/Thursday/星期四/' -e 's/Friday/星期五/' -e 's/Saturday/星期六/')
-        local am_pm_cn; am_pm_cn=$([[ $(date +%H) -ge 12 ]] && echo "下午" || echo "上午")
-        local test_date_line; test_date_line="$(date "+%Y 年 %-m 月 %-d 日 ${day_of_week_cn} ${am_pm_cn} %-I 点 %-M 分 %-S 秒")（中国标准时间）"
+        local test_date_line; test_date_line=$(date)
         local test_subject="[${SCRIPT_NAME}] 测试通知"
         
         case "$choice" in
