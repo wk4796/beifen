@@ -1375,7 +1375,11 @@ manage_email_recipients() {
             log_warn "当前没有收件人。"
         else
             echo "收件人列表:"
-            echo "$recipients_json" | jq -r '.[]' | cat -n
+            local recipients_array
+            mapfile -t recipients_array < <(echo "$recipients_json" | jq -r '.[]')
+            for i in "${!recipients_array[@]}"; do
+                echo "  $((i+1)). ${recipients_array[$i]}"
+            done
         fi
 
         echo ""
