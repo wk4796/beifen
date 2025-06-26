@@ -45,7 +45,7 @@ LAST_AUTO_BACKUP_TIMESTAMP=0 # 上次自动备份的 Unix 时间戳
 
 # 备份保留策略默认值
 RETENTION_POLICY_TYPE="none" # "none", "count", "days"
-RETENTION_VALUE=0            # 要保留的备份数量或天数
+RETention_VALUE=0            # 要保留的备份数量或天数
 
 # --- Rclone 配置 ---
 declare -a RCLONE_TARGETS_ARRAY=()
@@ -198,7 +198,7 @@ clear_screen() {
 display_header() {
     clear_screen
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}      $SCRIPT_NAME      ${NC}"
+    echo -e "${GREEN}       $SCRIPT_NAME       ${NC}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 }
@@ -1304,8 +1304,18 @@ set_notification_settings() {
                     7) day_of_week_cn="星期日";;
                 esac
 
+                # ★★★★★ 修改点 ★★★★★
+                # 手动处理上午/下午 (AM/PM) 以确保显示中文，而不是依赖系统 locale
+                local current_hour
+                current_hour=$(date +%H)
+                local am_pm_cn="上午"
+                if [ "$current_hour" -ge 12 ]; then
+                    am_pm_cn="下午"
+                fi
+
                 local test_date_line
-                test_date_line="$(date "+%Y 年 %-m 月 %-d 日 ${day_of_week_cn} %p %-I 点 %-M 分 %-S 秒")（中国标准时间）"
+                # 将 %p 替换为我们自己生成的 ${am_pm_cn} 变量
+                test_date_line="$(date "+%Y 年 %-m 月 %-d 日 ${day_of_week_cn} ${am_pm_cn} %-I 点 %-M 分 %-S 秒")（中国标准时间）"
 
                 case "$test_choice" in
                     1)
