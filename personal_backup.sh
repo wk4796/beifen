@@ -57,15 +57,29 @@ RCLONE_TARGETS_METADATA_STRING=""
 RCLONE_BWLIMIT="" # 带宽限制 (例如 "8M" 代表 8 MByte/s)
 
 
+# --- 【修改】通知配置 ---
+# 移除了 NOTIFICATION_METHOD，现在两者可以独立启用
+
 # --- Telegram 通知变量 ---
 TELEGRAM_ENABLED="false"
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
 
-# [新增] Telegram 报告生成用的全局变量
-GLOBAL_TELEGRAM_REPORT_BODY=""
-GLOBAL_TELEGRAM_FAILURE_REASON=""
-GLOBAL_TELEGRAM_OVERALL_STATUS="success"
+# --- 邮件通知变量 ---
+EMAIL_ENABLED="false"
+EMAIL_HOST=""         # SMTP 服务器地址, e.g., smtp.example.com
+EMAIL_PORT=""         # SMTP 端口, e.g., 587
+EMAIL_USER=""         # SMTP 用户名
+EMAIL_PASSWORD=""     # SMTP 密码
+EMAIL_FROM=""         # 发件人地址
+EMAIL_TO=""           # 收件人地址
+EMAIL_USE_TLS="true"  # 是否使用 TLS 加密 ('true' or 'false')
+
+
+# [新增] 通知报告生成用的全局变量
+GLOBAL_NOTIFICATION_REPORT_BODY=""
+GLOBAL_NOTIFICATION_FAILURE_REASON=""
+GLOBAL_NOTIFICATION_OVERALL_STATUS="success"
 
 
 # 颜色定义
@@ -239,9 +253,21 @@ save_config() {
         echo "RCLONE_TARGETS_STRING=\"$RCLONE_TARGETS_STRING\""
         echo "ENABLED_RCLONE_TARGET_INDICES_STRING=\"$ENABLED_RCLONE_TARGET_INDICES_STRING\""
         echo "RCLONE_TARGETS_METADATA_STRING=\"$RCLONE_TARGETS_METADATA_STRING\""
+        
+        # --- 【修改】保存通知配置 ---
+        # 移除了 NOTIFICATION_METHOD
         echo "TELEGRAM_ENABLED=\"$TELEGRAM_ENABLED\""
         echo "TELEGRAM_BOT_TOKEN=\"$TELEGRAM_BOT_TOKEN\""
         echo "TELEGRAM_CHAT_ID=\"$TELEGRAM_CHAT_ID\""
+        echo "EMAIL_ENABLED=\"$EMAIL_ENABLED\""
+        echo "EMAIL_HOST=\"$EMAIL_HOST\""
+        echo "EMAIL_PORT=\"$EMAIL_PORT\""
+        echo "EMAIL_USER=\"$EMAIL_USER\""
+        echo "EMAIL_PASSWORD=\"$EMAIL_PASSWORD\""
+        echo "EMAIL_FROM=\"$EMAIL_FROM\""
+        echo "EMAIL_TO=\"$EMAIL_TO\""
+        echo "EMAIL_USE_TLS=\"$EMAIL_USE_TLS\""
+
     } > "$CONFIG_FILE"
 
     log_info "配置已保存到 $CONFIG_FILE"
@@ -313,7 +339,7 @@ check_dependencies() {
     deps["df"]="coreutils;用于检查磁盘空间"
     deps["du"]="coreutils;用于计算文件大小"
     deps["less"]="less;用于分页查看日志文件"
-    deps["curl"]="curl;用于发送 Telegram 通知和安装 rclone"
+    deps["curl"]="curl;用于发送 Telegram 和邮件通知，以及安装 rclone"
 
     local missing_deps=()
     local dep_info=()
@@ -392,13 +418,13 @@ check_dependencies() {
                     ((installed_count++))
                 else
                     ((skipped_count++))
-                    if [[ "$pkg" == "rclone" ]]; then any_critical_skipped=true; fi
+                    if [[ "$pkg" == "rclone" || "$pkg" == "curl" ]]; then any_critical_skipped=true; fi
                 fi
                 ;;
             n|N)
                 log_warn "已跳过安装 '${cmd}'。"
                 ((skipped_count++))
-                if [[ "$cmd" == "rclone" ]]; then any_critical_skipped=true; fi
+                if [[ "$cmd" == "rclone" || "$cmd" == "curl" ]]; then any_critical_skipped=true; fi
                 ;;
             q|Q)
                 log_error "用户中止了依赖安装。脚本无法继续。"
@@ -407,7 +433,7 @@ check_dependencies() {
             *)
                 log_warn "无效输入，已跳过 '${cmd}'。"
                 ((skipped_count++))
-                if [[ "$cmd" == "rclone" ]]; then any_critical_skipped=true; fi
+                if [[ "$cmd" == "rclone" || "$cmd" == "curl" ]]; then any_critical_skipped=true; fi
                 ;;
         esac
     done
@@ -421,7 +447,7 @@ check_dependencies() {
     fi
     
     if [[ "$any_critical_skipped" == true ]]; then
-        log_error "核心依赖 'rclone' 未安装。脚本无法执行备份任务。"
+        log_error "核心依赖 'rclone' 或 'curl' 未安装。脚本无法执行核心任务。"
         press_enter_to_continue
         return 1
     fi
@@ -432,13 +458,10 @@ check_dependencies() {
 
 # [修改] 移除 parse_mode，发送纯文本消息
 send_telegram_message() {
-    if [[ "$TELEGRAM_ENABLED" != "true" ]]; then
-        return 0
-    fi
-
     local message_content="$1"
+    # 此处不再检查 TELEGRAM_ENABLED，因为这个检查在 send_notification 中完成
     if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
-        log_warn "Telegram 通知已启用，但凭证未配置，跳过发送消息。"
+        log_warn "Telegram 凭证未配置，跳过发送消息。"
         return 0
     fi
     if ! command -v curl &> /dev/null; then
@@ -453,6 +476,81 @@ send_telegram_message() {
         log_info "Telegram 消息发送成功。"
     else
         log_error "Telegram 消息发送失败！"
+    fi
+}
+
+# --- 发送邮件通知的函数 ---
+send_email_message() {
+    local message_content="$1"
+    local subject="$2" # 新增：邮件主题参数
+    # 此处不再检查 EMAIL_ENABLED
+
+    if [[ -z "$EMAIL_HOST" || -z "$EMAIL_PORT" || -z "$EMAIL_USER" || -z "$EMAIL_PASSWORD" || -z "$EMAIL_FROM" || -z "$EMAIL_TO" ]]; then
+        log_warn "邮件通知配置不完整，跳过发送邮件。"
+        return 0
+    fi
+    
+    if ! command -v curl &> /dev/null; then
+        log_error "发送邮件需要 'curl'，但未安装。"
+        return 1
+    fi
+
+    log_info "正在发送邮件..."
+
+    # 创建邮件内容临时文件
+    local mail_body_file="${TEMP_DIR}/mail.txt"
+    # From 和 To 地址可以包含名称，例如 "Sender Name <sender@example.com>"
+    cat << EOF > "$mail_body_file"
+From: "$SCRIPT_NAME" <$EMAIL_FROM>
+To: <$EMAIL_TO>
+Subject: $subject
+Date: $(date -R)
+Content-Type: text/plain; charset=UTF-8
+
+$message_content
+EOF
+
+    local curl_protocol="smtp"
+    local curl_tls_option="--ssl-reqd" # 默认为 STARTTLS
+
+    if [[ "$EMAIL_USE_TLS" == "true" ]]; then
+        # 如果端口是 465 (通常的 SMTPS 端口)，则使用 smtps 协议
+        if [[ "$EMAIL_PORT" == "465" ]]; then
+            curl_protocol="smtps"
+            curl_tls_option="" # SMTPS 协议隐含了 SSL/TLS
+        fi
+    else
+        curl_tls_option="" # 如果用户禁用 TLS
+    fi
+
+    # 执行 curl 命令发送邮件
+    if curl --silent --show-error --url "${curl_protocol}://${EMAIL_HOST}:${EMAIL_PORT}" \
+        ${curl_tls_option} \
+        --user "${EMAIL_USER}:${EMAIL_PASSWORD}" \
+        --mail-from "<${EMAIL_FROM}>" \
+        --mail-rcpt "<${EMAIL_TO}>" \
+        --upload-file "$mail_body_file"; then
+        log_info "邮件发送成功。"
+    else
+        log_error "邮件发送失败！请检查邮件配置、网络或 curl 错误输出。"
+    fi
+
+    rm -f "$mail_body_file"
+}
+
+# --- 【重大修改】统一的通知发送函数，支持多通道 ---
+send_notification() {
+    local message_content="$1"
+    local subject="$2" # 第二个参数作为邮件主题
+
+    # 检查并发送 Telegram
+    if [[ "$TELEGRAM_ENABLED" == "true" ]]; then
+        send_telegram_message "$message_content"
+    fi
+
+    # 检查并发送邮件
+    if [[ "$EMAIL_ENABLED" == "true" ]]; then
+        send_email_message "$message_content" "$subject"
     fi
 }
 
@@ -610,7 +708,7 @@ manage_auto_backup_menu() {
     while true; do
         display_header
         echo -e "${BLUE}=== 1. 自动备份与计划任务 ===${NC}"
-        echo -e "  1. ${YELLOW}设置自动备份间隔${NC} (当前: ${AUTO_BACKUP_INTERVAL_DAYS} 天)"
+        echo -e "  1. ${YELLOW}自动备份与计划任务${NC} (当前: ${AUTO_BACKUP_INTERVAL_DAYS} 天)"
         echo -e "  2. ${YELLOW}[助手] 配置 Cron 定时任务${NC}"
         echo ""
         echo -e "  0. ${RED}返回主菜单${NC}"
@@ -913,21 +1011,21 @@ set_backup_path_and_mode() {
     done
 }
 
-# [NEW] 管理压缩设置的菜单
+# 【修改】压缩格式菜单，移除状态颜色
 manage_compression_settings() {
     while true; do
         display_header
         echo -e "${BLUE}=== 4. 压缩包格式与选项 ===${NC}"
-        echo -e "当前格式: ${GREEN}${COMPRESSION_FORMAT}${NC}"
-        echo -e "压缩级别: ${GREEN}${COMPRESSION_LEVEL}${NC} (1=最快, 9=最高)"
         local pass_status="未设置"
         if [[ -n "$ZIP_PASSWORD" ]]; then
-            pass_status="${YELLOW}已设置${NC}"
+            pass_status="已设置"
         fi
+        echo -e "当前格式: ${COMPRESSION_FORMAT}"
+        echo -e "压缩级别: ${COMPRESSION_LEVEL} (1=最快, 9=最高)"
         echo -e "ZIP 密码: ${pass_status}"
         echo ""
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "  1. ${YELLOW}切换压缩格式 (zip / tar.gz)${NC}"
+        echo -e "  1. ${YELLOW}切换压缩格式${NC} (zip / tar.gz)"
         echo -e "  2. ${YELLOW}设置压缩级别${NC}"
         echo -e "  3. ${YELLOW}设置/清除 ZIP 密码${NC} (仅对 zip 格式有效)"
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -1060,7 +1158,7 @@ set_cloud_storage() {
             check_status_text="已关闭"
         fi
         echo -e "  5. ${YELLOW}备份后完整性校验${NC} (当前: ${check_status_text})"
-        # --- 颜色已改为黄色 ---
+        
         echo -e "  6. ${YELLOW}启动 Rclone 官方配置工具${NC} (用于 Google Drive, Dropbox 等)"
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo -e "  0. ${RED}返回主菜单${NC}"
@@ -1086,58 +1184,158 @@ set_cloud_storage() {
 }
 
 
-set_telegram_notification() {
+# --- 【重大修改】全新的通知设定菜单，支持多选和定向测试 ---
+set_notification_settings() {
     local needs_saving="false"
     while true; do
         display_header
-        echo -e "${BLUE}=== 6. 消息通知设定 (Telegram) ===${NC}"
+        echo -e "${BLUE}=== 6. 消息通知设定 ===${NC}"
         
-        local status_text
-        if [[ "$TELEGRAM_ENABLED" == "true" ]]; then
-            status_text="${GREEN}已启用${NC}"
-        else
-            status_text="${YELLOW}已禁用${NC}"
-        fi
-        echo -e "当前状态: ${status_text}"
-        echo -e "Bot Token: ${TELEGRAM_BOT_TOKEN}"
-        echo -e "Chat ID:   ${TELEGRAM_CHAT_ID}"
+        # 【修改】获取无颜色的状态文本
+        local tg_status_text=$([[ "$TELEGRAM_ENABLED" == "true" ]] && echo "已启用" || echo "已禁用")
+        local email_status_text=$([[ "$EMAIL_ENABLED" == "true" ]] && echo "已启用" || echo "已禁用")
+        
         echo ""
-        
-        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
-        if [[ "$TELEGRAM_ENABLED" == "true" ]]; then
-            echo -e "  1. ${YELLOW}禁用通知${NC}"
-        else
-            echo -e "  1. ${GREEN}启用通知${NC}"
-        fi
-        echo -e "  2. ${YELLOW}设置/修改凭证 (Token 和 Chat ID)${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━ 通知方式状态与配置 ━━━━━━━━━━━━━━${NC}"
+        # 【修改】移除括号内文本的颜色
+        echo -e "  1. ${YELLOW}切换 Telegram 通知状态${NC} (当前: ${tg_status_text})"
+        echo -e "  2. ${YELLOW}切换 邮件 通知状态${NC} (当前: ${email_status_text})"
+        echo -e "  3. ${YELLOW}配置 Telegram 参数${NC}"
+        echo -e "  4. ${YELLOW}配置 邮件 参数${NC}"
+        echo -e "  5. ${YELLOW}发送测试通知${NC}"
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo -e "  0. ${RED}保存并返回${NC}"
         read -rp "请输入选项: " choice
 
         case $choice in
-            1) 
+            1) # 切换 Telegram 状态
                 if [[ "$TELEGRAM_ENABLED" == "true" ]]; then
-                    TELEGRAM_ENABLED="false"
-                    log_warn "Telegram 通知已禁用。"
+                    TELEGRAM_ENABLED="false"; log_warn "Telegram 通知已禁用。"
                 else
-                    TELEGRAM_ENABLED="true"
-                    log_info "Telegram 通知已启用。"
+                    TELEGRAM_ENABLED="true"; log_info "Telegram 通知已启用。"
                 fi
                 needs_saving="true"
                 press_enter_to_continue
                 ;;
-            2) 
-                log_warn "凭证将保存到本地配置文件！"
-                read -rp "请输入新的 Telegram Bot Token [留空不修改]: " input_token
-                TELEGRAM_BOT_TOKEN="${input_token:-$TELEGRAM_BOT_TOKEN}"
 
-                read -rp "请输入新的 Telegram Chat ID [留空不修改]: " input_chat_id
-                TELEGRAM_CHAT_ID="${input_chat_id:-$TELEGRAM_CHAT_ID}"
-
-                log_info "Telegram 凭证已更新。"
+            2) # 切换 邮件 状态
+                if [[ "$EMAIL_ENABLED" == "true" ]]; then
+                    EMAIL_ENABLED="false"; log_warn "邮件通知已禁用。"
+                else
+                    EMAIL_ENABLED="true"; log_info "邮件通知已启用。"
+                fi
                 needs_saving="true"
                 press_enter_to_continue
                 ;;
+                
+            3) # 配置 Telegram
+                display_header
+                echo -e "${BLUE}--- 配置 Telegram ---${NC}"
+                local current_tg_status=$([[ "$TELEGRAM_ENABLED" == "true" ]] && echo -e "${GREEN}已启用${NC}" || echo -e "${YELLOW}已禁用${NC}")
+                echo -e "当前状态: ${current_tg_status}"
+                echo -e "Bot Token: ${TELEGRAM_BOT_TOKEN}"
+                echo -e "Chat ID:   ${TELEGRAM_CHAT_ID}"
+                echo ""
+                read -rp "请输入新的 Bot Token [留空不修改]: " input_token
+                if [[ -n "$input_token" ]]; then
+                    TELEGRAM_BOT_TOKEN="$input_token"
+                    needs_saving="true"
+                    log_info "Bot Token 已更新。"
+                fi
+
+                read -rp "请输入新的 Chat ID [留空不修改]: " input_chat_id
+                 if [[ -n "$input_chat_id" ]]; then
+                    TELEGRAM_CHAT_ID="$input_chat_id"
+                    needs_saving="true"
+                    log_info "Chat ID 已更新。"
+                fi
+                press_enter_to_continue
+                ;;
+
+            4) # 配置 邮件
+                display_header
+                echo -e "${BLUE}--- 配置 邮件 ---${NC}"
+                local current_email_status=$([[ "$EMAIL_ENABLED" == "true" ]] && echo -e "${GREEN}已启用${NC}" || echo -e "${YELLOW}已禁用${NC}")
+                echo -e "当前状态: ${current_email_status}"
+                echo ""
+                echo -e "${RED}警告: 密码将以明文形式保存在本地配置文件中！请确保文件安全。${NC}"
+                read -rp "SMTP 服务器地址 (例如: smtp.qq.com) [${EMAIL_HOST}]: " EMAIL_HOST_input
+                EMAIL_HOST="${EMAIL_HOST_input:-$EMAIL_HOST}"
+                read -rp "SMTP 端口 (例如: 465 或 587) [${EMAIL_PORT}]: " EMAIL_PORT_input
+                EMAIL_PORT="${EMAIL_PORT_input:-$EMAIL_PORT}"
+                read -rp "发件人邮箱地址 [${EMAIL_FROM}]: " EMAIL_FROM_input
+                EMAIL_FROM="${EMAIL_FROM_input:-$EMAIL_FROM}"
+                read -rp "收件人邮箱地址 [${EMAIL_TO}]: " EMAIL_TO_input
+                EMAIL_TO="${EMAIL_TO_input:-$EMAIL_TO}"
+                read -rp "SMTP 用户名 (通常等于发件人) [${EMAIL_USER}]: " EMAIL_USER_input
+                EMAIL_USER="${EMAIL_USER_input:-$EMAIL_USER}"
+                read -s -rp "SMTP 密码/授权码 [留空不修改]: " EMAIL_PASSWORD_input
+                echo ""
+                if [[ -n "$EMAIL_PASSWORD_input" ]]; then
+                    EMAIL_PASSWORD="$EMAIL_PASSWORD_input"
+                fi
+
+                log_info "邮件参数已更新。"
+                needs_saving="true"
+                press_enter_to_continue
+                ;;
+
+            5) # 发送测试
+                display_header
+                echo "请选择要测试的通知方式:"
+                echo " 1. Telegram"
+                echo " 2. 邮件"
+                echo " 0. 取消"
+                read -rp "请输入选项: " test_choice
+                
+                local test_subject="[${SCRIPT_NAME}] 测试通知"
+                
+                # 【修改】使用 case 语句生成中文星期，避免 locale 问题
+                local day_of_week_num
+                day_of_week_num=$(date +%u)
+                local day_of_week_cn
+                case "$day_of_week_num" in
+                    1) day_of_week_cn="星期一";;
+                    2) day_of_week_cn="星期二";;
+                    3) day_of_week_cn="星期三";;
+                    4) day_of_week_cn="星期四";;
+                    5) day_of_week_cn="星期五";;
+                    6) day_of_week_cn="星期六";;
+                    7) day_of_week_cn="星期日";;
+                esac
+
+                local test_date_line
+                test_date_line="$(date "+%Y 年 %-m 月 %-d 日 ${day_of_week_cn} %p %-I 点 %-M 分 %-S 秒")（中国标准时间）"
+
+                case "$test_choice" in
+                    1)
+                        if [[ "$TELEGRAM_ENABLED" == "true" ]]; then
+                            log_info "正在发送 Telegram 测试消息..."
+                            local test_body="这是一条来自脚本的测试消息。如果您收到此消息，说明您的 'Telegram' 通知配置正确。"$'\n'"- ${test_date_line}"
+                            send_telegram_message "$test_body"
+                        else
+                            log_warn "Telegram 通知未启用，无法发送测试。"
+                        fi
+                        ;;
+                    2)
+                        if [[ "$EMAIL_ENABLED" == "true" ]]; then
+                             log_info "正在发送邮件测试消息..."
+                             local test_body="这是一条来自脚本的测试消息。如果您收到此消息，说明您的 '邮件' 通知配置正确。"$'\n'"- ${test_date_line}"
+                            send_email_message "$test_body" "$test_subject"
+                        else
+                             log_warn "邮件通知未启用，无法发送测试。"
+                        fi
+                        ;;
+                    0)
+                        log_info "已取消测试。"
+                        ;;
+                    *)
+                        log_error "无效选项。"
+                        ;;
+                esac
+                press_enter_to_continue
+                ;;
+                
             0) 
                 if [[ "$needs_saving" == "true" ]]; then
                     save_config
@@ -1152,6 +1350,7 @@ set_telegram_notification() {
     done
 }
 
+
 set_retention_policy() {
     while true; do
         display_header
@@ -1159,15 +1358,15 @@ set_retention_policy() {
         echo -e "${YELLOW}请注意：此策略仅对“归档模式”生成的备份文件有效。${NC}"
         echo "当前策略: "
         case "$RETENTION_POLICY_TYPE" in
-            "none") echo -e "  ${YELLOW}无保留策略（所有备份将保留）${NC}" ;;
-            "count") echo -e "  ${YELLOW}保留最新 ${RETENTION_VALUE} 个备份${NC}" ;;
-            "days")  echo -e "  ${YELLOW}保留最近 ${RETENTION_VALUE} 天内的备份${NC}" ;;
-            *)       echo -e "  ${YELLOW}未知策略或未设置${NC}" ;;
+            "none") echo -e "  无保留策略（所有备份将保留）" ;;
+            "count") echo -e "  保留最新 ${RETENTION_VALUE} 个备份" ;;
+            "days")  echo -e "  保留最近 ${RETENTION_VALUE} 天内的备份" ;;
+            *)       echo -e "  未知策略或未设置" ;;
         esac
         echo ""
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "  1. ${YELLOW}设置按数量保留 (例: 保留最新的 5 个)${NC}"
-        echo -e "  2. ${YELLOW}设置按天数保留 (例: 保留最近 30 天)${NC}"
+        echo -e "  1. ${YELLOW}设置按数量保留${NC} (例: 保留最新的 5 个)"
+        echo -e "  2. ${YELLOW}设置按天数保留${NC} (例: 保留最近 30 天)"
         echo -e "  3. ${YELLOW}关闭保留策略${NC}"
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo -e "  0. ${RED}返回主菜单${NC}"
@@ -1292,7 +1491,7 @@ apply_retention_policy() {
         retention_block+=$'\n'"共检测到：${total_found} 个归档文件"
         retention_block+=$'\n'"删除旧文件：${deleted_count} 个 🗑️"
     done
-    GLOBAL_TELEGRAM_REPORT_BODY+="${retention_block}"
+    GLOBAL_NOTIFICATION_REPORT_BODY+="${retention_block}"
 }
 
 check_temp_space() {
@@ -1321,7 +1520,7 @@ check_temp_space() {
     if [[ "$available_space_kb" -lt "$required_space_kb" ]]; then
         log_error "临时目录空间不足！"
         # [修改] 不再发送消息，而是设置全局失败原因
-        GLOBAL_TELEGRAM_FAILURE_REASON="临时目录空间不足 (需要 ~${required_hr}, 可用 ${available_hr})"
+        GLOBAL_NOTIFICATION_FAILURE_REASON="临时目录空间不足 (需要 ~${required_hr}, 可用 ${available_hr})"
         return 1
     fi
     return 0
@@ -1351,7 +1550,7 @@ perform_sync_backup() {
         
         if [[ ! -e "$path_to_sync" ]]; then
             log_error "路径 '$path_to_sync' 不存在，跳过。"
-            GLOBAL_TELEGRAM_REPORT_BODY+=$'\n\n'"🔄 路径同步"$'\n'"源目录：${path_to_sync}"$'\n'"状态：❌ 失败 (路径不存在)"
+            GLOBAL_NOTIFICATION_REPORT_BODY+=$'\n\n'"🔄 路径同步"$'\n'"源目录：${path_to_sync}"$'\n'"状态：❌ 失败 (路径不存在)"
             any_sync_failed="true"
             continue
         fi
@@ -1375,11 +1574,11 @@ perform_sync_backup() {
                 any_sync_failed="true"
             fi
         done
-        GLOBAL_TELEGRAM_REPORT_BODY+="${path_sync_block}"
+        GLOBAL_NOTIFICATION_REPORT_BODY+="${path_sync_block}"
     done
 
     if [[ "$any_sync_failed" == "true" ]]; then
-        GLOBAL_TELEGRAM_OVERALL_STATUS="failure"
+        GLOBAL_NOTIFICATION_OVERALL_STATUS="failure"
         return 1
     fi
     return 0
@@ -1436,7 +1635,7 @@ perform_archive_backup() {
             rm -f "$temp_archive_path"
         else
             log_error "创建合并压缩包失败！"
-            GLOBAL_TELEGRAM_REPORT_BODY+=$'\n\n'"❌ 错误：创建合并压缩包失败！"
+            GLOBAL_NOTIFICATION_REPORT_BODY+=$'\n\n'"❌ 错误：创建合并压缩包失败！"
             any_op_failed="true"
         fi
 
@@ -1455,7 +1654,7 @@ perform_archive_backup() {
 
             if [[ ! -e "$current_backup_path" ]]; then
                 log_error "路径 '$current_backup_path' 不存在，跳过。"
-                GLOBAL_TELEGRAM_REPORT_BODY+=$'\n\n'"📂 路径归档"$'\n'"源目录：${current_backup_path}"$'\n'"状态：❌ 失败 (路径不存在)"
+                GLOBAL_NOTIFICATION_REPORT_BODY+=$'\n\n'"📂 路径归档"$'\n'"源目录：${current_backup_path}"$'\n'"状态：❌ 失败 (路径不存在)"
                 any_op_failed="true"
                 continue
             fi
@@ -1474,7 +1673,7 @@ perform_archive_backup() {
 
             if ! $compress_success; then
                 log_error "文件压缩失败！"
-                GLOBAL_TELEGRAM_REPORT_BODY+=$'\n\n'"📂 路径归档"$'\n'"源目录：${current_backup_path}"$'\n'"状态：❌ 压缩失败"
+                GLOBAL_NOTIFICATION_REPORT_BODY+=$'\n\n'"📂 路径归档"$'\n'"源目录：${current_backup_path}"$'\n'"状态：❌ 压缩失败"
                 any_op_failed="true"
                 continue
             fi
@@ -1491,43 +1690,45 @@ perform_archive_backup() {
         apply_retention_policy
         return 0 # Success
     else
-        GLOBAL_TELEGRAM_OVERALL_STATUS="failure"
+        GLOBAL_NOTIFICATION_OVERALL_STATUS="failure"
         return 1 # Failure
     fi
 }
 
 
-# [修改] 核心备份函数，现在负责发送开始和结束的 Telegram 摘要
+# [修改] 核心备份函数，现在负责发送开始和结束的通知摘要
 perform_backup() {
     local backup_type="$1"
     
-    # --- Telegram 报告生成 ---
+    # --- 通知报告生成 ---
     # 初始化全局报告变量
-    GLOBAL_TELEGRAM_REPORT_BODY=""
-    GLOBAL_TELEGRAM_FAILURE_REASON=""
-    GLOBAL_TELEGRAM_OVERALL_STATUS="success" # 假设成功，直到有失败发生
+    GLOBAL_NOTIFICATION_REPORT_BODY=""
+    GLOBAL_NOTIFICATION_FAILURE_REASON=""
+    GLOBAL_NOTIFICATION_OVERALL_STATUS="success" # 假设成功，直到有失败发生
 
     local readable_time
     readable_time=$(date '+%Y-%m-%d %H:%M:%S')
+
+    local final_subject="[${SCRIPT_NAME}] "
 
     # 预检
     if [ ${#BACKUP_SOURCE_PATHS_ARRAY[@]} -eq 0 ]; then
         log_error "未设置任何备份源路径。"
         local error_message="📦 ${SCRIPT_NAME}"$'\n'"🕒 时间：${readable_time}"$'\n'"❌ 状态：备份失败"$'\n'"原因：未设置任何备份源路径。"
-        send_telegram_message "$error_message"
+        send_notification "$error_message" "${final_subject}备份失败"
         return 1
     fi
     if [ ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} -eq 0 ]; then
         log_error "未启用任何 Rclone 目标。"
         local error_message="📦 ${SCRIPT_NAME}"$'\n'"🕒 时间：${readable_time}"$'\n'"❌ 状态：备份失败"$'\n'"原因：未启用任何 Rclone 备份目标。"
-        send_telegram_message "$error_message"
+        send_notification "$error_message" "${final_subject}备份失败"
         return 1
     fi
     
     # 发送 "开始" 消息
     local mode_name=$([[ "$BACKUP_MODE" == "sync" ]] && echo "同步模式" || echo "归档模式")
     local start_message="📦 ${SCRIPT_NAME}"$'\n'"🕒 时间：${readable_time}"$'\n'"🔧 模式：${backup_type} · ${mode_name}"$'\n'"▶️ 状态：备份已开始..."
-    send_telegram_message "$start_message"
+    send_notification "$start_message" "${final_subject}备份开始"
     
     # 执行备份
     local backup_result=0
@@ -1544,12 +1745,15 @@ perform_backup() {
     local final_status_text="备份完成"
 
     # 检查由子函数设置的全局状态标志
-    if [[ "$GLOBAL_TELEGRAM_OVERALL_STATUS" != "success" ]] || [[ "$backup_result" -ne 0 ]]; then
+    if [[ "$GLOBAL_NOTIFICATION_OVERALL_STATUS" != "success" ]] || [[ "$backup_result" -ne 0 ]]; then
         final_status_emoji="❌"
         final_status_text="备份失败"
-        if [[ -n "$GLOBAL_TELEGRAM_FAILURE_REASON" ]]; then
-             GLOBAL_TELEGRAM_REPORT_BODY+=$'\n\n'"原因：${GLOBAL_TELEGRAM_FAILURE_REASON}"
+        final_subject+="${final_status_text}"
+        if [[ -n "$GLOBAL_NOTIFICATION_FAILURE_REASON" ]]; then
+             GLOBAL_NOTIFICATION_REPORT_BODY+=$'\n\n'"原因：${GLOBAL_NOTIFICATION_FAILURE_REASON}"
         fi
+    else
+        final_subject+="备份成功"
     fi
 
     local final_header="📦 ${SCRIPT_NAME}"$'\n'"🕒 时间：${readable_time}"$'\n'"🔧 模式：${backup_type} · ${mode_name}"$'\n'"📁 备份路径：共 ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个"
@@ -1557,11 +1761,11 @@ perform_backup() {
     local final_footer="${final_status_emoji} 状态：${final_status_text}"
 
     # 移除可能存在的前导换行符
-    GLOBAL_TELEGRAM_REPORT_BODY="${GLOBAL_TELEGRAM_REPORT_BODY#"${GLOBAL_TELEGRAM_REPORT_BODY%%[![:space:]]*}"}"
+    GLOBAL_NOTIFICATION_REPORT_BODY="${GLOBAL_NOTIFICATION_REPORT_BODY#"${GLOBAL_NOTIFICATION_REPORT_BODY%%[![:space:]]*}"}"
     
-    local final_message="${final_header}"$'\n\n'"${GLOBAL_TELEGRAM_REPORT_BODY}"$'\n\n'"${final_footer}"
+    local final_message="${final_header}"$'\n\n'"${GLOBAL_NOTIFICATION_REPORT_BODY}"$'\n\n'"${final_footer}"
 
-    send_telegram_message "$final_message"
+    send_notification "$final_message" "$final_subject"
 
     # 只有在完全成功时才更新时间戳
     if [[ "$final_status_text" == "备份完成" ]]; then
@@ -1630,16 +1834,16 @@ upload_archive() {
     done
 
     # 附加到全局报告
-    GLOBAL_TELEGRAM_REPORT_BODY+="${archive_block}${upload_block}"
+    GLOBAL_NOTIFICATION_REPORT_BODY+="${archive_block}${upload_block}"
     
     if [[ "$has_upload_failure" == "true" ]]; then
-        GLOBAL_TELEGRAM_OVERALL_STATUS="failure"
+        GLOBAL_NOTIFICATION_OVERALL_STATUS="failure"
     fi
 
     if [[ "$any_upload_succeeded_for_path" == "true" ]]; then
         return 0 # Success
     else
-        GLOBAL_TELEGRAM_OVERALL_STATUS="failure"
+        GLOBAL_NOTIFICATION_OVERALL_STATUS="failure"
         return 1 # Failure
     fi
 }
@@ -1709,6 +1913,16 @@ manage_config_import_export() {
         display_header
         echo -e "${BLUE}=== 10. [助手] 配置导入/导出 ===${NC}"
         echo "此功能可将当前所有设置导出为便携文件，或从文件导入。"
+        
+        # 【修改】增加当前配置文件的位置和大小信息
+        if [[ -f "$CONFIG_FILE" ]]; then
+            local config_size
+            config_size=$(du -h "$CONFIG_FILE" 2>/dev/null | awk '{print $1}')
+            echo "当前配置文件的位置: ${CONFIG_FILE} (大小: ${config_size:-未知})"
+        else
+            echo "当前配置文件的位置: 文件不存在"
+        fi
+
         echo ""
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
         echo -e "  1. ${YELLOW}导出配置到文件${NC}"
@@ -1787,7 +2001,7 @@ toggle_space_check() {
     press_enter_to_continue
 }
 
-# [修改] 增加切换空间检查的选项
+# 【修改】为日志文件浏览器增加位置信息
 system_maintenance_menu() {
     while true; do
         display_header
@@ -1797,7 +2011,7 @@ system_maintenance_menu() {
         if [[ -f "$LOG_FILE" ]]; then
             local log_size
             log_size=$(du -h "$LOG_FILE" 2>/dev/null | awk '{print $1}')
-            log_info_str="(大小: ${log_size})"
+            log_info_str="(大小: ${log_size}, 位置: ${LOG_FILE})"
         fi
 
         local level_names=("" "DEBUG" "INFO" "WARN" "ERROR")
@@ -1950,13 +2164,27 @@ show_main_menu() {
         format_text+=" (有密码)"
     fi
     echo -e "  4. ${YELLOW}压缩包格式与选项${NC} (当前: ${format_text})"
-    echo -e "  5. ${YELLOW}云存储设定${NC} (Rclone)"
+    echo -e "  5. ${YELLOW}云存储设定 (Rclone)${NC}"
 
-    local telegram_status_text="已禁用"
+    # --- 【重大修改】根据你的最新要求，优化通知状态的显示逻辑 ---
+    local enabled_methods=()
     if [[ "$TELEGRAM_ENABLED" == "true" ]]; then
-        telegram_status_text="已启用"
+        enabled_methods+=("Telegram")
     fi
-    echo -e "  6. ${YELLOW}消息通知设定${NC} (Telegram, 当前: ${telegram_status_text})"
+    if [[ "$EMAIL_ENABLED" == "true" ]]; then
+        enabled_methods+=("邮件")
+    fi
+
+    local notification_status_display
+    if [ ${#enabled_methods[@]} -gt 0 ]; then
+        # 如果有启用的方法，用逗号连接它们
+        notification_status_display=$(IFS=,; echo "${enabled_methods[*]}")
+    else
+        # 如果都没有启用，显示“已禁用”
+        notification_status_display="已禁用"
+    fi
+    echo -e "  6. ${YELLOW}消息通知设定${NC} (当前: ${notification_status_display})"
+
 
     local retention_status_text="已禁用"
     if [[ "$RETENTION_POLICY_TYPE" == "count" ]]; then
@@ -1992,7 +2220,7 @@ process_menu_choice() {
         3) set_backup_path_and_mode ;;
         4) manage_compression_settings ;;
         5) set_cloud_storage ;;
-        6) set_telegram_notification ;;
+        6) set_notification_settings ;; # 【修改】调用新的函数
         7) set_retention_policy ;;
         8) manage_rclone_installation ;;
         9) restore_backup ;;
@@ -2574,6 +2802,7 @@ choose_rclone_path() {
     return 0
 }
 
+# 【修改】移除操作提示和状态文本的颜色
 view_and_manage_rclone_targets() {
     local needs_saving="false"
     while true; do
@@ -2595,23 +2824,23 @@ view_and_manage_rclone_targets() {
                 local metadata="${RCLONE_TARGETS_METADATA_ARRAY[$i]}"
                 echo -n "$((i+1)). ${RCLONE_TARGETS_ARRAY[$i]} "
                 if [[ -n "$metadata" ]]; then
-                    echo -n -e "(${BLUE}${metadata}${NC}) "
+                    echo -n "(${metadata}) "
                 fi
 
                 if [[ "$is_enabled" == "true" ]]; then
                     echo -e "[${GREEN}已启用${NC}]"
                 else
-                    echo -e "[${YELLOW}已禁用${NC}]"
+                    echo "[已禁用]"
                 fi
             done
         fi
 
         echo ""
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "  a - ${YELLOW}添加新目标${NC}"
-        echo -e "  d - ${YELLOW}删除目标${NC}"
-        echo -e "  m - ${YELLOW}修改目标路径${NC}"
-        echo -e "  t - ${YELLOW}切换启用/禁用状态${NC}"
+        echo "  a - 添加新目标"
+        echo "  d - 删除目标"
+        echo "  m - 修改目标路径"
+        echo "  t - 切换启用/禁用状态"
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo -e "  0 - ${RED}保存并返回${NC}"
         read -rp "请输入选项: " choice
