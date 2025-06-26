@@ -10,6 +10,11 @@ CONFIG_FILE="$CONFIG_DIR/config"
 LOG_FILE="$LOG_DIR/log.txt"
 LOCK_FILE="$CONFIG_DIR/script.lock"
 
+# JSON 配置文件路径
+TELEGRAM_BOTS_CONFIG_FILE="$CONFIG_DIR/telegram_bots.json"
+EMAIL_SENDERS_CONFIG_FILE="$CONFIG_DIR/email_senders.json"
+
+
 # 日志轮转配置 (8MB)
 LOG_MAX_SIZE_BYTES=8388608
 
@@ -55,25 +60,6 @@ ENABLED_RCLONE_TARGET_INDICES_STRING=""
 declare -a RCLONE_TARGETS_METADATA_ARRAY=()
 RCLONE_TARGETS_METADATA_STRING=""
 RCLONE_BWLIMIT="" # 带宽限制 (例如 "8M" 代表 8 MByte/s)
-
-
-# --- 【重大重构】通知配置 ---
-# 使用数组支持多个机器人和邮件发件人
-# 内部字段分隔符
-NOTIFICATION_FIELD_DELIMITER="_#_"
-# 记录之间的分隔符
-NOTIFICATION_RECORD_DELIMITER=";;"
-
-# --- Telegram 通知变量 ---
-declare -a TELEGRAM_BOTS_ARRAY=()
-TELEGRAM_BOTS_STRING=""
-# 格式: "别名_#_BOT_TOKEN_#_CHAT_ID_#_enabled(true/false)"
-
-# --- 邮件通知变量 ---
-declare -a EMAIL_SENDERS_ARRAY=()
-EMAIL_SENDERS_STRING=""
-# 格式: "别名_#_HOST_#_PORT_#_USER_#_PASSWORD_#_FROM_#_USE_TLS_#_enabled_#_recipient1,recipient2,..."
-
 
 # [新增] 通知报告生成用的全局变量
 GLOBAL_NOTIFICATION_REPORT_BODY=""
@@ -170,7 +156,6 @@ acquire_lock() {
 
 # 日志文件轮转功能
 rotate_log_if_needed() {
-    # [修改] 移除此处的 mkdir，因为它已在 initialize_directories 中完成
     if [[ ! -f "$LOG_FILE" ]]; then
         touch "$LOG_FILE"
         return
@@ -202,13 +187,6 @@ display_header() {
     echo ""
 }
 
-# 显示消息并记录到日志
-log_and_display() {
-    # DEPRECATED: This function is kept for backward compatibility with older config files.
-    # New logging should use log_info, log_warn, etc.
-    log_info "$1"
-}
-
 # 等待用户按 Enter 键继续
 press_enter_to_continue() {
     echo ""
@@ -221,8 +199,6 @@ press_enter_to_continue() {
 
 # 保存配置到文件
 save_config() {
-    # [修改] 移除此处的 mkdir，因为它已在 initialize_directories 中完成
-    # 现在可以假设 $CONFIG_DIR 总是存在的
     if [ ! -d "$CONFIG_DIR" ]; then
         log_error "配置目录 $CONFIG_DIR 不存在或不是一个目录。请检查权限。"
         return 1
@@ -232,8 +208,6 @@ save_config() {
     RCLONE_TARGETS_STRING=$(IFS=';;'; echo "${RCLONE_TARGETS_ARRAY[*]}")
     ENABLED_RCLONE_TARGET_INDICES_STRING=$(IFS=';;'; echo "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[*]}")
     RCLONE_TARGETS_METADATA_STRING=$(IFS=';;'; echo "${RCLONE_TARGETS_METADATA_ARRAY[*]}")
-    TELEGRAM_BOTS_STRING=$(IFS="$NOTIFICATION_RECORD_DELIMITER"; echo "${TELEGRAM_BOTS_ARRAY[*]}")
-    EMAIL_SENDERS_STRING=$(IFS="$NOTIFICATION_RECORD_DELIMITER"; echo "${EMAIL_SENDERS_ARRAY[*]}")
 
     {
         echo "BACKUP_SOURCE_PATHS_STRING=\"$BACKUP_SOURCE_PATHS_STRING\""
@@ -245,7 +219,7 @@ save_config() {
         echo "ZIP_PASSWORD=\"$ZIP_PASSWORD\""
         echo "CONSOLE_LOG_LEVEL=${CONSOLE_LOG_LEVEL:-$LOG_LEVEL_INFO}"
         echo "FILE_LOG_LEVEL=${FILE_LOG_LEVEL:-$LOG_LEVEL_DEBUG}"
-        echo "ENABLE_SPACE_CHECK=\"${ENABLE_SPACE_CHECK}\"" # [新增] 保存空间检查配置
+        echo "ENABLE_SPACE_CHECK=\"${ENABLE_SPACE_CHECK}\""
         echo "RCLONE_BWLIMIT=\"$RCLONE_BWLIMIT\""
         echo "AUTO_BACKUP_INTERVAL_DAYS=$AUTO_BACKUP_INTERVAL_DAYS"
         echo "LAST_AUTO_BACKUP_TIMESTAMP=$LAST_AUTO_BACKUP_TIMESTAMP"
@@ -254,11 +228,7 @@ save_config() {
         echo "RCLONE_TARGETS_STRING=\"$RCLONE_TARGETS_STRING\""
         echo "ENABLED_RCLONE_TARGET_INDICES_STRING=\"$ENABLED_RCLONE_TARGET_INDICES_STRING\""
         echo "RCLONE_TARGETS_METADATA_STRING=\"$RCLONE_TARGETS_METADATA_STRING\""
-        
-        # --- 【重构】保存新的通知配置 ---
-        echo "TELEGRAM_BOTS_STRING=\"$TELEGRAM_BOTS_STRING\""
-        echo "EMAIL_SENDERS_STRING=\"$EMAIL_SENDERS_STRING\""
-
+        # [移除] 旧的通知变量不再保存
     } > "$CONFIG_FILE"
 
     log_info "配置已保存到 $CONFIG_FILE"
@@ -267,7 +237,6 @@ save_config() {
 
 # 从文件加载配置
 load_config() {
-    # [修改] 移除此处的 mkdir 和相关检查，因为目录已确保存在
     if [[ -f "$CONFIG_FILE" ]]; then
         current_perms=$(stat -c "%a" "$CONFIG_FILE" 2>/dev/null)
         if [[ "$current_perms" != "600" ]]; then
@@ -275,47 +244,8 @@ load_config() {
             chmod 600 "$CONFIG_FILE" 2>/dev/null
         fi
 
-        # shellcheck source=/dev/null
         source "$CONFIG_FILE"
         log_info "配置已从 $CONFIG_FILE 加载。"
-
-        # --- 【新增】旧版通知配置迁移逻辑 ---
-        local needs_resave=false
-        if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
-            log_warn "检测到旧版 Telegram 配置，正在自动迁移..."
-            local migrated_tg_enabled="${TELEGRAM_ENABLED:-false}"
-            local new_bot_entry="默认机器人${NOTIFICATION_FIELD_DELIMITER}${TELEGRAM_BOT_TOKEN}${NOTIFICATION_FIELD_DELIMITER}${TELEGRAM_CHAT_ID}${NOTIFICATION_FIELD_DELIMITER}${migrated_tg_enabled}"
-            TELEGRAM_BOTS_ARRAY+=("$new_bot_entry")
-            # 清理旧变量，防止下次加载时重复迁移
-            TELEGRAM_BOT_TOKEN=""
-            TELEGRAM_CHAT_ID=""
-            TELEGRAM_ENABLED=""
-            needs_resave=true
-        fi
-        
-        if [[ -n "${EMAIL_HOST:-}" ]]; then
-            log_warn "检测到旧版邮件配置，正在自动迁移..."
-            local migrated_email_enabled="${EMAIL_ENABLED:-false}"
-            local migrated_use_tls="${EMAIL_USE_TLS:-true}"
-            local new_sender_entry="默认发件人${NOTIFICATION_FIELD_DELIMITER}${EMAIL_HOST}${NOTIFICATION_FIELD_DELIMITER}${EMAIL_PORT}${NOTIFICATION_FIELD_DELIMITER}${EMAIL_USER}${NOTIFICATION_FIELD_DELIMITER}${EMAIL_PASSWORD}${NOTIFICATION_FIELD_DELIMITER}${EMAIL_FROM}${NOTIFICATION_FIELD_DELIMITER}${migrated_use_tls}${NOTIFICATION_FIELD_DELIMITER}${migrated_email_enabled}${NOTIFICATION_FIELD_DELIMITER}${EMAIL_TO}"
-            EMAIL_SENDERS_ARRAY+=("$new_sender_entry")
-            # 清理旧变量
-            EMAIL_HOST=""
-            EMAIL_PORT=""
-            EMAIL_USER=""
-            EMAIL_PASSWORD=""
-            EMAIL_FROM=""
-            EMAIL_TO=""
-            EMAIL_USE_TLS=""
-            EMAIL_ENABLED=""
-            needs_resave=true
-        fi
-
-        if [[ "$needs_resave" == "true" ]]; then
-            log_info "配置已自动迁移到新格式，并重新保存。"
-            save_config
-        fi
-        # --- 迁移逻辑结束 ---
 
         if [[ -n "$BACKUP_SOURCE_PATHS_STRING" ]]; then
             IFS=';;'; read -r -a BACKUP_SOURCE_PATHS_ARRAY <<< "$BACKUP_SOURCE_PATHS_STRING"
@@ -337,14 +267,6 @@ load_config() {
             IFS=';;'; read -r -a RCLONE_TARGETS_METADATA_ARRAY <<< "$RCLONE_TARGETS_METADATA_STRING"
         fi
         
-        # --- 【重构】加载新的通知配置 ---
-        if [[ -n "$TELEGRAM_BOTS_STRING" ]]; then
-            IFS="$NOTIFICATION_RECORD_DELIMITER"; read -r -a TELEGRAM_BOTS_ARRAY <<< "$TELEGRAM_BOTS_STRING"
-        fi
-        if [[ -n "$EMAIL_SENDERS_STRING" ]]; then
-            IFS="$NOTIFICATION_RECORD_DELIMITER"; read -r -a EMAIL_SENDERS_ARRAY <<< "$EMAIL_SENDERS_STRING"
-        fi
-        
         if [[ ${#RCLONE_TARGETS_METADATA_ARRAY[@]} -ne ${#RCLONE_TARGETS_ARRAY[@]} ]]; then
             log_warn "检测到旧版配置，正在更新目标元数据..."
             local temp_meta_array=()
@@ -354,7 +276,6 @@ load_config() {
             done
             RCLONE_TARGETS_METADATA_ARRAY=("${temp_meta_array[@]}")
             save_config
-            # [新增] 日志提示
             log_info "配置已自动更新以兼容新版本，下次运行将使用最新配置。"
         fi
 
@@ -378,6 +299,9 @@ check_dependencies() {
     deps["du"]="coreutils;用于计算文件大小"
     deps["less"]="less;用于分页查看日志文件"
     deps["curl"]="curl;用于发送 Telegram 和邮件通知，以及安装 rclone"
+    # [新增] jq 是新版通知管理的核心依赖
+    deps["jq"]="jq;用于处理 JSON 格式的通知配置"
+
 
     local missing_deps=()
     local dep_info=()
@@ -456,13 +380,13 @@ check_dependencies() {
                     ((installed_count++))
                 else
                     ((skipped_count++))
-                    if [[ "$pkg" == "rclone" || "$pkg" == "curl" ]]; then any_critical_skipped=true; fi
+                    if [[ "$pkg" == "rclone" || "$pkg" == "curl" || "$pkg" == "jq" ]]; then any_critical_skipped=true; fi
                 fi
                 ;;
             n|N)
                 log_warn "已跳过安装 '${cmd}'。"
                 ((skipped_count++))
-                if [[ "$cmd" == "rclone" || "$cmd" == "curl" ]]; then any_critical_skipped=true; fi
+                if [[ "$cmd" == "rclone" || "$cmd" == "curl" || "$cmd" == "jq" ]]; then any_critical_skipped=true; fi
                 ;;
             q|Q)
                 log_error "用户中止了依赖安装。脚本无法继续。"
@@ -471,7 +395,7 @@ check_dependencies() {
             *)
                 log_warn "无效输入，已跳过 '${cmd}'。"
                 ((skipped_count++))
-                if [[ "$cmd" == "rclone" || "$cmd" == "curl" ]]; then any_critical_skipped=true; fi
+                if [[ "$cmd" == "rclone" || "$cmd" == "curl" || "$cmd" == "jq" ]]; then any_critical_skipped=true; fi
                 ;;
         esac
     done
@@ -485,7 +409,7 @@ check_dependencies() {
     fi
     
     if [[ "$any_critical_skipped" == true ]]; then
-        log_error "核心依赖 'rclone' 或 'curl' 未安装。脚本无法执行核心任务。"
+        log_error "核心依赖 'rclone', 'curl' 或 'jq' 未安装。脚本无法执行核心任务。"
         press_enter_to_continue
         return 1
     fi
@@ -494,43 +418,85 @@ check_dependencies() {
 }
 
 
-# --- 【重构】具体发送通知的 Worker 函数 ---
-_send_telegram_worker() {
-    local bot_token="$1"
-    local chat_id="$2"
-    local message_content="$3"
+# --- [重构] Telegram 发送函数, 接受 Bot 的 JSON 配置 ---
+send_telegram_message() {
+    local bot_config_json="$1"
+    local message_content="$2"
     
-    log_info "正在通过 Bot (Token: ...${bot_token: -6}) 向 Chat ID (...${chat_id: -4}) 发送 Telegram 消息..."
+    local bot_token chat_id
+    bot_token=$(echo "$bot_config_json" | jq -r '.token')
+    chat_id=$(echo "$bot_config_json" | jq -r '.chat_id')
+
+    if [[ -z "$bot_token" || -z "$chat_id" || "$bot_token" == "null" || "$chat_id" == "null" ]]; then
+        log_warn "Telegram Bot 配置不完整，跳过发送。"
+        return 1
+    fi
+    if ! command -v curl &> /dev/null; then
+        log_error "发送 Telegram 消息需要 'curl'，但未安装。"
+        return 1
+    fi
     
+    local bot_alias
+    bot_alias=$(echo "$bot_config_json" | jq -r '.alias')
+    log_info "正在通过 Bot [${bot_alias}] 发送 Telegram 消息..."
+
     if curl -s -X POST "https://api.telegram.org/bot${bot_token}/sendMessage" \
         --data-urlencode "chat_id=${chat_id}" \
         --data-urlencode "text=${message_content}" > /dev/null; then
-        log_info "Telegram 消息发送成功。"
+        log_info "Telegram 消息发送成功 ([${bot_alias}])。"
+        return 0
     else
-        log_error "Telegram 消息发送失败！"
+        log_error "Telegram 消息发送失败 ([${bot_alias}])！"
+        return 1
     fi
 }
 
-_send_email_worker() {
-    local mail_host="$1"
-    local mail_port="$2"
-    local mail_user="$3"
-    local mail_pass="$4"
-    local mail_from="$5"
-    local mail_use_tls="$6"
-    local subject="$7"
-    local message_content="$8"
-    shift 8
-    local recipients_array=("$@")
+# --- [重构] 邮件发送函数, 接受发件人的 JSON 配置 ---
+send_email_message() {
+    local sender_config_json="$1"
+    local message_content="$2"
+    local subject="$3"
 
-    log_info "正在通过 SMTP ${mail_host}:${mail_port} 发送邮件..."
+    # 使用 jq 从 JSON 中提取所有必要的变量
+    local alias host port user pass from use_tls
+    alias=$(echo "$sender_config_json" | jq -r '.alias')
+    host=$(echo "$sender_config_json" | jq -r '.host')
+    port=$(echo "$sender_config_json" | jq -r '.port')
+    user=$(echo "$sender_config_json" | jq -r '.user')
+    pass=$(echo "$sender_config_json" | jq -r '.pass')
+    from=$(echo "$sender_config_json" | jq -r '.from')
+    use_tls=$(echo "$sender_config_json" | jq -r '.use_tls')
+    
+    # 提取收件人数组
+    local recipients_json
+    recipients_json=$(echo "$sender_config_json" | jq -c '.recipients')
 
-    # 创建邮件内容临时文件
+    if [[ -z "$host" || -z "$port" || -z "$user" || -z "$pass" || -z "$from" || "$recipients_json" == "[]" || "$recipients_json" == "null" ]]; then
+        log_warn "邮件发件人 [${alias}] 配置不完整或没有收件人，跳过发送。"
+        return 1
+    fi
+    
+    if ! command -v curl &> /dev/null; then
+        log_error "发送邮件需要 'curl'，但未安装。"
+        return 1
+    fi
+
+    log_info "正在通过邮箱 [${alias}] 发送邮件..."
+
+    # 为 curl 构建收件人参数列表
+    local mail_rcpt_args=()
+    for recipient in $(echo "$recipients_json" | jq -r '.[]'); do
+        mail_rcpt_args+=(--mail-rcpt "<${recipient}>")
+    done
+
+    # 将收件人地址格式化用于邮件头
+    local to_header
+    to_header=$(echo "$recipients_json" | jq -r 'join(", ")')
+
     local mail_body_file="${TEMP_DIR}/mail.txt"
-    # From 和 To 地址可以包含名称，例如 "Sender Name <sender@example.com>"
     cat << EOF > "$mail_body_file"
-From: "$SCRIPT_NAME" <$mail_from>
-To: $(IFS=,; echo "${recipients_array[*]}")
+From: "$SCRIPT_NAME" <$from>
+To: $to_header
 Subject: $subject
 Date: $(date -R)
 Content-Type: text/plain; charset=UTF-8
@@ -541,76 +507,62 @@ EOF
     local curl_protocol="smtp"
     local curl_tls_option="--ssl-reqd" # 默认为 STARTTLS
 
-    if [[ "$mail_use_tls" == "true" ]]; then
-        # 如果端口是 465 (通常的 SMTPS 端口)，则使用 smtps 协议
-        if [[ "$mail_port" == "465" ]]; then
+    if [[ "$use_tls" == "true" ]]; then
+        if [[ "$port" == "465" ]]; then
             curl_protocol="smtps"
-            curl_tls_option="" # SMTPS 协议隐含了 SSL/TLS
+            curl_tls_option=""
         fi
     else
-        curl_tls_option="" # 如果用户禁用 TLS
+        curl_tls_option=""
     fi
 
-    local curl_rcpt_args=()
-    for rcpt in "${recipients_array[@]}"; do
-        curl_rcpt_args+=(--mail-rcpt "<${rcpt}>")
-    done
-
-    # 执行 curl 命令发送邮件
-    if curl --silent --show-error --url "${curl_protocol}://${mail_host}:${mail_port}" \
+    if curl --silent --show-error --url "${curl_protocol}://${host}:${port}" \
         ${curl_tls_option} \
-        --user "${mail_user}:${mail_pass}" \
-        --mail-from "<${mail_from}>" \
-        "${curl_rcpt_args[@]}" \
+        --user "${user}:${pass}" \
+        --mail-from "<${from}>" \
+        "${mail_rcpt_args[@]}" \
         --upload-file "$mail_body_file"; then
-        log_info "邮件成功发送至 ${#recipients_array[@]} 个收件人。"
+        log_info "邮件发送成功 ([${alias}])。"
+        return 0
     else
-        log_error "邮件发送失败！请检查邮件配置、网络或 curl 错误输出。"
+        log_error "邮件发送失败 ([${alias}])！请检查配置、网络或 curl 错误输出。"
+        return 1
     fi
 
     rm -f "$mail_body_file"
 }
 
-
-# --- 【重构】统一的通知发送函数，支持多通道 ---
+# --- [重构 & 修复] 统一的通知发送函数，支持多通道 ---
 send_notification() {
     local message_content="$1"
     local subject="$2"
 
-    if ! command -v curl &> /dev/null; then
-        log_error "发送通知需要 'curl'，但未安装。"
-        return 1
+    # --- 发送 Telegram ---
+    local telegram_bots_file="$TELEGRAM_BOTS_CONFIG_FILE"
+    if [[ -f "$telegram_bots_file" ]]; then
+        local enabled_bots
+        enabled_bots=$(jq -c '.[] | select(.enabled == true)' "$telegram_bots_file" 2>/dev/null)
+        
+        if [[ -n "$enabled_bots" ]]; then
+            while IFS= read -r bot_config; do
+                send_telegram_message "$bot_config" "$message_content" || true
+            done <<< "$enabled_bots"
+        fi
     fi
-    
-    # 检查并发送 Telegram
-    for bot_config in "${TELEGRAM_BOTS_ARRAY[@]}"; do
-        IFS="$NOTIFICATION_FIELD_DELIMITER" read -r alias token chat_id enabled <<< "$bot_config"
-        if [[ "$enabled" == "true" ]]; then
-            if [[ -z "$token" || -z "$chat_id" ]]; then
-                log_warn "Telegram 机器人 '${alias}' 配置不完整，跳过。"
-                continue
-            fi
-            _send_telegram_worker "$token" "$chat_id" "$message_content"
-        fi
-    done
 
-    # 检查并发送邮件
-    for sender_config in "${EMAIL_SENDERS_ARRAY[@]}"; do
-        IFS="$NOTIFICATION_FIELD_DELIMITER" read -r alias host port user pass from use_tls enabled recipients_str <<< "$sender_config"
-        if [[ "$enabled" == "true" ]]; then
-            if [[ -z "$host" || -z "$port" || -z "$user" || -z "$pass" || -z "$from" || -z "$recipients_str" ]]; then
-                log_warn "邮件发件人 '${alias}' 配置不完整，跳过。"
-                continue
-            fi
-            
-            local recipients_array=()
-            IFS=',' read -r -a recipients_array <<< "$recipients_str"
-            
-            _send_email_worker "$host" "$port" "$user" "$pass" "$from" "$use_tls" "$subject" "$message_content" "${recipients_array[@]}"
+    # --- 发送 邮件 ---
+    local email_senders_file="$EMAIL_SENDERS_CONFIG_FILE"
+    if [[ -f "$email_senders_file" ]]; then
+        local enabled_senders
+        enabled_senders=$(jq -c '.[] | select(.enabled == true)' "$email_senders_file" 2>/dev/null)
+
+        if [[ -n "$enabled_senders" ]]; then
+            while IFS= read -r sender_config; do
+                send_email_message "$sender_config" "$message_content" "$subject" || true
+            done <<< "$enabled_senders"
         fi
-    done
+    fi
 }
-
 
 restore_backup() {
     display_header
@@ -846,13 +798,13 @@ manual_backup() {
         log_error "没有设置任何备份源路径。"
         log_warn "请先在选项 [3] 中添加要备份的路径。"
         press_enter_to_continue
-        return 1 # 返回非零状态，表示未满足条件，但我们将在调用处处理以返回主菜单
+        return 1
     fi
     if [ ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} -eq 0 ]; then
         log_error "没有启用任何 Rclone 备份目标。"
         log_warn "请先在选项 [5] 中配置并启用一个或多个目标。"
         press_enter_to_continue
-        return 1 # 返回非零状态，表示未满足条件，但我们将在调用处处理以返回主菜单
+        return 1
     fi
 
     perform_backup "手动备份"
@@ -973,8 +925,8 @@ set_packaging_strategy() {
     echo -e "${BLUE}--- 设置打包策略 ---${NC}"
     echo "请选择在“归档模式”下如何打包多个源文件/目录："
     echo ""
-    echo -e "  1. ${YELLOW}每个源单独打包${NC} (Separate) - 生成多个 .zip 文件，恢复灵活。"
-    echo -e "  2. ${YELLOW}所有源打包成一个${NC} (Single) - 只生成一个 .zip 文件，便于整体迁移。"
+    echo -e "  1. ${YELLOW}每个源单独打包${NC} (Separate)"
+    echo -e "  2. ${YELLOW}所有源打包成一个${NC} (Single)"
     echo ""
     echo -e "当前策略: ${GREEN}${PACKAGING_STRATEGY}${NC}"
     read -rp "请输入选项 (1 或 2): " choice
@@ -1003,7 +955,7 @@ set_backup_mode() {
     echo "请选择您的主要备份策略："
     echo ""
     echo -e "  1. ${YELLOW}归档模式${NC} (Archive) - 先打包成 .zip 再上传。支持版本保留和恢复。适合重要文件归档。"
-    echo -e "  2. ${YELLOW}同步模式${NC} (Sync) - 直接将本地目录结构同步到云端，效率高。适合频繁变动的大量文件。${RED}(此模式下保留策略和恢复功能无效)${NC}"
+    echo -e "  2. ${YELLOW}同步模式${NC} (Sync) - 直接将本地目录结构同步到云端，效率高。适合频繁变动的大量文件。(此模式下保留策略和恢复功能无效)"
     echo ""
     local current_mode_text="归档模式 (Archive)"
     if [[ "$BACKUP_MODE" == "sync" ]]; then
@@ -1197,7 +1149,7 @@ set_cloud_storage() {
     while true; do
         display_header
         echo -e "${BLUE}=== 5. 云存储设定 (Rclone) ===${NC}"
-        echo -e "${YELLOW}提示: '备份目标' 是 '远程端' + 具体路径 (例如 mydrive:/backups)。${NC}"
+        echo -e "提示: '备份目标' 是 '远程端' + 具体路径 (例如 mydrive:/backups)。"
         echo ""
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
         echo -e "  1. ${YELLOW}查看、管理和启用备份目标${NC}"
@@ -1223,7 +1175,7 @@ set_cloud_storage() {
 
         case $choice in
             1) view_and_manage_rclone_targets ;;
-            2) create_rclone_remote_wizard || true ;; # Added || true to prevent script exit on sub-function error
+            2) create_rclone_remote_wizard || true ;;
             3) test_rclone_remotes ;;
             4) set_bandwidth_limit ;;
             5) toggle_integrity_check ;;
@@ -1241,23 +1193,71 @@ set_cloud_storage() {
 }
 
 
-# --- 【新功能】管理 Telegram 机器人的子菜单 ---
+# ==============================================================================
+# ===                      新版消息通知模块 (JSON 版本)                      ===
+# ==============================================================================
+
+# --- JSON 配置文件辅助函数 ---
+
+# 加载 Telegram Bot 配置, 如果文件不存在则返回空数组
+load_telegram_bots() {
+    if [[ ! -f "$TELEGRAM_BOTS_CONFIG_FILE" ]]; then
+        echo "[]"
+        return
+    fi
+    jq '.' "$TELEGRAM_BOTS_CONFIG_FILE" 2>/dev/null || echo "[]"
+}
+
+# 保存 Telegram Bot 配置
+save_telegram_bots() {
+    local bots_json="$1"
+    echo "$bots_json" | jq '.' > "$TELEGRAM_BOTS_CONFIG_FILE"
+    chmod 600 "$TELEGRAM_BOTS_CONFIG_FILE" 2>/dev/null
+}
+
+# 加载 Email 发件人配置, 如果文件不存在则返回空数组
+load_email_senders() {
+    if [[ ! -f "$EMAIL_SENDERS_CONFIG_FILE" ]]; then
+        echo "[]"
+        return
+    fi
+    jq '.' "$EMAIL_SENDERS_CONFIG_FILE" 2>/dev/null || echo "[]"
+}
+
+# 保存 Email 发件人配置
+save_email_senders() {
+    local senders_json="$1"
+    echo "$senders_json" | jq '.' > "$EMAIL_SENDERS_CONFIG_FILE"
+    chmod 600 "$EMAIL_SENDERS_CONFIG_FILE" 2>/dev/null
+}
+
+
+# --- Telegram 管理模块 ---
+
 manage_telegram_bots() {
     while true; do
         display_header
-        echo -e "${BLUE}--- 管理 Telegram 机器人 ---${NC}"
+        echo -e "${BLUE}=== 管理 Telegram 机器人 ===${NC}"
+        
+        local bots_json
+        bots_json=$(load_telegram_bots)
+        local bot_count
+        bot_count=$(echo "$bots_json" | jq 'length')
 
-        if [ ${#TELEGRAM_BOTS_ARRAY[@]} -eq 0 ]; then
-            log_warn "当前没有配置任何 Telegram 机器人。"
+        if [[ "$bot_count" -eq 0 ]]; then
+            log_warn "当前未配置任何 Telegram 机器人。"
         else
             echo "已配置的机器人列表:"
-            for i in "${!TELEGRAM_BOTS_ARRAY[@]}"; do
-                IFS="$NOTIFICATION_FIELD_DELIMITER" read -r alias token chat_id enabled <<< "${TELEGRAM_BOTS_ARRAY[$i]}"
-                local status_text=$([[ "$enabled" == "true" ]] && echo -e "[${GREEN}已启用${NC}]" || echo -e "[${YELLOW}已禁用${NC}]")
-                echo "  $((i+1)). 别名: ${alias} ${status_text}"
+            for i in $(seq 0 $((bot_count - 1))); do
+                local alias enabled status
+                # 提取数据，确保在 jq 失败时有默认值，防止脚本退出
+                alias=$(echo "$bots_json" | jq -r ".[$i].alias" 2>/dev/null || echo "无效条目")
+                enabled=$(echo "$bots_json" | jq -r ".[$i].enabled" 2>/dev/null || echo "false")
+                status=$([[ "$enabled" == "true" ]] && echo -e "[${GREEN}已启用${NC}]" || echo "[已禁用]")
+                echo -e "  $((i+1)). ${alias} ${status}"
             done
         fi
-
+        
         echo ""
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
         echo "  a - 添加新机器人"
@@ -1265,59 +1265,66 @@ manage_telegram_bots() {
         echo "  d - 删除机器人"
         echo "  t - 切换启用/禁用状态"
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo "  0 - 返回"
+        echo -e "  0 - ${RED}返回上一级${NC}"
         read -rp "请输入选项: " choice
 
         case "$choice" in
             a|A)
-                read -rp "请输入机器人别名 (例如: 家庭服务器): " new_alias
-                read -rp "请输入机器人 Bot Token: " new_token
-                read -rp "请输入接收消息的 Chat ID: " new_chat_id
-                if [[ -z "$new_alias" || -z "$new_token" || -z "$new_chat_id" ]]; then
-                    log_error "错误: 别名、Token 和 Chat ID 均不能为空！"
+                read -rp "为机器人起一个别名 (例如: 家庭NAS通知): " new_alias
+                read -rp "请输入 Bot Token: " new_token
+                read -rp "请输入 Chat ID: " new_chat_id
+                if [[ -n "$new_alias" && -n "$new_token" && -n "$new_chat_id" ]]; then
+                    local new_bot
+                    new_bot=$(jq -n --arg alias "$new_alias" --arg token "$new_token" --arg chat_id "$new_chat_id" \
+                        '{alias: $alias, token: $token, chat_id: $chat_id, enabled: true}')
+                    bots_json=$(echo "$bots_json" | jq ". += [$new_bot]")
+                    save_telegram_bots "$bots_json"
+                    log_info "机器人 '${new_alias}' 已添加并启用。"
                 else
-                    local new_bot_entry="${new_alias}${NOTIFICATION_FIELD_DELIMITER}${new_token}${NOTIFICATION_FIELD_DELIMITER}${new_chat_id}${NOTIFICATION_FIELD_DELIMITER}true"
-                    TELEGRAM_BOTS_ARRAY+=("$new_bot_entry")
-                    log_info "机器人 '${new_alias}' 已添加并默认启用。"
-                    save_config
+                    log_error "信息不完整，添加失败。"
                 fi
                 press_enter_to_continue
                 ;;
             m|M)
-                if [ ${#TELEGRAM_BOTS_ARRAY[@]} -eq 0 ]; then log_warn "没有可修改的机器人。"; press_enter_to_continue; continue; fi
+                if [[ "$bot_count" -eq 0 ]]; then log_warn "没有可修改的机器人。"; press_enter_to_continue; continue; fi
                 read -rp "请输入要修改的机器人序号: " index
-                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le ${#TELEGRAM_BOTS_ARRAY[@]} ]; then
-                    local mod_index=$((index - 1))
-                    IFS="$NOTIFICATION_FIELD_DELIMITER" read -r old_alias old_token old_chat_id old_enabled <<< "${TELEGRAM_BOTS_ARRAY[$mod_index]}"
+                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le "$bot_count" ]; then
+                    local real_index=$((index - 1))
+                    local current_alias current_token current_chat_id
+                    current_alias=$(echo "$bots_json" | jq -r ".[$real_index].alias")
+                    current_token=$(echo "$bots_json" | jq -r ".[$real_index].token")
+                    current_chat_id=$(echo "$bots_json" | jq -r ".[$real_index].chat_id")
                     
-                    read -rp "请输入新别名 [${old_alias}]: " new_alias
-                    read -rp "请输入新 Bot Token [留空不修改]: " new_token
-                    read -rp "请输入新 Chat ID [留空不修改]: " new_chat_id
-                    
-                    new_alias="${new_alias:-$old_alias}"
-                    new_token="${new_token:-$old_token}"
-                    new_chat_id="${new_chat_id:-$old_chat_id}"
+                    echo "正在修改 '${current_alias}' (序号: $index)。按 Enter 跳过不修改的项。"
+                    read -rp "新别名 [${current_alias}]: " new_alias
+                    read -rp "新 Bot Token [${current_token:0:8}******]: " new_token
+                    read -rp "新 Chat ID [${current_chat_id}]: " new_chat_id
 
-                    TELEGRAM_BOTS_ARRAY[$mod_index]="${new_alias}${NOTIFICATION_FIELD_DELIMITER}${new_token}${NOTIFICATION_FIELD_DELIMITER}${new_chat_id}${NOTIFICATION_FIELD_DELIMITER}${old_enabled}"
-                    log_info "机器人 '${new_alias}' 信息已更新。"
-                    save_config
+                    bots_json=$(echo "$bots_json" | jq ".[$real_index].alias = \"${new_alias:-$current_alias}\"")
+                    if [[ -n "$new_token" ]]; then
+                        bots_json=$(echo "$bots_json" | jq ".[$real_index].token = \"$new_token\"")
+                    fi
+                    bots_json=$(echo "$bots_json" | jq ".[$real_index].chat_id = \"${new_chat_id:-$current_chat_id}\"")
+                    
+                    save_telegram_bots "$bots_json"
+                    log_info "机器人信息已更新。"
                 else
                     log_error "无效序号。"
                 fi
                 press_enter_to_continue
                 ;;
+
             d|D)
-                if [ ${#TELEGRAM_BOTS_ARRAY[@]} -eq 0 ]; then log_warn "没有可删除的机器人。"; press_enter_to_continue; continue; fi
+                if [[ "$bot_count" -eq 0 ]]; then log_warn "没有可删除的机器人。"; press_enter_to_continue; continue; fi
                 read -rp "请输入要删除的机器人序号: " index
-                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le ${#TELEGRAM_BOTS_ARRAY[@]} ]; then
-                    local del_index=$((index - 1))
-                    IFS="$NOTIFICATION_FIELD_DELIMITER" read -r alias <<< "${TELEGRAM_BOTS_ARRAY[$del_index]}"
-                    read -rp "确定要删除机器人 '${alias}' 吗? (y/N): " confirm
+                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le "$bot_count" ]; then
+                    local alias_to_delete
+                    alias_to_delete=$(echo "$bots_json" | jq -r ".[$((index-1))].alias")
+                    read -rp "确定要删除机器人 '${alias_to_delete}' 吗？(y/N): " confirm
                     if [[ "$confirm" =~ ^[Yy]$ ]]; then
-                        unset 'TELEGRAM_BOTS_ARRAY[$del_index]'
-                        TELEGRAM_BOTS_ARRAY=("${TELEGRAM_BOTS_ARRAY[@]}")
+                        bots_json=$(echo "$bots_json" | jq "del(.[$((index-1))])")
+                        save_telegram_bots "$bots_json"
                         log_info "机器人已删除。"
-                        save_config
                     fi
                 else
                     log_error "无效序号。"
@@ -1325,20 +1332,17 @@ manage_telegram_bots() {
                 press_enter_to_continue
                 ;;
             t|T)
-                if [ ${#TELEGRAM_BOTS_ARRAY[@]} -eq 0 ]; then log_warn "没有可切换状态的机器人。"; press_enter_to_continue; continue; fi
+                if [[ "$bot_count" -eq 0 ]]; then log_warn "没有可切换状态的机器人。"; press_enter_to_continue; continue; fi
                 read -rp "请输入要切换状态的机器人序号: " index
-                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le ${#TELEGRAM_BOTS_ARRAY[@]} ]; then
-                    local tog_index=$((index - 1))
-                    IFS="$NOTIFICATION_FIELD_DELIMITER" read -r alias token chat_id enabled <<< "${TELEGRAM_BOTS_ARRAY[$tog_index]}"
-                    if [[ "$enabled" == "true" ]]; then
-                        enabled="false"
-                        log_warn "机器人 '${alias}' 已禁用。"
-                    else
-                        enabled="true"
-                        log_info "机器人 '${alias}' 已启用。"
-                    fi
-                    TELEGRAM_BOTS_ARRAY[$tog_index]="${alias}${NOTIFICATION_FIELD_DELIMITER}${token}${NOTIFICATION_FIELD_DELIMITER}${chat_id}${NOTIFICATION_FIELD_DELIMITER}${enabled}"
-                    save_config
+                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le "$bot_count" ]; then
+                    local real_index=$((index - 1))
+                    local current_state
+                    current_state=$(echo "$bots_json" | jq ".["$real_index"].enabled")
+                    local new_state
+                    new_state=$([[ "$current_state" == "true" ]] && echo "false" || echo "true")
+                    bots_json=$(echo "$bots_json" | jq ".["$real_index"].enabled = $new_state")
+                    save_telegram_bots "$bots_json"
+                    log_info "机器人状态已更新为: $new_state"
                 else
                     log_error "无效序号。"
                 fi
@@ -1350,33 +1354,33 @@ manage_telegram_bots() {
     done
 }
 
-# --- 【新功能】管理邮件收件人的子子菜单 ---
+
+# --- Email 管理模块 ---
+
 manage_email_recipients() {
     local sender_index="$1"
     
     while true; do
-        IFS="$NOTIFICATION_FIELD_DELIMITER" read -r alias host port user pass from use_tls enabled recipients_str <<< "${EMAIL_SENDERS_ARRAY[$sender_index]}"
+        local senders_json
+        senders_json=$(load_email_senders)
+        local sender_alias
+        sender_alias=$(echo "$senders_json" | jq -r ".[$sender_index].alias")
+        local recipients_json
+        recipients_json=$(echo "$senders_json" | jq ".["$sender_index"].recipients")
         
-        local recipients_array=()
-        if [[ -n "$recipients_str" ]]; then
-            IFS=',' read -r -a recipients_array <<< "$recipients_str"
-        fi
-
         display_header
-        echo -e "${BLUE}--- 管理发件人 '${alias}' 的收件人 ---${NC}"
+        echo -e "${BLUE}=== 管理收件人 for '${sender_alias}' ===${NC}"
         
-        if [ ${#recipients_array[@]} -eq 0 ]; then
-            log_warn "当前没有配置任何收件人。"
+        if [[ "$(echo "$recipients_json" | jq 'length')" -eq 0 ]]; then
+            log_warn "当前没有收件人。"
         else
             echo "收件人列表:"
-            for i in "${!recipients_array[@]}"; do
-                echo "  $((i+1)). ${recipients_array[$i]}"
-            done
+            echo "$recipients_json" | jq -r '.[]' | cat -n
         fi
-        
+
         echo ""
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
-        echo "  a - 添加新收件人"
+        echo "  a - 添加收件人"
         echo "  d - 删除收件人"
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo "  0 - 返回"
@@ -1384,28 +1388,23 @@ manage_email_recipients() {
         
         case "$choice" in
             a|A)
-                read -rp "请输入新的收件人邮箱地址: " new_recipient
-                if [[ -z "$new_recipient" ]]; then
-                    log_error "邮箱地址不能为空！"
+                read -rp "请输入要添加的收件人邮箱地址: " new_recipient
+                if [[ -n "$new_recipient" ]]; then
+                    senders_json=$(echo "$senders_json" | jq ".[$sender_index].recipients += [\"$new_recipient\"] | .[$sender_index].recipients |= unique")
+                    save_email_senders "$senders_json"
+                    log_info "收件人已添加。"
                 else
-                    recipients_array+=("$new_recipient")
-                    recipients_str=$(IFS=,; echo "${recipients_array[*]}")
-                    EMAIL_SENDERS_ARRAY[$sender_index]="${alias}${NOTIFICATION_FIELD_DELIMITER}${host}${NOTIFICATION_FIELD_DELIMITER}${port}${NOTIFICATION_FIELD_DELIMITER}${user}${NOTIFICATION_FIELD_DELIMITER}${pass}${NOTIFICATION_FIELD_DELIMITER}${from}${NOTIFICATION_FIELD_DELIMITER}${use_tls}${NOTIFICATION_FIELD_DELIMITER}${enabled}${NOTIFICATION_FIELD_DELIMITER}${recipients_str}"
-                    log_info "收件人 '${new_recipient}' 已添加。"
-                    save_config
+                    log_error "邮箱地址不能为空。"
                 fi
                 press_enter_to_continue
                 ;;
             d|D)
-                if [ ${#recipients_array[@]} -eq 0 ]; then log_warn "没有可删除的收件人。"; press_enter_to_continue; continue; fi
-                read -rp "请输入要删除的收件人序号: " del_idx
-                if [[ "$del_idx" =~ ^[0-9]+$ ]] && [ "$del_idx" -ge 1 ] && [ "$del_idx" -le ${#recipients_array[@]} ]; then
-                    unset 'recipients_array[$((del_idx-1))]'
-                    recipients_array=("${recipients_array[@]}")
-                    recipients_str=$(IFS=,; echo "${recipients_array[*]}")
-                    EMAIL_SENDERS_ARRAY[$sender_index]="${alias}${NOTIFICATION_FIELD_DELIMITER}${host}${NOTIFICATION_FIELD_DELIMITER}${port}${NOTIFICATION_FIELD_DELIMITER}${user}${NOTIFICATION_FIELD_DELIMITER}${pass}${NOTIFICATION_FIELD_DELIMITER}${from}${NOTIFICATION_FIELD_DELIMITER}${use_tls}${NOTIFICATION_FIELD_DELIMITER}${enabled}${NOTIFICATION_FIELD_DELIMITER}${recipients_str}"
+                if [[ "$(echo "$recipients_json" | jq 'length')" -eq 0 ]]; then log_warn "没有可删除的收件人。"; press_enter_to_continue; continue; fi
+                read -rp "请输入要删除的收件人序号: " recipient_index
+                if [[ "$recipient_index" =~ ^[0-9]+$ ]] && [ "$recipient_index" -ge 1 ] && [ "$recipient_index" -le "$(echo "$recipients_json" | jq 'length')" ]; then
+                    senders_json=$(echo "$senders_json" | jq "del(.[$sender_index].recipients[$((recipient_index-1))])")
+                    save_email_senders "$senders_json"
                     log_info "收件人已删除。"
-                    save_config
                 else
                     log_error "无效序号。"
                 fi
@@ -1417,97 +1416,120 @@ manage_email_recipients() {
     done
 }
 
-# --- 【新功能】管理邮件发件人的子菜单 ---
 manage_email_senders() {
-    while true; do
+     while true; do
         display_header
-        echo -e "${BLUE}--- 管理邮件发件人 ---${NC}"
+        echo -e "${BLUE}=== 管理邮件发件人 ===${NC}"
+        
+        local senders_json
+        senders_json=$(load_email_senders)
+        local sender_count
+        sender_count=$(echo "$senders_json" | jq 'length')
 
-        if [ ${#EMAIL_SENDERS_ARRAY[@]} -eq 0 ]; then
-            log_warn "当前没有配置任何邮件发件人。"
+        if [[ "$sender_count" -eq 0 ]]; then
+            log_warn "当前未配置任何邮件发件人。"
         else
             echo "已配置的发件人列表:"
-            for i in "${!EMAIL_SENDERS_ARRAY[@]}"; do
-                IFS="$NOTIFICATION_FIELD_DELIMITER" read -r alias host port user pass from use_tls enabled recipients_str <<< "${EMAIL_SENDERS_ARRAY[$i]}"
-                local status_text=$([[ "$enabled" == "true" ]] && echo -e "[${GREEN}已启用${NC}]" || echo -e "[${YELLOW}已禁用${NC}]")
-                local recipient_count=0
-                if [[ -n "$recipients_str" ]]; then
-                    recipient_count=$(grep -o "," <<< "$recipients_str" | wc -l)
-                    ((recipient_count++))
-                fi
-                echo "  $((i+1)). 别名: ${alias} (发件人: ${from}, 收件人: ${recipient_count}个) ${status_text}"
+            for i in $(seq 0 $((sender_count - 1))); do
+                local alias enabled status recipients_count
+                alias=$(echo "$senders_json" | jq -r ".[$i].alias" 2>/dev/null || echo "无效条目")
+                enabled=$(echo "$senders_json" | jq -r ".[$i].enabled" 2>/dev/null || echo "false")
+                recipients_count=$(echo "$senders_json" | jq ".[$i].recipients | length" 2>/dev/null || echo "0")
+                status=$([[ "$enabled" == "true" ]] && echo -e "[${GREEN}已启用${NC}]" || echo "[已禁用]")
+                echo -e "  $((i+1)). ${alias} (收件人: ${recipients_count}) ${status}"
             done
         fi
         
         echo ""
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
         echo "  a - 添加新发件人"
-        echo "  m - 修改发件人配置"
-        echo "  r - 管理收件人列表"
+        echo "  m - 修改发件人"
+        echo "  r - 管理收件人"
         echo "  d - 删除发件人"
         echo "  t - 切换启用/禁用状态"
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo "  0 - 返回"
+        echo -e "  0 - ${RED}返回上一级${NC}"
         read -rp "请输入选项: " choice
 
         case "$choice" in
             a|A)
-                echo -e "${RED}警告: 密码将以明文形式保存在本地配置文件中！请确保文件安全。${NC}"
-                read -rp "请输入发件人别名 (例如: QQ邮箱): " new_alias
+                echo "--- 添加新发件人 ---"
+                read -rp "为发件人起一个别名 (例如: 公司邮箱): " new_alias
                 read -rp "SMTP 服务器地址 (例如: smtp.qq.com): " new_host
                 read -rp "SMTP 端口 (例如: 465 或 587): " new_port
                 read -rp "发件人邮箱地址: " new_from
                 read -rp "SMTP 用户名 (通常等于发件人): " new_user
-                read -s -rp "SMTP 密码/授权码: " new_pass
-                echo ""
-                read -rp "是否使用 TLS/SSL 加密? (Y/n): " new_use_tls_choice
-                local new_use_tls=$([[ "$new_use_tls_choice" =~ ^[Nn]$ ]] && echo "false" || echo "true")
-                read -rp "请输入至少一个收件人邮箱地址 (多个用逗号','隔开): " new_recipients_str
+                read -s -rp "SMTP 密码/授权码: " new_pass; echo
+                read -rp "是否使用 TLS 加密 (y/N): " use_tls_choice
+                local new_use_tls=$([[ "$use_tls_choice" =~ ^[Yy]$ ]] && echo "true" || echo "false")
 
-                if [[ -z "$new_alias" || -z "$new_host" || -z "$new_port" || -z "$new_from" || -z "$new_user" || -z "$new_pass" || -z "$new_recipients_str" ]]; then
-                    log_error "错误: 除密码外，所有字段都不能为空！"
+                if [[ -n "$new_alias" && -n "$new_host" && -n "$new_port" && -n "$new_user" && -n "$new_pass" && -n "$new_from" ]]; then
+                    local new_sender
+                    new_sender=$(jq -n \
+                        --arg alias "$new_alias" --arg host "$new_host" --arg port "$new_port" \
+                        --arg user "$new_user" --arg pass "$new_pass" --arg from "$new_from" \
+                        --argjson use_tls "$new_use_tls" \
+                        '{alias: $alias, host: $host, port: $port, user: $user, pass: $pass, from: $from, use_tls: $use_tls, enabled: true, recipients: []}')
+                    
+                    senders_json=$(echo "$senders_json" | jq ". += [$new_sender]")
+                    save_email_senders "$senders_json"
+                    log_info "发件人 '${new_alias}' 已添加。请记得为其 '管理收件人'。"
                 else
-                    local new_sender_entry="${new_alias}${NOTIFICATION_FIELD_DELIMITER}${new_host}${NOTIFICATION_FIELD_DELIMITER}${new_port}${NOTIFICATION_FIELD_DELIMITER}${new_user}${NOTIFICATION_FIELD_DELIMITER}${new_pass}${NOTIFICATION_FIELD_DELIMITER}${new_from}${NOTIFICATION_FIELD_DELIMITER}${new_use_tls}${NOTIFICATION_FIELD_DELIMITER}true${NOTIFICATION_FIELD_DELIMITER}${new_recipients_str}"
-                    EMAIL_SENDERS_ARRAY+=("$new_sender_entry")
-                    log_info "发件人 '${new_alias}' 已添加并默认启用。"
-                    save_config
+                    log_error "信息不完整，添加失败。"
                 fi
                 press_enter_to_continue
                 ;;
             m|M)
-                if [ ${#EMAIL_SENDERS_ARRAY[@]} -eq 0 ]; then log_warn "没有可修改的发件人。"; press_enter_to_continue; continue; fi
+                if [[ "$sender_count" -eq 0 ]]; then log_warn "没有可修改的发件人。"; press_enter_to_continue; continue; fi
                 read -rp "请输入要修改的发件人序号: " index
-                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le ${#EMAIL_SENDERS_ARRAY[@]} ]; then
-                    local mod_index=$((index - 1))
-                    IFS="$NOTIFICATION_FIELD_DELIMITER" read -r old_alias old_host old_port old_user old_pass old_from old_use_tls old_enabled old_recipients_str <<< "${EMAIL_SENDERS_ARRAY[$mod_index]}"
+                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le "$sender_count" ]; then
+                    local real_index=$((index - 1))
                     
-                    read -rp "新别名 [${old_alias}]: " new_alias
-                    read -rp "新SMTP地址 [${old_host}]: " new_host
-                    read -rp "新SMTP端口 [${old_port}]: " new_port
-                    read -rp "新发件人地址 [${old_from}]: " new_from
-                    read -rp "新SMTP用户名 [${old_user}]: " new_user
-                    read -s -rp "新SMTP密码 [留空不修改]: " new_pass
-                    echo ""
-                    
-                    new_alias="${new_alias:-$old_alias}"
-                    new_host="${new_host:-$old_host}"
-                    new_port="${new_port:-$old_port}"
-                    new_from="${new_from:-$old_from}"
-                    new_user="${new_user:-$old_user}"
-                    [[ -n "$new_pass" ]] && old_pass="$new_pass"
+                    local current_data
+                    current_data=$(echo "$senders_json" | jq ".[$real_index]")
+                    local current_alias current_host current_port current_user current_from current_use_tls
+                    current_alias=$(echo "$current_data" | jq -r '.alias')
+                    current_host=$(echo "$current_data" | jq -r '.host')
+                    current_port=$(echo "$current_data" | jq -r '.port')
+                    current_user=$(echo "$current_data" | jq -r '.user')
+                    current_from=$(echo "$current_data" | jq -r '.from')
+                    current_use_tls=$(echo "$current_data" | jq -r '.use_tls')
 
-                    EMAIL_SENDERS_ARRAY[$mod_index]="${new_alias}${NOTIFICATION_FIELD_DELIMITER}${new_host}${NOTIFICATION_FIELD_DELIMITER}${new_port}${NOTIFICATION_FIELD_DELIMITER}${new_user}${NOTIFICATION_FIELD_DELIMITER}${old_pass}${NOTIFICATION_FIELD_DELIMITER}${new_from}${NOTIFICATION_FIELD_DELIMITER}${old_use_tls}${NOTIFICATION_FIELD_DELIMITER}${old_enabled}${NOTIFICATION_FIELD_DELIMITER}${old_recipients_str}"
-                    log_info "发件人 '${new_alias}' 信息已更新。"
-                    save_config
+                    echo "正在修改 '${current_alias}' (序号: $index)。按 Enter 跳过不修改的项。"
+                    read -rp "新别名 [${current_alias}]: " new_alias
+                    read -rp "新 SMTP Host [${current_host}]: " new_host
+                    read -rp "新 SMTP Port [${current_port}]: " new_port
+                    read -rp "新发件人地址 [${current_from}]: " new_from
+                    read -rp "新 SMTP 用户名 [${current_user}]: " new_user
+                    read -s -rp "新 SMTP 密码 [留空不修改]: " new_pass; echo
+                    read -rp "是否使用 TLS (当前: ${current_use_tls}) (y/n/留空): " use_tls_choice
+
+                    senders_json=$(echo "$senders_json" | jq ".[$real_index].alias = \"${new_alias:-$current_alias}\"")
+                    senders_json=$(echo "$senders_json" | jq ".[$real_index].host = \"${new_host:-$current_host}\"")
+                    senders_json=$(echo "$senders_json" | jq ".[$real_index].port = \"${new_port:-$current_port}\"")
+                    senders_json=$(echo "$senders_json" | jq ".[$real_index].from = \"${new_from:-$current_from}\"")
+                    senders_json=$(echo "$senders_json" | jq ".[$real_index].user = \"${new_user:-$current_user}\"")
+
+                    if [[ -n "$new_pass" ]]; then
+                        senders_json=$(echo "$senders_json" | jq ".[$real_index].pass = \"$new_pass\"")
+                    fi
+                    if [[ "$use_tls_choice" =~ ^[Yy]$ ]]; then
+                        senders_json=$(echo "$senders_json" | jq ".[$real_index].use_tls = true")
+                    elif [[ "$use_tls_choice" =~ ^[Nn]$ ]]; then
+                        senders_json=$(echo "$senders_json" | jq ".[$real_index].use_tls = false")
+                    fi
+
+                    save_email_senders "$senders_json"
+                    log_info "发件人信息已更新。"
                 else
                     log_error "无效序号。"
                 fi
                 press_enter_to_continue
                 ;;
             r|R)
-                if [ ${#EMAIL_SENDERS_ARRAY[@]} -eq 0 ]; then log_warn "没有可管理的发件人。"; press_enter_to_continue; continue; fi
+                if [[ "$sender_count" -eq 0 ]]; then log_warn "没有发件人可管理。"; press_enter_to_continue; continue; fi
                 read -rp "请输入要管理收件人的发件人序号: " index
-                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le ${#EMAIL_SENDERS_ARRAY[@]} ]; then
+                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le "$sender_count" ]; then
                     manage_email_recipients "$((index - 1))"
                 else
                     log_error "无效序号。"
@@ -1515,17 +1537,16 @@ manage_email_senders() {
                 fi
                 ;;
             d|D)
-                if [ ${#EMAIL_SENDERS_ARRAY[@]} -eq 0 ]; then log_warn "没有可删除的发件人。"; press_enter_to_continue; continue; fi
+                if [[ "$sender_count" -eq 0 ]]; then log_warn "没有可删除的发件人。"; press_enter_to_continue; continue; fi
                 read -rp "请输入要删除的发件人序号: " index
-                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le ${#EMAIL_SENDERS_ARRAY[@]} ]; then
-                    local del_index=$((index - 1))
-                    IFS="$NOTIFICATION_FIELD_DELIMITER" read -r alias <<< "${EMAIL_SENDERS_ARRAY[$del_index]}"
-                    read -rp "确定要删除发件人 '${alias}' 吗? (y/N): " confirm
+                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le "$sender_count" ]; then
+                    local alias_to_delete
+                    alias_to_delete=$(echo "$senders_json" | jq -r ".[$((index-1))].alias")
+                    read -rp "确定要删除发件人 '${alias_to_delete}' 吗？(y/N): " confirm
                     if [[ "$confirm" =~ ^[Yy]$ ]]; then
-                        unset 'EMAIL_SENDERS_ARRAY[$del_index]'
-                        EMAIL_SENDERS_ARRAY=("${EMAIL_SENDERS_ARRAY[@]}")
+                        senders_json=$(echo "$senders_json" | jq "del(.[$((index-1))])")
+                        save_email_senders "$senders_json"
                         log_info "发件人已删除。"
-                        save_config
                     fi
                 else
                     log_error "无效序号。"
@@ -1533,20 +1554,16 @@ manage_email_senders() {
                 press_enter_to_continue
                 ;;
             t|T)
-                if [ ${#EMAIL_SENDERS_ARRAY[@]} -eq 0 ]; then log_warn "没有可切换状态的发件人。"; press_enter_to_continue; continue; fi
+                if [[ "$sender_count" -eq 0 ]]; then log_warn "没有可切换状态的发件人。"; press_enter_to_continue; continue; fi
                 read -rp "请输入要切换状态的发件人序号: " index
-                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le ${#EMAIL_SENDERS_ARRAY[@]} ]; then
-                    local tog_index=$((index - 1))
-                    IFS="$NOTIFICATION_FIELD_DELIMITER" read -r alias host port user pass from use_tls enabled recipients_str <<< "${EMAIL_SENDERS_ARRAY[$tog_index]}"
-                    if [[ "$enabled" == "true" ]]; then
-                        enabled="false"
-                        log_warn "发件人 '${alias}' 已禁用。"
-                    else
-                        enabled="true"
-                        log_info "发件人 '${alias}' 已启用。"
-                    fi
-                    EMAIL_SENDERS_ARRAY[$tog_index]="${alias}${NOTIFICATION_FIELD_DELIMITER}${host}${NOTIFICATION_FIELD_DELIMITER}${port}${NOTIFICATION_FIELD_DELIMITER}${user}${NOTIFICATION_FIELD_DELIMITER}${pass}${NOTIFICATION_FIELD_DELIMITER}${from}${NOTIFICATION_FIELD_DELIMITER}${use_tls}${NOTIFICATION_FIELD_DELIMITER}${enabled}${NOTIFICATION_FIELD_DELIMITER}${recipients_str}"
-                    save_config
+                 if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le "$sender_count" ]; then
+                    local real_index=$((index - 1))
+                    local current_state new_state
+                    current_state=$(echo "$senders_json" | jq ".["$real_index"].enabled")
+                    new_state=$([[ "$current_state" == "true" ]] && echo "false" || echo "true")
+                    senders_json=$(echo "$senders_json" | jq ".["$real_index"].enabled = $new_state")
+                    save_email_senders "$senders_json"
+                    log_info "发件人状态已更新为: $new_state"
                 else
                     log_error "无效序号。"
                 fi
@@ -1559,90 +1576,16 @@ manage_email_senders() {
 }
 
 
-# --- 【新功能】发送测试通知的子菜单 ---
-send_test_notification_menu() {
-    display_header
-    echo -e "${BLUE}--- 发送测试通知 ---${NC}"
-    
-    local testable_options=()
-    local testable_configs=()
-
-    # 收集可测试的 Telegram 机器人
-    for bot_config in "${TELEGRAM_BOTS_ARRAY[@]}"; do
-        IFS="$NOTIFICATION_FIELD_DELIMITER" read -r alias token chat_id enabled <<< "$bot_config"
-        if [[ "$enabled" == "true" ]]; then
-            testable_options+=("Telegram 机器人: ${alias}")
-            testable_configs+=("tg${NOTIFICATION_FIELD_DELIMITER}${token}${NOTIFICATION_FIELD_DELIMITER}${chat_id}")
-        fi
-    done
-
-    # 收集可测试的邮件发件人
-    for sender_config in "${EMAIL_SENDERS_ARRAY[@]}"; do
-        IFS="$NOTIFICATION_FIELD_DELIMITER" read -r alias host port user pass from use_tls enabled recipients_str <<< "$sender_config"
-        if [[ "$enabled" == "true" ]]; then
-            testable_options+=("邮件发件人: ${alias}")
-            testable_configs+=("email${NOTIFICATION_FIELD_DELIMITER}${sender_config}")
-        fi
-    done
-
-    if [ ${#testable_options[@]} -eq 0 ]; then
-        log_warn "没有已启用的通知方式可供测试。"
-        press_enter_to_continue
-        return
-    fi
-    
-    echo "请选择要测试的通知方式:"
-    for i in "${!testable_options[@]}"; do
-        echo "  $((i+1)). ${testable_options[$i]}"
-    done
-    echo "  0. 取消"
-    read -rp "请输入选项: " test_choice
-
-    if [[ "$test_choice" -eq 0 ]] || ! [[ "$test_choice" =~ ^[0-9]+$ ]] || [ "$test_choice" -gt ${#testable_options[@]} ]; then
-        log_info "已取消测试。"
-        press_enter_to_continue
-        return
-    fi
-
-    local selected_config="${testable_configs[$((test_choice-1))]}"
-
-    local test_subject="[${SCRIPT_NAME}] 测试通知"
-    local day_of_week_cn
-    case "$(date +%u)" in
-        1) day_of_week_cn="星期一";; 2) day_of_week_cn="星期二";; 3) day_of_week_cn="星期三";;
-        4) day_of_week_cn="星期四";; 5) day_of_week_cn="星期五";; 6) day_of_week_cn="星期六";;
-        7) day_of_week_cn="星期日";;
-    esac
-    local am_pm_cn=$([[ "$(date +%H)" -ge 12 ]] && echo "下午" || echo "上午")
-    local test_date_line="$(date "+%Y 年 %-m 月 %-d 日 ${day_of_week_cn} ${am_pm_cn} %-I 点 %-M 分 %-S 秒")"
-
-    if [[ "${selected_config}" == tg* ]]; then
-        IFS="$NOTIFICATION_FIELD_DELIMITER" read -r type token chat_id <<< "$selected_config"
-        local test_body="这是一条来自脚本的 Telegram 测试消息。如果您收到此消息，说明此机器人配置正确。"$'\n'"- ${test_date_line}"
-        _send_telegram_worker "$token" "$chat_id" "$test_body"
-    elif [[ "${selected_config}" == email* ]]; then
-        local sender_data="${selected_config#*${NOTIFICATION_FIELD_DELIMITER}}"
-        IFS="$NOTIFICATION_FIELD_DELIMITER" read -r alias host port user pass from use_tls enabled recipients_str <<< "$sender_data"
-        local recipients_array=()
-        IFS=',' read -r -a recipients_array <<< "$recipients_str"
-        local test_body="这是一条来自脚本的邮件测试消息。如果您收到此消息，说明此发件人配置正确。"$'\n'"- ${test_date_line}"
-        _send_email_worker "$host" "$port" "$user" "$pass" "$from" "$use_tls" "$test_subject" "$test_body" "${recipients_array[@]}"
-    fi
-    
-    press_enter_to_continue
-}
-
-
-# --- 【重大重构】全新的通知设定菜单 ---
+# --- 主通知设定菜单 ---
 set_notification_settings() {
     while true; do
         display_header
         echo -e "${BLUE}=== 6. 消息通知设定 ===${NC}"
-        
+        echo "此菜单用于管理所有通知方式 (Telegram, 邮件等)。"
         echo ""
-        echo -e "${BLUE}━━━━━━━━━━━━━━ 通知方式管理 ━━━━━━━━━━━━━━${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
         echo -e "  1. ${YELLOW}管理 Telegram 机器人${NC}"
-        echo -e "  2. ${YELLOW}管理 邮件 发件人${NC}"
+        echo -e "  2. ${YELLOW}管理 邮件发件人${NC}"
         echo -e "  3. ${YELLOW}发送测试通知${NC}"
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo -e "  0. ${RED}返回主菜单${NC}"
@@ -1653,8 +1596,106 @@ set_notification_settings() {
             2) manage_email_senders ;;
             3) send_test_notification_menu ;;
             0) break ;;
+            *) log_error "无效选项。"; press_enter_to_continue ;;
+        esac
+    done
+}
+
+# --- [新增 & 修复] 发送测试通知的专用菜单 ---
+send_test_notification_menu() {
+    while true; do
+        display_header
+        echo -e "${BLUE}=== 消息通知设定 -> 发送测试通知 ===${NC}"
+
+        local all_configs=()
+        local idx=1
+
+        # 加载并显示 Telegram 配置
+        local bots_json=$(load_telegram_bots)
+        if [[ "$(echo "$bots_json" | jq 'length')" -gt 0 ]]; then
+            echo "--- Telegram 机器人 ---"
+            local temp_bots_configs
+            mapfile -t temp_bots_configs < <(echo "$bots_json" | jq -c '.[]')
+            for bot_config in "${temp_bots_configs[@]}"; do
+                local alias enabled status
+                alias=$(echo "$bot_config" | jq -r '.alias')
+                enabled=$(echo "$bot_config" | jq -r '.enabled')
+                status=$([[ "$enabled" == "true" ]] && echo -e "${GREEN}已启用${NC}" || echo "已禁用")
+                echo "  ${idx}. [TG] ${alias} (${status})"
+                all_configs+=("tg_bot||$bot_config")
+                ((idx++))
+            done
+        fi
+
+        # 加载并显示 Email 配置
+        local senders_json=$(load_email_senders)
+        if [[ "$(echo "$senders_json" | jq 'length')" -gt 0 ]]; then
+            echo "--- 邮件发件人 ---"
+            local temp_senders_configs
+            mapfile -t temp_senders_configs < <(echo "$senders_json" | jq -c '.[]')
+            for sender_config in "${temp_senders_configs[@]}"; do
+                local alias enabled status
+                alias=$(echo "$sender_config" | jq -r '.alias')
+                enabled=$(echo "$sender_config" | jq -r '.enabled')
+                status=$([[ "$enabled" == "true" ]] && echo -e "${GREEN}已启用${NC}" || echo "已禁用")
+                echo "  ${idx}. [Mail] ${alias} (${status})"
+                all_configs+=("email_sender||$sender_config")
+                ((idx++))
+            done
+        fi
+
+        if [ ${#all_configs[@]} -eq 0 ]; then
+            log_warn "没有配置任何通知方式。请先在 '消息通知设定' 中添加。"
+            press_enter_to_continue
+            break
+        fi
+
+        echo ""
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+        echo "  (输入上方序号以单独测试)"
+        echo "  a - 测试所有已启用的通知"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  0 - ${RED}返回上一级${NC}"
+        read -rp "请输入选项: " choice
+
+        # --- 测试消息内容准备 ---
+        local day_of_week_cn; day_of_week_cn=$(LC_ALL=C date '+"%A"' | sed -e 's/Sunday/星期日/' -e 's/Monday/星期一/' -e 's/Tuesday/星期二/' -e 's/Wednesday/星期三/' -e 's/Thursday/星期四/' -e 's/Friday/星期五/' -e 's/Saturday/星期六/')
+        local am_pm_cn; am_pm_cn=$([[ $(date +%H) -ge 12 ]] && echo "下午" || echo "上午")
+        local test_date_line; test_date_line="$(date "+%Y 年 %-m 月 %-d 日 ${day_of_week_cn} ${am_pm_cn} %-I 点 %-M 分 %-S 秒")（中国标准时间）"
+        local test_subject="[${SCRIPT_NAME}] 测试通知"
+        
+        case "$choice" in
+            a|A)
+                log_info "正在向所有已启用的通知方式发送测试消息..."
+                local test_body_all="这是一条对所有已启用通道的群发测试消息。"$'\n'"- ${test_date_line}"
+                send_notification "$test_body_all" "$test_subject"
+                press_enter_to_continue
+                ;;
+            0) break ;;
             *)
-                log_error "无效选项。"
+                if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#all_configs[@]} ]; then
+                    local config_line="${all_configs[$((choice-1))]}"
+                    local config_type="${config_line%%||*}"
+                    local config_json="${config_line#*||}"
+                    local alias enabled
+                    alias=$(echo "$config_json" | jq -r '.alias')
+                    enabled=$(echo "$config_json" | jq -r '.enabled')
+
+                    if [[ "$enabled" != "true" ]]; then
+                        log_warn "该配置 (${alias}) 未启用，无法发送测试。"
+                    else
+                        log_info "正在为 [${alias}] 发送测试消息..."
+                        if [[ "$config_type" == "tg_bot" ]]; then
+                            local test_body_tg="这是一条来自脚本的测试消息。如果您收到此消息，说明您的 'Telegram' 通知配置正确。"$'\n'"- ${test_date_line}"
+                            send_telegram_message "$config_json" "$test_body_tg" || true
+                        elif [[ "$config_type" == "email_sender" ]]; then
+                             local test_body_email="这是一条来自脚本的测试消息。如果您收到此消息，说明您的 '邮件' 通知配置正确。"$'\n'"- ${test_date_line}"
+                            send_email_message "$config_json" "$test_body_email" "$test_subject" || true
+                        fi
+                    fi
+                else
+                    log_error "无效选项。"
+                fi
                 press_enter_to_continue
                 ;;
         esac
@@ -1666,7 +1707,7 @@ set_retention_policy() {
     while true; do
         display_header
         echo -e "${BLUE}=== 7. 设置备份保留策略 (云端) ===${NC}"
-        echo -e "${YELLOW}请注意：此策略仅对“归档模式”生成的备份文件有效。${NC}"
+        echo -e "请注意：此策略仅对“归档模式”生成的备份文件有效。"
         echo "当前策略: "
         case "$RETENTION_POLICY_TYPE" in
             "none") echo -e "  无保留策略（所有备份将保留）" ;;
@@ -1722,7 +1763,6 @@ set_retention_policy() {
 }
 
 
-# [修改] 不再直接发送消息，而是构建报告片段并附加到全局变量
 apply_retention_policy() {
     log_info "--- 正在应用备份保留策略 (Rclone) ---"
 
@@ -1830,14 +1870,12 @@ check_temp_space() {
 
     if [[ "$available_space_kb" -lt "$required_space_kb" ]]; then
         log_error "临时目录空间不足！"
-        # [修改] 不再发送消息，而是设置全局失败原因
         GLOBAL_NOTIFICATION_FAILURE_REASON="临时目录空间不足 (需要 ~${required_hr}, 可用 ${available_hr})"
         return 1
     fi
     return 0
 }
 
-# [修改] 重构以支持新的报告系统
 perform_sync_backup() {
     local backup_type="$1"
     local total_paths_to_backup=${#BACKUP_SOURCE_PATHS_ARRAY[@]}
@@ -1873,14 +1911,16 @@ perform_sync_backup() {
         for enabled_idx in "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}"; do
             local rclone_target="${RCLONE_TARGETS_ARRAY[$enabled_idx]}"
             local sync_destination="${rclone_target%/}/${path_basename}"
+            local formatted_target
+            formatted_target=$(echo "$rclone_target" | sed 's/:/: /')
             
             log_info "正在同步 ${path_to_sync} 到 ${sync_destination}..."
             if rclone sync "$path_to_sync" "$sync_destination" --progress ${bw_limit_arg}; then
                 log_info "同步到 ${rclone_target} 成功！"
-                path_sync_block+=$'\n'"${rclone_target} ✅ 同步成功"
+                path_sync_block+=$'\n'"${formatted_target} ✅ 同步成功"
             else
                 log_error "同步到 ${rclone_target} 失败！"
-                path_sync_block+=$'\n'"${rclone_target} ❌ 同步失败"
+                path_sync_block+=$'\n'"${formatted_target} ❌ 同步失败"
                 path_has_failure="true"
                 any_sync_failed="true"
             fi
@@ -1895,14 +1935,12 @@ perform_sync_backup() {
     return 0
 }
 
-# [修改] 重构以支持新的报告系统
 perform_archive_backup() {
     local backup_type="$1"
     local total_paths_to_backup=${#BACKUP_SOURCE_PATHS_ARRAY[@]}
 
     log_info "--- ${backup_type} 过程开始 (归档模式) ---"
 
-    # [新增] 根据配置决定是否检查空间
     if [[ "$ENABLE_SPACE_CHECK" == "true" ]]; then
         if ! check_temp_space; then
             return 1
@@ -2006,16 +2044,13 @@ perform_archive_backup() {
     fi
 }
 
-
-# [修改] 核心备份函数，现在负责发送开始和结束的通知摘要
 perform_backup() {
     local backup_type="$1"
     
     # --- 通知报告生成 ---
-    # 初始化全局报告变量
     GLOBAL_NOTIFICATION_REPORT_BODY=""
     GLOBAL_NOTIFICATION_FAILURE_REASON=""
-    GLOBAL_NOTIFICATION_OVERALL_STATUS="success" # 假设成功，直到有失败发生
+    GLOBAL_NOTIFICATION_OVERALL_STATUS="success"
 
     local readable_time
     readable_time=$(date '+%Y-%m-%d %H:%M:%S')
@@ -2055,13 +2090,12 @@ perform_backup() {
     local final_status_emoji="✅"
     local final_status_text="备份完成"
 
-    # 检查由子函数设置的全局状态标志
     if [[ "$GLOBAL_NOTIFICATION_OVERALL_STATUS" != "success" ]] || [[ "$backup_result" -ne 0 ]]; then
         final_status_emoji="❌"
         final_status_text="备份失败"
         final_subject+="${final_status_text}"
         if [[ -n "$GLOBAL_NOTIFICATION_FAILURE_REASON" ]]; then
-                GLOBAL_NOTIFICATION_REPORT_BODY+=$'\n\n'"原因：${GLOBAL_NOTIFICATION_FAILURE_REASON}"
+             GLOBAL_NOTIFICATION_REPORT_BODY+=$'\n\n'"原因：${GLOBAL_NOTIFICATION_FAILURE_REASON}"
         fi
     else
         final_subject+="备份成功"
@@ -2071,14 +2105,12 @@ perform_backup() {
 
     local final_footer="${final_status_emoji} 状态：${final_status_text}"
 
-    # 移除可能存在的前导换行符
     GLOBAL_NOTIFICATION_REPORT_BODY="${GLOBAL_NOTIFICATION_REPORT_BODY#"${GLOBAL_NOTIFICATION_REPORT_BODY%%[![:space:]]*}"}"
     
     local final_message="${final_header}"$'\n\n'"${GLOBAL_NOTIFICATION_REPORT_BODY}"$'\n\n'"${final_footer}"
 
     send_notification "$final_message" "$final_subject"
 
-    # 只有在完全成功时才更新时间戳
     if [[ "$final_status_text" == "备份完成" ]]; then
         LAST_AUTO_BACKUP_TIMESTAMP=$(date +%s)
         save_config
@@ -2088,7 +2120,6 @@ perform_backup() {
 }
 
 
-# [修改] 不再直接发送消息，而是构建报告片段并附加到全局变量
 upload_archive() {
     local temp_archive_path="$1"
     local archive_name="$2"
@@ -2113,6 +2144,8 @@ upload_archive() {
 
     for enabled_idx in "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}"; do
         local rclone_target="${RCLONE_TARGETS_ARRAY[$enabled_idx]}"
+        local formatted_target
+        formatted_target=$(echo "$rclone_target" | sed 's/:/: /')
         
         local destination_path="${rclone_target}"
         if [[ "${destination_path: -1}" != "/" ]]; then
@@ -2122,7 +2155,7 @@ upload_archive() {
         log_info "正在上传到 Rclone 目标: ${destination_path}"
         if rclone copyto "$temp_archive_path" "${destination_path}${archive_name}" --progress ${bw_limit_arg}; then
             log_info "上传到 ${rclone_target} 成功！"
-            upload_block+=$'\n'"${rclone_target} ✅ 上传成功"
+            upload_block+=$'\n'"${formatted_target} ✅ 上传成功"
             any_upload_succeeded_for_path="true"
 
             if [[ "$ENABLE_INTEGRITY_CHECK" == "true" ]]; then
@@ -2139,12 +2172,11 @@ upload_archive() {
             fi
         else
             log_error "上传到 ${rclone_target} 失败！"
-            upload_block+=$'\n'"${rclone_target} ❌ 上传失败"
+            upload_block+=$'\n'"${formatted_target} ❌ 上传失败"
             has_upload_failure="true"
         fi
     done
 
-    # 附加到全局报告
     GLOBAL_NOTIFICATION_REPORT_BODY+="${archive_block}${upload_block}"
     
     if [[ "$has_upload_failure" == "true" ]]; then
@@ -2152,10 +2184,10 @@ upload_archive() {
     fi
 
     if [[ "$any_upload_succeeded_for_path" == "true" ]]; then
-        return 0 # Success
+        return 0
     else
         GLOBAL_NOTIFICATION_OVERALL_STATUS="failure"
-        return 1 # Failure
+        return 1
     fi
 }
 
@@ -2168,7 +2200,7 @@ manage_rclone_installation() {
         if command -v rclone &> /dev/null; then
             local rclone_version
             rclone_version=$(rclone --version | head -n 1)
-            echo -e "当前状态: ${GREEN}已安装${NC} (版本: ${rclone_version})"
+            echo -e "当前状态: ${GREEN}已安装${NC} (${rclone_version})"
         else
             echo -e "当前状态: ${RED}未安装${NC}"
         fi
@@ -2225,7 +2257,6 @@ manage_config_import_export() {
         echo -e "${BLUE}=== 10. [助手] 配置导入/导出 ===${NC}"
         echo "此功能可将当前所有设置导出为便携文件，或从文件导入。"
         
-        # 【修改】增加当前配置文件的位置和大小信息
         if [[ -f "$CONFIG_FILE" ]]; then
             local config_size
             config_size=$(du -h "$CONFIG_FILE" 2>/dev/null | awk '{print $1}')
@@ -2283,12 +2314,11 @@ manage_config_import_export() {
     done
 }
 
-# [新增] 切换空间检查功能的函数
 toggle_space_check() {
     display_header
     echo -e "${BLUE}--- 备份前临时空间检查 ---${NC}"
     echo "开启后，在“归档模式”开始前，脚本会先计算所需空间并与可用空间对比。"
-    echo -e "${YELLOW}关闭此选项可略微加快备份启动速度，但有因空间不足导致备份中途失败的风险。${NC}"
+    echo -e "关闭此选项可略微加快备份启动速度，但有因空间不足导致备份中途失败的风险。"
 
     local check_status="已开启"
     if [[ "$ENABLE_SPACE_CHECK" != "true" ]]; then
@@ -2312,7 +2342,6 @@ toggle_space_check() {
     press_enter_to_continue
 }
 
-# 【修改】为日志文件浏览器增加位置信息
 system_maintenance_menu() {
     while true; do
         display_header
@@ -2354,7 +2383,6 @@ system_maintenance_menu() {
     done
 }
 
-# [NEW] 管理日志级别的子菜单
 manage_log_settings() {
     while true; do
         display_header
@@ -2389,7 +2417,6 @@ manage_log_settings() {
     done
 }
 
-# [NEW] 设置具体日志级别的函数
 set_log_level() {
     local target="$1" # "console" or "file"
     
@@ -2429,6 +2456,8 @@ uninstall_script() {
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         log_warn "开始卸载..."
         rm -f "$CONFIG_FILE" 2>/dev/null && log_info "删除配置文件: $CONFIG_FILE"
+        rm -f "$TELEGRAM_BOTS_CONFIG_FILE" 2>/dev/null && log_info "删除 Telegram 配置: $TELEGRAM_BOTS_CONFIG_FILE"
+        rm -f "$EMAIL_SENDERS_CONFIG_FILE" 2>/dev/null && log_info "删除 Email 配置: $EMAIL_SENDERS_CONFIG_FILE"
         rmdir "$CONFIG_DIR" 2>/dev/null && log_info "删除配置目录: $CONFIG_DIR"
         rm -f "$LOG_FILE" 2>/dev/null && log_info "删除日志文件: $LOG_FILE"
         rm -f "${LOG_FILE}".*.rotated 2>/dev/null && log_info "删除轮转日志"
@@ -2463,10 +2492,10 @@ show_main_menu() {
     if [[ "$BACKUP_MODE" == "sync" ]]; then
         mode_text="同步模式"
     fi
-    echo -e "备份模式: ${GREEN}${mode_text}${NC}   备份源: ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个  已启用目标: ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} 个"
+    echo -e "备份模式: ${GREEN}${mode_text}${NC}    备份源: ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个  已启用目标: ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} 个"
 
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 功能选项 ━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  1. ${YELLOW}自动备份与计划任务${NC} (间隔: ${AUTO_BACKUP_INTERVAL_DAYS} 天)"
+    echo -e "  1. ${YELLOW}自动备份与计划任务${NC} (当前间隔: ${AUTO_BACKUP_INTERVAL_DAYS} 天)"
     echo -e "  2. ${YELLOW}手动备份${NC}"
     echo -e "  3. ${YELLOW}自定义备份路径与模式${NC}"
     
@@ -2475,24 +2504,16 @@ show_main_menu() {
         format_text+=" (有密码)"
     fi
     echo -e "  4. ${YELLOW}压缩包格式与选项${NC} (当前: ${format_text})"
-    echo -e "  5. ${YELLOW}云存储设定 (Rclone)${NC}"
+    echo -e "  5. ${YELLOW}云存储设定${NC} (Rclone)"
 
-    # --- 【重构】新的通知状态显示逻辑 ---
+    # --- [重构] 新的通知状态显示逻辑 ---
     local enabled_methods=()
-    for bot_config in "${TELEGRAM_BOTS_ARRAY[@]}"; do
-        IFS="$NOTIFICATION_FIELD_DELIMITER" read -r _ _ _ enabled <<< "$bot_config"
-        if [[ "$enabled" == "true" ]]; then
-            enabled_methods+=("Telegram")
-            break
-        fi
-    done
-    for sender_config in "${EMAIL_SENDERS_ARRAY[@]}"; do
-        IFS="$NOTIFICATION_FIELD_DELIMITER" read -r _ _ _ _ _ _ _ enabled _ <<< "$sender_config"
-        if [[ "$enabled" == "true" ]]; then
-            enabled_methods+=("邮件")
-            break
-        fi
-    done
+    if [[ -f "$TELEGRAM_BOTS_CONFIG_FILE" ]] && [[ "$(jq 'map(select(.enabled == true)) | length' "$TELEGRAM_BOTS_CONFIG_FILE" 2>/dev/null)" -gt 0 ]]; then
+        enabled_methods+=("Telegram")
+    fi
+    if [[ -f "$EMAIL_SENDERS_CONFIG_FILE" ]] && [[ "$(jq 'map(select(.enabled == true)) | length' "$EMAIL_SENDERS_CONFIG_FILE" 2>/dev/null)" -gt 0 ]]; then
+        enabled_methods+=("邮件")
+    fi
 
     local notification_status_display
     if [ ${#enabled_methods[@]} -gt 0 ]; then
@@ -2501,7 +2522,6 @@ show_main_menu() {
         notification_status_display="已禁用"
     fi
     echo -e "  6. ${YELLOW}消息通知设定${NC} (当前: ${notification_status_display})"
-
 
     local retention_status_text="已禁用"
     if [[ "$RETENTION_POLICY_TYPE" == "count" ]]; then
@@ -2533,11 +2553,11 @@ process_menu_choice() {
     read -rp "请输入选项: " choice
     case $choice in
         1) manage_auto_backup_menu ;;
-        2) manual_backup || true ;; # Modified: Added || true to prevent script exit
+        2) manual_backup || true ;;
         3) set_backup_path_and_mode ;;
         4) manage_compression_settings ;;
         5) set_cloud_storage ;;
-        6) set_notification_settings ;; # 【修改】调用新的函数
+        6) set_notification_settings ;;
         7) set_retention_policy ;;
         8) manage_rclone_installation ;;
         9) restore_backup ;;
@@ -2550,22 +2570,19 @@ process_menu_choice() {
 }
 
 check_auto_backup() {
-    # Cron模式也需要加载配置来确定日志级别等
     load_config
     rotate_log_if_needed
-    acquire_lock # 在加载配置后获取锁，这样日志才能正常工作
+    acquire_lock
     
     local current_timestamp=$(date +%s)
     local interval_seconds=$(( AUTO_BACKUP_INTERVAL_DAYS * 24 * 3600 ))
 
     if [ ${#BACKUP_SOURCE_PATHS_ARRAY[@]} -eq 0 ]; then
         log_error "自动备份失败：未设置备份源。"
-        # [修改] 此处错误已在 perform_backup 中处理，无需重复发送消息
         return 1
     fi
     if [ ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} -eq 0 ]; then
         log_error "自动备份失败：未启用 Rclone 目标。"
-        # [修改] 此处错误已在 perform_backup 中处理，无需重复发送消息
         return 1
     fi
 
@@ -2578,19 +2595,15 @@ check_auto_backup() {
 }
 
 main() {
-    # [修改] 在脚本开始时立即调用初始化函数，创建所有必需的目录
-    # 这会覆盖所有执行路径（交互式和 cron）
     initialize_directories
 
     TEMP_DIR=$(mktemp -d -t personal_backup_rclone_XXXXXX)
     if [ ! -d "$TEMP_DIR" ]; then
-        # 此时日志系统还未完全初始化，使用 echo
         echo -e "${RED}[ERROR] 无法创建临时目录。${NC}"
         exit 1
     fi
     
     if [[ "$1" == "check_auto_backup" ]]; then
-        # cron 模式下，不进入交互菜单
         check_auto_backup
         exit 0
     fi
@@ -2611,7 +2624,7 @@ main() {
 }
 
 # ================================================================
-# ===           RCLONE 云存储管理函数 (无需修改)               ===
+# ===         RCLONE 云存储管理函数 (无需修改)                 ===
 # ================================================================
 
 prompt_and_add_target() {
@@ -2685,7 +2698,7 @@ create_rclone_s3_remote() {
         prompt_and_add_target "$remote_name" "由助手创建"
     else
         log_error "远程端创建失败！请检查您的输入或 Rclone 的错误提示。"
-        return 1 # Ensure this function returns an error if creation fails
+        return 1
     fi
     press_enter_to_continue
 }
@@ -2706,7 +2719,7 @@ create_rclone_b2_remote() {
         prompt_and_add_target "$remote_name" "由助手创建"
     else
         log_error "远程端创建失败！"
-        return 1 # Ensure this function returns an error if creation fails
+        return 1
     fi
     press_enter_to_continue
 }
@@ -2727,7 +2740,7 @@ create_rclone_azureblob_remote() {
         prompt_and_add_target "$remote_name" "由助手创建"
     else
         log_error "远程端创建失败！"
-        return 1 # Ensure this function returns an error if creation fails
+        return 1
     fi
     press_enter_to_continue
 }
@@ -2749,7 +2762,7 @@ create_rclone_mega_remote() {
         prompt_and_add_target "$remote_name" "由助手创建"
     else
         log_error "远程端创建失败！"
-        return 1 # Ensure this function returns an error if creation fails
+        return 1
     fi
     press_enter_to_continue
 }
@@ -2773,7 +2786,7 @@ create_rclone_pcloud_remote() {
         prompt_and_add_target "$remote_name" "由助手创建"
     else
         log_error "远程端创建失败！可能是密码错误或需要双因素认证。"
-        return 1 # Ensure this function returns an error if creation fails
+        return 1
     fi
     press_enter_to_continue
 }
@@ -2796,7 +2809,7 @@ create_rclone_webdav_remote() {
         prompt_and_add_target "$remote_name" "由助手创建"
     else
         log_error "远程端创建失败！"
-        return 1 # Ensure this function returns an error if creation fails
+        return 1
     fi
     press_enter_to_continue
 }
@@ -2845,7 +2858,7 @@ create_rclone_sftp_remote() {
         log_warn "提示: 首次连接 SFTP 服务器时，Rclone 可能需要您确认主机的密钥指纹。"
     else
         log_error "远程端创建失败！"
-        return 1 # Ensure this function returns an error if creation fails
+        return 1
     fi
     press_enter_to_continue
 }
@@ -2870,7 +2883,7 @@ create_rclone_ftp_remote() {
         prompt_and_add_target "$remote_name" "由助手创建"
     else
         log_error "远程端创建失败！"
-        return 1 # Ensure this function returns an error if creation fails
+        return 1
     fi
     press_enter_to_continue
 }
@@ -2915,7 +2928,7 @@ create_rclone_crypt_remote() {
         log_info "现在您可以像使用普通远程端一样使用 '${remote_name}:'，所有数据都会在后台自动加解密。"
     else
         log_error "远程端创建失败！"
-        return 1 # Ensure this function returns an error if creation fails
+        return 1
     fi
     press_enter_to_continue
 }
@@ -2940,7 +2953,7 @@ create_rclone_alias_remote() {
         log_info "现在 '${remote_name}:' 就等同于 '${target_remote}'。"
     else
         log_error "远程端创建失败！"
-        return 1 # Ensure this function returns an error if creation fails
+        return 1
     fi
     press_enter_to_continue
 }
@@ -2967,26 +2980,25 @@ create_rclone_remote_wizard() {
         echo -e "  9. ${YELLOW}Crypt (加密一个现有远程端)${NC}"
         echo -e "  10. ${YELLOW}Alias (为一个远程路径创建别名)${NC}"
         echo ""
-        # --- 优化点 2: 更加明确的提示 ---
-        echo -e "${YELLOW}重要提示: 对于 Google Drive, Dropbox, OneDrive 等需要${NC}"
-        echo -e "${YELLOW}浏览器授权的云服务，请在主菜单 (选项 5) 中选择${NC}"
-        echo -e "${YELLOW}*启动 Rclone 官方配置工具* 来进行设置。${NC}"
+        echo -e "重要提示: 对于 Google Drive, Dropbox, OneDrive 等需要"
+        echo -e "浏览器授权的云服务，请在主菜单 (选项 5) 中选择"
+        echo -e "*启动 Rclone 官方配置工具* 来进行设置。"
         echo ""
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo -e "  0. ${RED}返回上一级菜单${NC}"
         read -rp "请输入选项: " choice
 
         case "$choice" in
-            1) create_rclone_s3_remote || true ;; # Modified: Added || true
-            2) create_rclone_b2_remote || true ;; # Modified: Added || true
-            3) create_rclone_azureblob_remote || true ;; # Modified: Added || true
-            4) create_rclone_mega_remote || true ;; # Modified: Added || true
-            5) create_rclone_pcloud_remote || true ;; # Modified: Added || true
-            6) create_rclone_webdav_remote || true ;; # Modified: Added || true
-            7) create_rclone_sftp_remote || true ;; # Modified: Added || true
-            8) create_rclone_ftp_remote || true ;; # Modified: Added || true
-            9) create_rclone_crypt_remote || true ;; # Modified: Added || true
-            10) create_rclone_alias_remote || true ;; # Modified: Added || true
+            1) create_rclone_s3_remote || true ;;
+            2) create_rclone_b2_remote || true ;;
+            3) create_rclone_azureblob_remote || true ;;
+            4) create_rclone_mega_remote || true ;;
+            5) create_rclone_pcloud_remote || true ;;
+            6) create_rclone_webdav_remote || true ;;
+            7) create_rclone_sftp_remote || true ;;
+            8) create_rclone_ftp_remote || true ;;
+            9) create_rclone_crypt_remote || true ;;
+            10) create_rclone_alias_remote || true ;;
             0) break ;;
             *) log_error "无效选项。"; press_enter_to_continue ;;
         esac
@@ -3119,7 +3131,6 @@ choose_rclone_path() {
     return 0
 }
 
-# 【修改】移除操作提示和状态文本的颜色
 view_and_manage_rclone_targets() {
     local needs_saving="false"
     while true; do
