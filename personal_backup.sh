@@ -719,7 +719,7 @@ manage_auto_backup_menu() {
         display_header
         echo -e "${BLUE}=== 1. 自动备份与计划任务 ===${NC}"
         echo -e "  1. ${YELLOW}自动备份与计划任务${NC} (当前: ${AUTO_BACKUP_INTERVAL_DAYS} 天)"
-        echo -e "  2. ${YELLOW}[助手] 配置 Cron 定时任务${NC}"
+        echo -e "  2. ${YELLOW}配置 Cron 定时任务${NC}"
         echo ""
         echo -e "  0. ${RED}返回主菜单${NC}"
         read -rp "请输入选项: " choice
@@ -1153,7 +1153,7 @@ set_cloud_storage() {
         echo ""
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
         echo -e "  1. ${YELLOW}查看、管理和启用备份目标${NC}"
-        echo -e "  2. ${YELLOW}[助手] 创建新的 Rclone 远程端${NC}"
+        echo -e "  2. ${YELLOW}创建新的 Rclone 远程端${NC}"
         echo -e "  3. ${YELLOW}测试 Rclone 远程端连接${NC}"
         
         local bw_limit_display="${RCLONE_BWLIMIT}"
@@ -2256,7 +2256,7 @@ manage_rclone_installation() {
 manage_config_import_export() {
     while true; do
         display_header
-        echo -e "${BLUE}=== 10. [助手] 配置导入/导出 ===${NC}"
+        echo -e "${BLUE}=== 10. 配置导入/导出 ===${NC}"
         echo "此功能可将当前所有设置导出为便携文件，或从文件导入。"
         
         if [[ -f "$CONFIG_FILE" ]]; then
@@ -2542,7 +2542,7 @@ show_main_menu() {
     echo -e "  8. ${YELLOW}Rclone 安装/卸载${NC} ${rclone_version_text}"
     
     echo -e "  9. ${YELLOW}从云端恢复到本地${NC} (仅适用于归档模式)"
-    echo -e "  10. ${YELLOW}[助手] 配置导入/导出${NC}"
+    echo -e "  10. ${YELLOW}配置导入/导出${NC}"
     echo -e "  11. ${YELLOW}日志与维护${NC}"
 
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -2963,7 +2963,7 @@ create_rclone_alias_remote() {
 create_rclone_remote_wizard() {
     while true; do
         display_header
-        echo -e "${BLUE}=== [助手] 创建新的 Rclone 远程端 ===${NC}"
+        echo -e "${BLUE}=== 创建新的 Rclone 远程端 ===${NC}"
         echo "请选择您要创建的云存储类型："
         echo ""
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 对象存储/云盘 ━━━━━━━━━━━━━━━━━━${NC}"
