@@ -10,13 +10,16 @@ CONFIG_FILE="$CONFIG_DIR/config"
 LOG_FILE="$LOG_DIR/log.txt"
 LOCK_FILE="$CONFIG_DIR/script.lock"
 
-# JSON 配置文件路径
-TELEGRAM_BOTS_CONFIG_FILE="$CONFIG_DIR/telegram_bots.json"
-EMAIL_SENDERS_CONFIG_FILE="$CONFIG_DIR/email_senders.json"
+# [重构] 统一的 JSON 配置文件路径
+NOTIFICATIONS_CONFIG_FILE="$CONFIG_DIR/notifications.json"
 
 
-# 日志轮转配置 (8MB)
-LOG_MAX_SIZE_BYTES=8388608
+# --- 日志与维护配置 ---
+# [优化] 将日志轮转大小变为可配置项, 单位 MB
+LOG_MAX_SIZE_MB=8
+CONSOLE_LOG_LEVEL=2 # 默认 INFO
+FILE_LOG_LEVEL=1    # 默认 DEBUG
+ENABLE_SPACE_CHECK="true"         # 备份前临时空间检查
 
 # --- 日志级别定义 ---
 # 值越小，级别越低，输出越详细
@@ -39,12 +42,6 @@ COMPRESSION_FORMAT="zip"      # "zip" or "tar.gz"
 COMPRESSION_LEVEL=6           # 1 (fastest) to 9 (best)
 ZIP_PASSWORD=""               # Password for zip files, empty for none
 
-# 日志与维护配置
-CONSOLE_LOG_LEVEL=$LOG_LEVEL_INFO # 终端输出的日志级别
-FILE_LOG_LEVEL=$LOG_LEVEL_DEBUG   # 文件记录的日志级别
-ENABLE_SPACE_CHECK="true"         # [新增] "true" or "false", 备份前临时空间检查
-
-
 AUTO_BACKUP_INTERVAL_DAYS=7 # 默认自动备份间隔天数
 LAST_AUTO_BACKUP_TIMESTAMP=0 # 上次自动备份的 Unix 时间戳
 
@@ -61,7 +58,7 @@ declare -a RCLONE_TARGETS_METADATA_ARRAY=()
 RCLONE_TARGETS_METADATA_STRING=""
 RCLONE_BWLIMIT="" # 带宽限制 (例如 "8M" 代表 8 MByte/s)
 
-# [新增] 通知报告生成用的全局变量
+# 通知报告生成用的全局变量
 GLOBAL_NOTIFICATION_REPORT_BODY=""
 GLOBAL_NOTIFICATION_FAILURE_REASON=""
 GLOBAL_NOTIFICATION_OVERALL_STATUS="success"
@@ -79,17 +76,13 @@ TEMP_DIR=""
 
 # --- 辅助函数 ---
 
-# [新增] 初始化目录，确保脚本所需路径存在
+# 初始化目录，确保脚本所需路径存在
 initialize_directories() {
-    # 使用 mkdir -p 可以安全地创建目录，如果目录已存在则什么也不做。
-    # 这是解决新设备上首次运行脚本时 "No such file or directory" 错误的关键。
     if ! mkdir -p "$CONFIG_DIR" 2>/dev/null; then
-        # 在日志系统完全工作前，只能用 echo 输出到标准错误流
         echo -e "${RED}[ERROR] 无法创建配置目录: $CONFIG_DIR。请检查权限。${NC}" >&2
         exit 1
     fi
     if ! mkdir -p "$LOG_DIR" 2>/dev/null; then
-        # 在日志系统完全工作前，只能用 echo 输出到标准错误流
         echo -e "${RED}[ERROR] 无法创建日志目录: $LOG_DIR。请检查权限。${NC}" >&2
         exit 1
     fi
@@ -111,7 +104,7 @@ cleanup() {
 # 注册清理函数
 trap cleanup EXIT SIGINT SIGTERM
 
-# [NEW] 日志核心函数
+# 日志核心函数
 _log() {
     local level_value=$1
     local level_name=$2
@@ -122,7 +115,6 @@ _log() {
 
     # 写入日志文件
     if [[ $level_value -ge $FILE_LOG_LEVEL ]]; then
-        # '>>' 操作符会自动创建文件（如果目录存在）
         echo "$(date '+%Y-%m-%d %H:%M:%S') [${level_name}] - ${plain_message}" >> "$LOG_FILE"
     fi
 
@@ -151,7 +143,6 @@ acquire_lock() {
             rm -f "$LOCK_FILE"
         fi
     fi
-    # '>' 操作符会自动创建文件（如果目录存在）
     echo $$ > "$LOCK_FILE"
 }
 
@@ -162,12 +153,13 @@ rotate_log_if_needed() {
         return
     fi
 
+    local log_max_bytes=$((LOG_MAX_SIZE_MB * 1024 * 1024))
     local log_size
     log_size=$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)
 
-    if (( log_size > LOG_MAX_SIZE_BYTES )); then
+    if (( log_size > log_max_bytes )); then
         local rotated_log_file="${LOG_FILE}.$(date +%Y%m%d-%H%M%S).rotated"
-        log_warn "日志文件已轮转 (超过 8MB)，旧日志已保存为 ${rotated_log_file}。"
+        log_warn "日志文件已轮转 (超过 ${LOG_MAX_SIZE_MB}MB)，旧日志已保存为 ${rotated_log_file}。"
         mv "$LOG_FILE" "${rotated_log_file}"
         touch "$LOG_FILE"
     fi
@@ -198,29 +190,25 @@ press_enter_to_continue() {
 
 # --- 获取 Cron 任务信息 ---
 get_cron_job_info() {
-    local script_path
-    script_path=$(readlink -f "$0")
-    # 从 crontab 中查找包含脚本路径和特定命令的行
     local cron_job
-    cron_job=$(crontab -l 2>/dev/null | grep -F "$script_path check_auto_backup")
-    
+    local marker="# personal_backup_rclone_marker"
+    cron_job=$(crontab -l 2>/dev/null | grep -F "$marker")
+
     if [[ -n "$cron_job" ]]; then
-        # 提取 cron 表达式 (前五个字段)
         echo "$cron_job" | awk '{print $1,$2,$3,$4,$5}'
     else
         echo "未设置"
     fi
 }
 
-# [重构 & 修复] 将 Cron 表达式转化为易于理解的说明
+# 将 Cron 表达式转化为易于理解的说明
 parse_cron_to_human() {
     local cron_string="$1"
     if [[ "$cron_string" == "未设置" ]]; then
         echo "未设置"
         return
     fi
-    
-    # 使用 awk 来健壮地解析，无论有多少空格
+
     local minute hour day_of_month month day_of_week
     minute=$(echo "$cron_string" | awk '{print $1}')
     hour=$(echo "$cron_string" | awk '{print $2}')
@@ -228,25 +216,19 @@ parse_cron_to_human() {
     month=$(echo "$cron_string" | awk '{print $4}')
     day_of_week=$(echo "$cron_string" | awk '{print $5}')
 
-    # 仅处理 'M H * * *' 这种由本脚本创建的简单格式
     if [[ "$day_of_month" == "*" && "$month" == "*" && "$day_of_week" == "*" && "$minute" =~ ^[0-9]+$ && "$hour" =~ ^[0-9]+$ ]]; then
-        # [FIX] 强制使用 10 进制处理小时和分钟，避免 08, 09 被当作无效八进制数
         local hour_decimal=$((10#$hour))
         local minute_decimal=$((10#$minute))
-        
         local formatted_hour=$(printf "%02d" "$hour_decimal")
         local formatted_minute=$(printf "%02d" "$minute_decimal")
-        
         local period="凌晨"
         if (( hour_decimal >= 6 && hour_decimal < 12 )); then period="早上";
         elif (( hour_decimal >= 12 && hour_decimal < 13 )); then period="中午";
         elif (( hour_decimal >= 13 && hour_decimal < 18 )); then period="下午";
         elif (( hour_decimal >= 18 && hour_decimal < 24 )); then period="晚上";
         fi
-
         echo "每天${period} ${formatted_hour} 点 ${formatted_minute} 分"
     else
-        # 对于更复杂的 cron 表达式，直接返回原始值
         echo "$cron_string"
     fi
 }
@@ -277,6 +259,7 @@ save_config() {
         echo "CONSOLE_LOG_LEVEL=${CONSOLE_LOG_LEVEL:-$LOG_LEVEL_INFO}"
         echo "FILE_LOG_LEVEL=${FILE_LOG_LEVEL:-$LOG_LEVEL_DEBUG}"
         echo "ENABLE_SPACE_CHECK=\"${ENABLE_SPACE_CHECK}\""
+        echo "LOG_MAX_SIZE_MB=${LOG_MAX_SIZE_MB:-8}"
         echo "RCLONE_BWLIMIT=\"$RCLONE_BWLIMIT\""
         echo "AUTO_BACKUP_INTERVAL_DAYS=$AUTO_BACKUP_INTERVAL_DAYS"
         echo "LAST_AUTO_BACKUP_TIMESTAMP=$LAST_AUTO_BACKUP_TIMESTAMP"
@@ -318,11 +301,11 @@ load_config() {
         else
             ENABLED_RCLONE_TARGET_INDICES_ARRAY=()
         fi
-        
+
         if [[ -n "$RCLONE_TARGETS_METADATA_STRING" ]]; then
             IFS=';;'; read -r -a RCLONE_TARGETS_METADATA_ARRAY <<< "$RCLONE_TARGETS_METADATA_STRING"
         fi
-        
+
         if [[ ${#RCLONE_TARGETS_METADATA_ARRAY[@]} -ne ${#RCLONE_TARGETS_ARRAY[@]} ]]; then
             log_warn "检测到旧版配置，正在更新目标元数据..."
             local temp_meta_array=()
@@ -342,9 +325,8 @@ load_config() {
 
 # --- 核心功能 ---
 
-# [优化] 交互式依赖检查和安装
+# 交互式依赖检查和安装
 check_dependencies() {
-    # 使用关联数组定义依赖项及其元数据
     declare -A deps
     deps["zip"]="zip;用于创建 .zip 压缩包"
     deps["unzip"]="unzip;用于解压和恢复 .zip 文件"
@@ -355,14 +337,12 @@ check_dependencies() {
     deps["du"]="coreutils;用于计算文件大小"
     deps["less"]="less;用于分页查看日志文件"
     deps["curl"]="curl;用于发送 Telegram 和邮件通知，以及安装 rclone"
-    # [新增] jq 是新版通知管理的核心依赖
     deps["jq"]="jq;用于处理 JSON 格式的通知配置"
-
+    deps["crontab"]="cron;用于管理定时任务"
 
     local missing_deps=()
     local dep_info=()
-    
-    # 首先检查所有依赖
+
     for cmd in "${!deps[@]}"; do
         if ! command -v "$cmd" &> /dev/null; then
             missing_deps+=("$cmd")
@@ -375,7 +355,7 @@ check_dependencies() {
     fi
 
     log_warn "检测到 ${#missing_deps[@]} 个缺失的依赖项。"
-    
+
     local install_all=false
     local installed_count=0
     local skipped_count=0
@@ -415,6 +395,9 @@ check_dependencies() {
                         log_error "安装 Rclone 需要 'curl'，但它也缺失了。请先安装 curl。"
                     fi
                 elif command -v apt-get &> /dev/null; then
+                    if [[ "$pkg" == "cron" ]]; then
+                       pkg="cron"
+                    fi
                     if sudo apt-get update -qq >/dev/null && sudo apt-get install -y "$pkg"; then
                         log_info "'${pkg}' 安装成功。"
                         install_ok=true
@@ -422,6 +405,9 @@ check_dependencies() {
                         log_error "'${pkg}' 安装失败。"
                     fi
                 elif command -v yum &> /dev/null; then
+                    if [[ "$pkg" == "cron" ]]; then
+                       pkg="cronie"
+                    fi
                     if sudo yum install -y "$pkg"; then
                         log_info "'${pkg}' 安装成功。"
                         install_ok=true
@@ -436,13 +422,13 @@ check_dependencies() {
                     ((installed_count++))
                 else
                     ((skipped_count++))
-                    if [[ "$pkg" == "rclone" || "$pkg" == "curl" || "$pkg" == "jq" ]]; then any_critical_skipped=true; fi
+                    if [[ "$pkg" == "rclone" || "$pkg" == "curl" || "$pkg" == "jq" || "$pkg" == "cron" ]]; then any_critical_skipped=true; fi
                 fi
                 ;;
             n|N)
                 log_warn "已跳过安装 '${cmd}'。"
                 ((skipped_count++))
-                if [[ "$cmd" == "rclone" || "$cmd" == "curl" || "$cmd" == "jq" ]]; then any_critical_skipped=true; fi
+                if [[ "$cmd" == "rclone" || "$cmd" == "curl" || "$cmd" == "jq" || "$cmd" == "crontab" ]]; then any_critical_skipped=true; fi
                 ;;
             q|Q)
                 log_error "用户中止了依赖安装。脚本无法继续。"
@@ -451,34 +437,34 @@ check_dependencies() {
             *)
                 log_warn "无效输入，已跳过 '${cmd}'。"
                 ((skipped_count++))
-                if [[ "$cmd" == "rclone" || "$cmd" == "curl" || "$cmd" == "jq" ]]; then any_critical_skipped=true; fi
+                if [[ "$cmd" == "rclone" || "$cmd" == "curl" || "$cmd" == "jq" || "$cmd" == "crontab" ]]; then any_critical_skipped=true; fi
                 ;;
         esac
     done
 
     log_info "依赖检查完成。安装: ${installed_count} 个, 跳过: ${skipped_count} 个。"
-    
+
     if [[ "$installed_count" -gt 0 ]]; then
         log_warn "已安装新的依赖项，建议重新运行脚本以确保所有功能正常。"
         press_enter_to_continue
         exit 0
     fi
-    
+
     if [[ "$any_critical_skipped" == true ]]; then
-        log_error "核心依赖 'rclone', 'curl' 或 'jq' 未安装。脚本无法执行核心任务。"
+        log_error "核心依赖 'rclone', 'curl', 'jq' 或 'crontab' 未安装。脚本无法执行核心任务。"
         press_enter_to_continue
         return 1
     fi
-    
+
     return 0
 }
 
 
-# --- [重构] Telegram 发送函数, 接受 Bot 的 JSON 配置 ---
+# Telegram 发送函数, 接受 Bot 的 JSON 配置
 send_telegram_message() {
     local bot_config_json="$1"
     local message_content="$2"
-    
+
     local bot_token chat_id
     bot_token=$(echo "$bot_config_json" | jq -r '.token')
     chat_id=$(echo "$bot_config_json" | jq -r '.chat_id')
@@ -491,7 +477,7 @@ send_telegram_message() {
         log_error "发送 Telegram 消息需要 'curl'，但未安装。"
         return 1
     fi
-    
+
     local bot_alias
     bot_alias=$(echo "$bot_config_json" | jq -r '.alias')
     log_info "正在通过 Bot [${bot_alias}] 发送 Telegram 消息..."
@@ -507,13 +493,12 @@ send_telegram_message() {
     fi
 }
 
-# --- [修复] 邮件发送函数, 接受发件人的 JSON 配置 ---
+# 邮件发送函数, 接受发件人的 JSON 配置
 send_email_message() {
     local sender_config_json="$1"
     local message_content="$2"
     local subject="$3"
 
-    # 使用 jq 从 JSON 中提取所有必要的变量
     local alias host port user pass from use_tls
     alias=$(echo "$sender_config_json" | jq -r '.alias')
     host=$(echo "$sender_config_json" | jq -r '.host')
@@ -522,8 +507,7 @@ send_email_message() {
     pass=$(echo "$sender_config_json" | jq -r '.pass')
     from=$(echo "$sender_config_json" | jq -r '.from')
     use_tls=$(echo "$sender_config_json" | jq -r '.use_tls')
-    
-    # 提取收件人数组
+
     local recipients_json
     recipients_json=$(echo "$sender_config_json" | jq -c '.recipients')
 
@@ -531,7 +515,7 @@ send_email_message() {
         log_warn "邮件发件人 [${alias}] 配置不完整或没有收件人，跳过发送。"
         return 1
     fi
-    
+
     if ! command -v curl &> /dev/null; then
         log_error "发送邮件需要 'curl'，但未安装。"
         return 1
@@ -539,13 +523,11 @@ send_email_message() {
 
     log_info "正在通过邮箱 [${alias}] 发送邮件..."
 
-    # 为 curl 构建收件人参数列表
     local mail_rcpt_args=()
     for recipient in $(echo "$recipients_json" | jq -r '.[]'); do
         mail_rcpt_args+=(--mail-rcpt "<${recipient}>")
     done
 
-    # 将收件人地址格式化用于邮件头
     local to_header
     to_header=$(echo "$recipients_json" | jq -r 'join(", ")')
 
@@ -561,7 +543,7 @@ $message_content
 EOF
 
     local curl_protocol="smtp"
-    local curl_tls_option="--ssl-reqd" # 默认为 STARTTLS
+    local curl_tls_option="--ssl-reqd"
 
     if [[ "$use_tls" == "true" ]]; then
         if [[ "$port" == "465" ]]; then
@@ -584,55 +566,43 @@ EOF
         log_error "邮件发送失败 ([${alias}])！请检查配置、网络或 curl 错误输出。"
         curl_exit_code=1
     fi
-    
-    # [FIX] 无论 curl 成功或失败，都确保删除临时文件
+
     rm -f "$mail_body_file"
     return "$curl_exit_code"
 }
 
-# --- [重构 & 修复] 统一的通知发送函数，支持多通道 ---
+# 统一的通知发送函数，支持多通道
 send_notification() {
     local message_content="$1"
     local subject="$2"
 
+    local notifications_config
+    notifications_config=$(load_notification_config)
+    if [[ -z "$notifications_config" ]]; then
+        log_error "无法加载通知配置，或配置文件损坏。"
+        return
+    fi
+
     # --- 发送 Telegram ---
-    local telegram_bots_file="$TELEGRAM_BOTS_CONFIG_FILE"
-    if [[ -f "$telegram_bots_file" ]]; then
-        # [FIX] 增加对 jq 命令执行结果的检查
-        if ! jq -e '.' "$telegram_bots_file" >/dev/null 2>&1; then
-             log_error "Telegram 配置文件 ($telegram_bots_file) 格式错误，跳过发送。"
-        else
-            local enabled_bots
-            enabled_bots=$(jq -c '.[] | select(.enabled == true)' "$telegram_bots_file")
-            
-            if [[ -n "$enabled_bots" ]]; then
-                while IFS= read -r bot_config; do
-                    send_telegram_message "$bot_config" "$message_content" || true
-                done <<< "$enabled_bots"
-            fi
-        fi
+    local enabled_bots
+    enabled_bots=$(echo "$notifications_config" | jq -c '.telegram_bots[]? | select(.enabled == true)')
+    if [[ -n "$enabled_bots" ]]; then
+        while IFS= read -r bot_config; do
+            send_telegram_message "$bot_config" "$message_content" || true
+        done <<< "$enabled_bots"
     fi
 
     # --- 发送 邮件 ---
-    local email_senders_file="$EMAIL_SENDERS_CONFIG_FILE"
-    if [[ -f "$email_senders_file" ]]; then
-        # [FIX] 增加对 jq 命令执行结果的检查
-        if ! jq -e '.' "$email_senders_file" >/dev/null 2>&1; then
-            log_error "Email 配置文件 ($email_senders_file) 格式错误，跳过发送。"
-        else
-            local enabled_senders
-            enabled_senders=$(jq -c '.[] | select(.enabled == true)' "$email_senders_file")
-
-            if [[ -n "$enabled_senders" ]]; then
-                while IFS= read -r sender_config; do
-                    send_email_message "$sender_config" "$message_content" "$subject" || true
-                done <<< "$enabled_senders"
-            fi
-        fi
+    local enabled_senders
+    enabled_senders=$(echo "$notifications_config" | jq -c '.email_senders[]? | select(.enabled == true)')
+    if [[ -n "$enabled_senders" ]]; then
+        while IFS= read -r sender_config; do
+            send_email_message "$sender_config" "$message_content" "$subject" || true
+        done <<< "$enabled_senders"
     fi
 }
 
-# --- [修复] 恢复备份函数 ---
+# 恢复备份函数
 restore_backup() {
     display_header
     echo -e "${BLUE}=== 从云端恢复到本地 ===${NC}"
@@ -667,11 +637,10 @@ restore_backup() {
         press_enter_to_continue
         return
     fi
-    
+
     local selected_target="${enabled_targets[$((target_choice-1))]}"
     log_info "正在从 ${selected_target} 获取备份列表..."
-    
-    # [FIX] 使用 mapfile 替代 command substitution，更安全地处理带空格的文件名
+
     local backup_files=()
     mapfile -t backup_files < <(rclone lsf --files-only "${selected_target}" | grep -E '\.zip$|\.tar\.gz$' | sort -r)
 
@@ -680,7 +649,7 @@ restore_backup() {
         press_enter_to_continue
         return
     fi
-    
+
     log_info "发现以下备份文件（按名称逆序排序）："
     for i in "${!backup_files[@]}"; do
         echo " $((i+1)). ${backup_files[$i]}"
@@ -701,12 +670,10 @@ restore_backup() {
     fi
 
     local selected_file="${backup_files[$((file_choice-1))]}"
-    # 确保路径被正确引用
     local remote_file_path="${selected_target%/}/${selected_file}"
-
     local temp_archive_path="${TEMP_DIR}/${selected_file}"
     log_warn "正在下载备份文件: ${selected_file}..."
-    
+
     local bw_limit_arg=""
     if [[ -n "$RCLONE_BWLIMIT" ]]; then
         bw_limit_arg="--bwlimit ${RCLONE_BWLIMIT}"
@@ -719,14 +686,14 @@ restore_backup() {
         return
     fi
     log_info "下载成功！"
-    
+
     echo ""
     echo "您想如何处理这个备份文件？"
     echo " 1. 解压到指定目录"
     echo " 2. 仅列出压缩包内容"
     echo " 0. 取消"
     read -rp "请输入选项: " action_choice
-    
+
     case "$action_choice" in
         1)
             read -rp "请输入要解压到的绝对路径 (例如: /root/restore/): " restore_dir
@@ -742,7 +709,6 @@ restore_backup() {
                         read -s -p "解压失败，文件可能已加密。请输入密码 (留空则跳过): " restore_pass
                         echo ""
                         if [[ -n "$restore_pass" ]]; then
-                            # [FIX] 增加对错误密码的判断
                             if unzip -o -P "$restore_pass" "${temp_archive_path}" -d "${restore_dir}"; then
                                 log_info "解压完成！"
                             else
@@ -790,7 +756,7 @@ manage_auto_backup_menu() {
         echo ""
         echo -e "  0. ${RED}返回主菜单${NC}"
         read -rp "请输入选项: " choice
-        
+
         case $choice in
             1) set_auto_backup_interval ;;
             2) setup_cron_job ;;
@@ -814,44 +780,48 @@ set_auto_backup_interval() {
     press_enter_to_continue
 }
 
+# --- [CRON修复] 健壮的 Cron 定时任务函数 ---
 setup_cron_job() {
     display_header
     echo -e "${BLUE}--- Cron 定时任务助手 ---${NC}"
     echo "此助手可以帮助您添加一个系统的定时任务，以实现无人值守自动备份。"
-    echo -e "${YELLOW}脚本将每天在您指定的时间运行一次，并根据您设置的间隔天数决定是否执行备份。${NC}"
-    
+    echo -e "${YELLOW}它会自动将必要的 PATH 环境变量注入 crontab，确保脚本能被正确执行。${NC}"
+
+    local marker="# personal_backup_rclone_marker"
+    local path_line="PATH=${PATH}"
+
     read -rp "请输入您希望每天执行检查的时间 (24小时制, HH:MM, 例如 03:00): " cron_time
     if ! [[ "$cron_time" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
         log_error "时间格式无效！请输入 HH:MM 格式。"
         press_enter_to_continue
         return
     fi
-    
+
     local cron_minute="${cron_time#*:}"
     local cron_hour="${cron_time%%:*}"
-    
-    # [FIX] 强制使用 10 进制处理数字，避免 08, 09 被当作无效八进制数
-    cron_minute=$((10#${cron_minute}))
-    cron_hour=$((10#${cron_hour}))
+
+    # 转换为数字以用于 crontab 命令
+    local cron_minute_val=$((10#${cron_minute}))
+    local cron_hour_val=$((10#${cron_hour}))
 
     local script_path
     script_path=$(readlink -f "$0")
-    local cron_command="${cron_minute} ${cron_hour} * * * \"${script_path}\" check_auto_backup >> \"${LOG_FILE}\" 2>&1"
-    
-    if crontab -l 2>/dev/null | grep -qF "$script_path check_auto_backup"; then
-        log_warn "检测到已存在此脚本的定时任务。"
-        read -rp "您想用新的时间设置覆盖它吗？(y/N): " confirm_replace
-        if [[ "$confirm_replace" =~ ^[Yy]$ ]]; then
-            local temp_crontab
-            temp_crontab=$(crontab -l 2>/dev/null | grep -vF "$script_path check_auto_backup")
-            (echo "${temp_crontab}"; echo "$cron_command") | crontab -
-            log_info "定时任务已更新！"
-        else
-            log_info "已取消操作。"
-        fi
+    # 注意命令中的双引号，以支持带空格的路径
+    local cron_command="${cron_minute_val} ${cron_hour_val} * * * \"${script_path}\" check_auto_backup >> \"${LOG_FILE}\" 2>&1 ${marker}"
+
+    # 获取当前 crontab 内容，并移除旧的条目
+    local current_crontab
+    current_crontab=$(crontab -l 2>/dev/null | grep -vF "$marker")
+
+    # 使用用户输入的原始 cron_time 变量进行显示，保证格式正确
+    read -rp "您想将定时任务设置为每天 ${cron_time} 吗？(Y/n): " confirm
+    if [[ ! "$confirm" =~ ^[Nn]$ ]]; then
+        log_info "正在更新 crontab..."
+        # 重新构建 crontab
+        (echo "$path_line"; echo "${current_crontab}"; echo "$cron_command") | crontab -
+        log_info "定时任务添加/更新成功！"
     else
-        (crontab -l 2>/dev/null; echo "$cron_command") | crontab -
-        log_info "定时任务添加成功！"
+        log_info "已取消操作。"
     fi
 
     log_info "您可以使用 'crontab -l' 命令查看所有定时任务。"
@@ -891,7 +861,6 @@ add_backup_path() {
     fi
 
     local resolved_path
-    # [FIX] 处理波浪号扩展
     eval resolved_path=$(realpath -q "$path_input" 2>/dev/null)
 
     if [[ -z "$resolved_path" ]]; then
@@ -946,7 +915,7 @@ view_and_manage_backup_paths() {
                 if [[ "$path_index" =~ ^[0-9]+$ ]] && [ "$path_index" -ge 1 ] && [ "$path_index" -le ${#BACKUP_SOURCE_PATHS_ARRAY[@]} ]; then
                     local current_path="${BACKUP_SOURCE_PATHS_ARRAY[$((path_index-1))]}"
                     read -rp "修改路径 '${current_path}'。请输入新路径: " new_path_input
-                    
+
                     if [[ -z "$new_path_input" ]]; then
                         log_error "错误：路径不能为空。"
                         press_enter_to_continue
@@ -1062,7 +1031,7 @@ set_backup_path_and_mode() {
             mode_text="同步模式 (Sync)"
         fi
         echo -e "当前备份模式: ${GREEN}${mode_text}${NC}"
-        
+
         local strategy_text="每个源单独打包"
         if [[ "$PACKAGING_STRATEGY" == "single" ]]; then
             strategy_text="所有源打包成一个"
@@ -1162,14 +1131,14 @@ set_bandwidth_limit() {
     echo -e "${BLUE}--- 设置 Rclone 带宽限制 ---${NC}"
     echo "此设置将限制 Rclone 上传和下载的速度，以避免占用过多网络资源。"
     echo "格式示例: 8M (8 MByte/s), 512k (512 KByte/s)。留空或输入 0 表示不限制。"
-    
+
     local bw_limit_display="${RCLONE_BWLIMIT}"
     if [[ -z "$bw_limit_display" ]]; then
         bw_limit_display="不限制"
     fi
 
     read -rp "请输入新的带宽限制 [当前: ${bw_limit_display}]: " bw_input
-    
+
     if [[ -z "$bw_input" || "$bw_input" == "0" ]]; then
         RCLONE_BWLIMIT=""
         log_info "带宽限制已取消。"
@@ -1190,13 +1159,13 @@ toggle_integrity_check() {
     echo -e "${BLUE}--- 备份后完整性校验 ---${NC}"
     echo "开启后，在“归档模式”下每次上传文件成功后，会额外执行一次校验，确保云端文件未损坏。"
     echo -e "${YELLOW}这会增加备份时间，但能极大地提升数据可靠性。${NC}"
-    
+
     local check_status="已开启"
     if [[ "$ENABLE_INTEGRITY_CHECK" != "true" ]]; then
         check_status="已关闭"
     fi
     echo -e "当前状态: ${GREEN}${check_status}${NC}"
-    
+
     read -rp "您想切换状态吗？ (y/N): " choice
     if [[ "$choice" =~ ^[Yy]$ ]]; then
         if [[ "$ENABLE_INTEGRITY_CHECK" == "true" ]]; then
@@ -1224,7 +1193,7 @@ set_cloud_storage() {
         echo -e "  1. ${YELLOW}查看、管理和启用备份目标${NC}"
         echo -e "  2. ${YELLOW}创建新的 Rclone 远程端${NC}"
         echo -e "  3. ${YELLOW}测试 Rclone 远程端连接${NC}"
-        
+
         local bw_limit_display="${RCLONE_BWLIMIT}"
         if [[ -z "$bw_limit_display" ]]; then
             bw_limit_display="不限制"
@@ -1236,7 +1205,7 @@ set_cloud_storage() {
             check_status_text="已关闭"
         fi
         echo -e "  5. ${YELLOW}备份后完整性校验${NC} (当前: ${check_status_text})"
-        
+
         echo -e "  6. ${YELLOW}启动 Rclone 官方配置工具${NC} (用于 Google Drive, Dropbox 等)"
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo -e "  0. ${RED}返回主菜单${NC}"
@@ -1248,7 +1217,7 @@ set_cloud_storage() {
             3) test_rclone_remotes ;;
             4) set_bandwidth_limit ;;
             5) toggle_integrity_check ;;
-            6) 
+            6)
                 log_info "正在启动 Rclone 官方配置工具。请根据 Rclone 提示进行操作。"
                 log_info "完成后，您可以将配置好的远程端在选项 [1] 中添加为备份目标。"
                 press_enter_to_continue # 让用户先看完提示
@@ -1268,12 +1237,11 @@ set_cloud_storage() {
 
 # --- JSON 配置文件辅助函数 ---
 
-# [FIX] 增加对 jq 命令执行结果的检查
+# 检查 JSON 文件有效性
 check_json_file() {
     local file_path="$1"
     local file_alias="$2"
     if [[ ! -f "$file_path" ]]; then
-        # 文件不存在不是一个错误，可以稍后创建
         return 0
     fi
     if ! jq -e '.' "$file_path" >/dev/null 2>&1; then
@@ -1283,63 +1251,50 @@ check_json_file() {
     return 0
 }
 
+# [重构] 统一加载通知配置
+load_notification_config() {
+    if ! check_json_file "$NOTIFICATIONS_CONFIG_FILE" "Notifications"; then
+        echo "" # 返回空字符串表示加载失败
+        return
+    fi
 
-# 加载 Telegram Bot 配置, 如果文件不存在则返回空数组
-load_telegram_bots() {
-    if ! check_json_file "$TELEGRAM_BOTS_CONFIG_FILE" "Telegram"; then
-        echo "[]"
+    if [[ ! -f "$NOTIFICATIONS_CONFIG_FILE" || ! -s "$NOTIFICATIONS_CONFIG_FILE" ]]; then
+        jq -n '{telegram_bots: [], email_senders: []}'
         return
     fi
-    if [[ ! -f "$TELEGRAM_BOTS_CONFIG_FILE" ]]; then
-        echo "[]"
-        return
+
+    local config
+    config=$(cat "$NOTIFICATIONS_CONFIG_FILE")
+    if ! echo "$config" | jq -e '.telegram_bots' > /dev/null; then
+        config=$(echo "$config" | jq '.telegram_bots = []')
     fi
-    jq '.' "$TELEGRAM_BOTS_CONFIG_FILE"
+    if ! echo "$config" | jq -e '.email_senders' > /dev/null; then
+        config=$(echo "$config" | jq '.email_senders = []')
+    fi
+    echo "$config"
 }
 
-# 保存 Telegram Bot 配置
-save_telegram_bots() {
-    local bots_json="$1"
-    echo "$bots_json" | jq '.' > "$TELEGRAM_BOTS_CONFIG_FILE"
-    chmod 600 "$TELEGRAM_BOTS_CONFIG_FILE" 2>/dev/null
-}
-
-# 加载 Email 发件人配置, 如果文件不存在则返回空数组
-load_email_senders() {
-    if ! check_json_file "$EMAIL_SENDERS_CONFIG_FILE" "Email"; then
-        echo "[]"
-        return
-    fi
-    if [[ ! -f "$EMAIL_SENDERS_CONFIG_FILE" ]]; then
-        echo "[]"
-        return
-    fi
-    jq '.' "$EMAIL_SENDERS_CONFIG_FILE"
-}
-
-# 保存 Email 发件人配置
-save_email_senders() {
-    local senders_json="$1"
-    echo "$senders_json" | jq '.' > "$EMAIL_SENDERS_CONFIG_FILE"
-    chmod 600 "$EMAIL_SENDERS_CONFIG_FILE" 2>/dev/null
+# [重构] 统一保存通知配置
+save_notification_config() {
+    local config_json="$1"
+    echo "$config_json" | jq '.' > "$NOTIFICATIONS_CONFIG_FILE"
+    chmod 600 "$NOTIFICATIONS_CONFIG_FILE" 2>/dev/null
 }
 
 
 # --- Telegram 管理模块 ---
 
 manage_telegram_bots() {
+    local notifications_config
+    notifications_config=$(load_notification_config)
+    if [[ -z "$notifications_config" ]]; then press_enter_to_continue; return; fi
+
     while true; do
         display_header
         echo -e "${BLUE}=== 管理 Telegram 机器人 ===${NC}"
-        
-        local bots_json
-        bots_json=$(load_telegram_bots)
-        # 如果 load_telegram_bots 因为文件损坏而返回空，则 bots_json 也是空的
-        if ! jq -e '.' <<< "$bots_json" >/dev/null 2>&1; then
-            press_enter_to_continue
-            break
-        fi
 
+        local bots_json
+        bots_json=$(echo "$notifications_config" | jq '.telegram_bots')
         local bot_count
         bot_count=$(echo "$bots_json" | jq 'length')
 
@@ -1355,7 +1310,7 @@ manage_telegram_bots() {
                 echo -e "  $((i+1)). ${alias} ${status}"
             done
         fi
-        
+
         echo ""
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
         echo "  a - 添加新机器人"
@@ -1366,6 +1321,7 @@ manage_telegram_bots() {
         echo -e "  0 - ${RED}返回上一级${NC}"
         read -rp "请输入选项: " choice
 
+        local config_changed=false
         case "$choice" in
             a|A)
                 read -rp "为机器人起一个别名 (例如: 家庭NAS通知): " new_alias
@@ -1375,8 +1331,8 @@ manage_telegram_bots() {
                     local new_bot
                     new_bot=$(jq -n --arg alias "$new_alias" --arg token "$new_token" --arg chat_id "$new_chat_id" \
                         '{alias: $alias, token: $token, chat_id: $chat_id, enabled: true}')
-                    bots_json=$(echo "$bots_json" | jq ". += [$new_bot]")
-                    save_telegram_bots "$bots_json"
+                    notifications_config=$(echo "$notifications_config" | jq ".telegram_bots += [$new_bot]")
+                    config_changed=true
                     log_info "机器人 '${new_alias}' 已添加并启用。"
                 else
                     log_error "信息不完整，添加失败。"
@@ -1389,22 +1345,21 @@ manage_telegram_bots() {
                 if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le "$bot_count" ]; then
                     local real_index=$((index - 1))
                     local current_alias current_token current_chat_id
-                    current_alias=$(echo "$bots_json" | jq -r ".[$real_index].alias")
-                    current_token=$(echo "$bots_json" | jq -r ".[$real_index].token")
-                    current_chat_id=$(echo "$bots_json" | jq -r ".[$real_index].chat_id")
-                    
+                    current_alias=$(echo "$notifications_config" | jq -r ".telegram_bots[$real_index].alias")
+                    current_token=$(echo "$notifications_config" | jq -r ".telegram_bots[$real_index].token")
+                    current_chat_id=$(echo "$notifications_config" | jq -r ".telegram_bots[$real_index].chat_id")
+
                     echo "正在修改 '${current_alias}' (序号: $index)。按 Enter 跳过不修改的项。"
                     read -rp "新别名 [${current_alias}]: " new_alias
                     read -rp "新 Bot Token [${current_token:0:8}******]: " new_token
                     read -rp "新 Chat ID [${current_chat_id}]: " new_chat_id
 
-                    bots_json=$(echo "$bots_json" | jq ".[$real_index].alias = \"${new_alias:-$current_alias}\"")
+                    notifications_config=$(echo "$notifications_config" | jq ".telegram_bots[$real_index].alias = \"${new_alias:-$current_alias}\"")
                     if [[ -n "$new_token" ]]; then
-                        bots_json=$(echo "$bots_json" | jq ".[$real_index].token = \"$new_token\"")
+                        notifications_config=$(echo "$notifications_config" | jq ".telegram_bots[$real_index].token = \"$new_token\"")
                     fi
-                    bots_json=$(echo "$bots_json" | jq ".[$real_index].chat_id = \"${new_chat_id:-$current_chat_id}\"")
-                    
-                    save_telegram_bots "$bots_json"
+                    notifications_config=$(echo "$notifications_config" | jq ".telegram_bots[$real_index].chat_id = \"${new_chat_id:-$current_chat_id}\"")
+                    config_changed=true
                     log_info "机器人信息已更新。"
                 else
                     log_error "无效序号。"
@@ -1417,11 +1372,11 @@ manage_telegram_bots() {
                 read -rp "请输入要删除的机器人序号: " index
                 if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le "$bot_count" ]; then
                     local alias_to_delete
-                    alias_to_delete=$(echo "$bots_json" | jq -r ".[$((index-1))].alias")
+                    alias_to_delete=$(echo "$notifications_config" | jq -r ".telegram_bots[$((index-1))].alias")
                     read -rp "确定要删除机器人 '${alias_to_delete}' 吗？(y/N): " confirm
                     if [[ "$confirm" =~ ^[Yy]$ ]]; then
-                        bots_json=$(echo "$bots_json" | jq "del(.[$((index-1))])")
-                        save_telegram_bots "$bots_json"
+                        notifications_config=$(echo "$notifications_config" | jq "del(.telegram_bots[$((index-1))])")
+                        config_changed=true
                         log_info "机器人已删除。"
                     fi
                 else
@@ -1435,11 +1390,11 @@ manage_telegram_bots() {
                 if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le "$bot_count" ]; then
                     local real_index=$((index - 1))
                     local current_state
-                    current_state=$(echo "$bots_json" | jq ".["$real_index"].enabled")
+                    current_state=$(echo "$notifications_config" | jq ".telegram_bots[$real_index].enabled")
                     local new_state
                     new_state=$([[ "$current_state" == "true" ]] && echo "false" || echo "true")
-                    bots_json=$(echo "$bots_json" | jq ".["$real_index"].enabled = $new_state")
-                    save_telegram_bots "$bots_json"
+                    notifications_config=$(echo "$notifications_config" | jq ".telegram_bots[$real_index].enabled = $new_state")
+                    config_changed=true
                     log_info "机器人状态已更新为: $new_state"
                 else
                     log_error "无效序号。"
@@ -1449,6 +1404,10 @@ manage_telegram_bots() {
             0) break ;;
             *) log_error "无效选项。"; press_enter_to_continue ;;
         esac
+
+        if [[ "$config_changed" == "true" ]]; then
+            save_notification_config "$notifications_config"
+        fi
     done
 }
 
@@ -1456,19 +1415,18 @@ manage_telegram_bots() {
 # --- Email 管理模块 ---
 
 manage_email_recipients() {
-    local sender_index="$1"
-    
+    local notifications_config="$1"
+    local sender_index="$2"
+
     while true; do
-        local senders_json
-        senders_json=$(load_email_senders)
         local sender_alias
-        sender_alias=$(echo "$senders_json" | jq -r ".[$sender_index].alias")
+        sender_alias=$(echo "$notifications_config" | jq -r ".email_senders[$sender_index].alias")
         local recipients_json
-        recipients_json=$(echo "$senders_json" | jq ".["$sender_index"].recipients")
-        
+        recipients_json=$(echo "$notifications_config" | jq ".email_senders[$sender_index].recipients")
+
         display_header
         echo -e "${BLUE}=== 管理收件人 for '${sender_alias}' ===${NC}"
-        
+
         if [[ "$(echo "$recipients_json" | jq 'length')" -eq 0 ]]; then
             log_warn "当前没有收件人。"
         else
@@ -1485,15 +1443,16 @@ manage_email_recipients() {
         echo "  a - 添加收件人"
         echo "  d - 删除收件人"
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo "  0 - 返回"
+        echo "  0 - 保存并返回"
         read -rp "请输入选项: " choice
-        
+
+        local config_changed=false
         case "$choice" in
             a|A)
                 read -rp "请输入要添加的收件人邮箱地址: " new_recipient
                 if [[ -n "$new_recipient" ]]; then
-                    senders_json=$(echo "$senders_json" | jq ".[$sender_index].recipients += [\"$new_recipient\"] | .[$sender_index].recipients |= unique")
-                    save_email_senders "$senders_json"
+                    notifications_config=$(echo "$notifications_config" | jq ".email_senders[$sender_index].recipients += [\"$new_recipient\"] | .email_senders[$sender_index].recipients |= unique")
+                    config_changed=true
                     log_info "收件人已添加。"
                 else
                     log_error "邮箱地址不能为空。"
@@ -1504,8 +1463,8 @@ manage_email_recipients() {
                 if [[ "$(echo "$recipients_json" | jq 'length')" -eq 0 ]]; then log_warn "没有可删除的收件人。"; press_enter_to_continue; continue; fi
                 read -rp "请输入要删除的收件人序号: " recipient_index
                 if [[ "$recipient_index" =~ ^[0-9]+$ ]] && [ "$recipient_index" -ge 1 ] && [ "$recipient_index" -le "$(echo "$recipients_json" | jq 'length')" ]; then
-                    senders_json=$(echo "$senders_json" | jq "del(.[$sender_index].recipients[$((recipient_index-1))])")
-                    save_email_senders "$senders_json"
+                    notifications_config=$(echo "$notifications_config" | jq "del(.email_senders[$sender_index].recipients[$((recipient_index-1))])")
+                    config_changed=true
                     log_info "收件人已删除。"
                 else
                     log_error "无效序号。"
@@ -1515,21 +1474,24 @@ manage_email_recipients() {
             0) break ;;
             *) log_error "无效选项。"; press_enter_to_continue ;;
         esac
+
+        if [[ "$config_changed" == "true" ]]; then
+             save_notification_config "$notifications_config"
+        fi
     done
 }
 
 manage_email_senders() {
+    local notifications_config
+    notifications_config=$(load_notification_config)
+    if [[ -z "$notifications_config" ]]; then press_enter_to_continue; return; fi
+
      while true; do
         display_header
         echo -e "${BLUE}=== 管理邮件发件人 ===${NC}"
-        
-        local senders_json
-        senders_json=$(load_email_senders)
-        if ! jq -e '.' <<< "$senders_json" >/dev/null 2>&1; then
-            press_enter_to_continue
-            break
-        fi
 
+        local senders_json
+        senders_json=$(echo "$notifications_config" | jq '.email_senders')
         local sender_count
         sender_count=$(echo "$senders_json" | jq 'length')
 
@@ -1546,7 +1508,7 @@ manage_email_senders() {
                 echo -e "  $((i+1)). ${alias} (收件人: ${recipients_count}) ${status}"
             done
         fi
-        
+
         echo ""
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
         echo "  a - 添加新发件人"
@@ -1558,6 +1520,7 @@ manage_email_senders() {
         echo -e "  0 - ${RED}返回上一级${NC}"
         read -rp "请输入选项: " choice
 
+        local config_changed=false
         case "$choice" in
             a|A)
                 echo "--- 添加新发件人 ---"
@@ -1577,9 +1540,9 @@ manage_email_senders() {
                         --arg user "$new_user" --arg pass "$new_pass" --arg from "$new_from" \
                         --argjson use_tls "$new_use_tls" \
                         '{alias: $alias, host: $host, port: $port, user: $user, pass: $pass, from: $from, use_tls: $use_tls, enabled: true, recipients: []}')
-                    
-                    senders_json=$(echo "$senders_json" | jq ". += [$new_sender]")
-                    save_email_senders "$senders_json"
+
+                    notifications_config=$(echo "$notifications_config" | jq ".email_senders += [$new_sender]")
+                    config_changed=true
                     log_info "发件人 '${new_alias}' 已添加。请记得为其 '管理收件人'。"
                 else
                     log_error "信息不完整，添加失败。"
@@ -1591,9 +1554,9 @@ manage_email_senders() {
                 read -rp "请输入要修改的发件人序号: " index
                 if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le "$sender_count" ]; then
                     local real_index=$((index - 1))
-                    
+
                     local current_data
-                    current_data=$(echo "$senders_json" | jq ".[$real_index]")
+                    current_data=$(echo "$notifications_config" | jq ".email_senders[$real_index]")
                     local current_alias current_host current_port current_user current_from current_use_tls
                     current_alias=$(echo "$current_data" | jq -r '.alias')
                     current_host=$(echo "$current_data" | jq -r '.host')
@@ -1611,22 +1574,21 @@ manage_email_senders() {
                     read -s -rp "新 SMTP 密码 [留空不修改]: " new_pass; echo
                     read -rp "是否使用 TLS (当前: ${current_use_tls}) (y/n/留空): " use_tls_choice
 
-                    senders_json=$(echo "$senders_json" | jq ".[$real_index].alias = \"${new_alias:-$current_alias}\"")
-                    senders_json=$(echo "$senders_json" | jq ".[$real_index].host = \"${new_host:-$current_host}\"")
-                    senders_json=$(echo "$senders_json" | jq ".[$real_index].port = \"${new_port:-$current_port}\"")
-                    senders_json=$(echo "$senders_json" | jq ".[$real_index].from = \"${new_from:-$current_from}\"")
-                    senders_json=$(echo "$senders_json" | jq ".[$real_index].user = \"${new_user:-$current_user}\"")
+                    notifications_config=$(echo "$notifications_config" | jq ".email_senders[$real_index].alias = \"${new_alias:-$current_alias}\"")
+                    notifications_config=$(echo "$notifications_config" | jq ".email_senders[$real_index].host = \"${new_host:-$current_host}\"")
+                    notifications_config=$(echo "$notifications_config" | jq ".email_senders[$real_index].port = \"${new_port:-$current_port}\"")
+                    notifications_config=$(echo "$notifications_config" | jq ".email_senders[$real_index].from = \"${new_from:-$current_from}\"")
+                    notifications_config=$(echo "$notifications_config" | jq ".email_senders[$real_index].user = \"${new_user:-$current_user}\"")
 
                     if [[ -n "$new_pass" ]]; then
-                        senders_json=$(echo "$senders_json" | jq ".[$real_index].pass = \"$new_pass\"")
+                        notifications_config=$(echo "$notifications_config" | jq ".email_senders[$real_index].pass = \"$new_pass\"")
                     fi
                     if [[ "$use_tls_choice" =~ ^[Yy]$ ]]; then
-                        senders_json=$(echo "$senders_json" | jq ".[$real_index].use_tls = true")
+                        notifications_config=$(echo "$notifications_config" | jq ".email_senders[$real_index].use_tls = true")
                     elif [[ "$use_tls_choice" =~ ^[Nn]$ ]]; then
-                        senders_json=$(echo "$senders_json" | jq ".[$real_index].use_tls = false")
+                        notifications_config=$(echo "$notifications_config" | jq ".email_senders[$real_index].use_tls = false")
                     fi
-
-                    save_email_senders "$senders_json"
+                    config_changed=true
                     log_info "发件人信息已更新。"
                 else
                     log_error "无效序号。"
@@ -1637,7 +1599,8 @@ manage_email_senders() {
                 if [[ "$sender_count" -eq 0 ]]; then log_warn "没有发件人可管理。"; press_enter_to_continue; continue; fi
                 read -rp "请输入要管理收件人的发件人序号: " index
                 if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le "$sender_count" ]; then
-                    manage_email_recipients "$((index - 1))"
+                    manage_email_recipients "$notifications_config" "$((index - 1))"
+                    notifications_config=$(load_notification_config)
                 else
                     log_error "无效序号。"
                     press_enter_to_continue
@@ -1648,11 +1611,11 @@ manage_email_senders() {
                 read -rp "请输入要删除的发件人序号: " index
                 if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le "$sender_count" ]; then
                     local alias_to_delete
-                    alias_to_delete=$(echo "$senders_json" | jq -r ".[$((index-1))].alias")
+                    alias_to_delete=$(echo "$notifications_config" | jq -r ".email_senders[$((index-1))].alias")
                     read -rp "确定要删除发件人 '${alias_to_delete}' 吗？(y/N): " confirm
                     if [[ "$confirm" =~ ^[Yy]$ ]]; then
-                        senders_json=$(echo "$senders_json" | jq "del(.[$((index-1))])")
-                        save_email_senders "$senders_json"
+                        notifications_config=$(echo "$notifications_config" | jq "del(.email_senders[$((index-1))])")
+                        config_changed=true
                         log_info "发件人已删除。"
                     fi
                 else
@@ -1666,10 +1629,10 @@ manage_email_senders() {
                  if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le "$sender_count" ]; then
                     local real_index=$((index - 1))
                     local current_state new_state
-                    current_state=$(echo "$senders_json" | jq ".["$real_index"].enabled")
+                    current_state=$(echo "$notifications_config" | jq ".email_senders[$real_index].enabled")
                     new_state=$([[ "$current_state" == "true" ]] && echo "false" || echo "true")
-                    senders_json=$(echo "$senders_json" | jq ".["$real_index"].enabled = $new_state")
-                    save_email_senders "$senders_json"
+                    notifications_config=$(echo "$notifications_config" | jq ".email_senders[$real_index].enabled = $new_state")
+                    config_changed=true
                     log_info "发件人状态已更新为: $new_state"
                 else
                     log_error "无效序号。"
@@ -1679,6 +1642,10 @@ manage_email_senders() {
             0) break ;;
             *) log_error "无效选项。"; press_enter_to_continue ;;
         esac
+
+        if [[ "$config_changed" == "true" ]]; then
+             save_notification_config "$notifications_config"
+        fi
     done
 }
 
@@ -1708,21 +1675,24 @@ set_notification_settings() {
     done
 }
 
-# --- [新增 & 修复] 发送测试通知的专用菜单 ---
+# 发送测试通知的专用菜单
 send_test_notification_menu() {
     while true; do
         display_header
         echo -e "${BLUE}=== 消息通知设定 -> 发送测试通知 ===${NC}"
 
+        local notifications_config
+        notifications_config=$(load_notification_config)
+        if [[ -z "$notifications_config" ]]; then press_enter_to_continue; return; fi
+
         local all_configs=()
         local idx=1
 
         # 加载并显示 Telegram 配置
-        local bots_json=$(load_telegram_bots)
-        if jq -e '.' <<< "$bots_json" >/dev/null 2>&1 && [[ "$(echo "$bots_json" | jq 'length')" -gt 0 ]]; then
+        local temp_bots_configs
+        mapfile -t temp_bots_configs < <(echo "$notifications_config" | jq -c '.telegram_bots[]?')
+        if [ ${#temp_bots_configs[@]} -gt 0 ]; then
             echo "--- Telegram 机器人 ---"
-            local temp_bots_configs
-            mapfile -t temp_bots_configs < <(echo "$bots_json" | jq -c '.[]')
             for bot_config in "${temp_bots_configs[@]}"; do
                 local alias enabled status
                 alias=$(echo "$bot_config" | jq -r '.alias')
@@ -1735,11 +1705,10 @@ send_test_notification_menu() {
         fi
 
         # 加载并显示 Email 配置
-        local senders_json=$(load_email_senders)
-        if jq -e '.' <<< "$senders_json" >/dev/null 2>&1 && [[ "$(echo "$senders_json" | jq 'length')" -gt 0 ]]; then
+        local temp_senders_configs
+        mapfile -t temp_senders_configs < <(echo "$notifications_config" | jq -c '.email_senders[]?')
+        if [ ${#temp_senders_configs[@]} -gt 0 ]; then
             echo "--- 邮件发件人 ---"
-            local temp_senders_configs
-            mapfile -t temp_senders_configs < <(echo "$senders_json" | jq -c '.[]')
             for sender_config in "${temp_senders_configs[@]}"; do
                 local alias enabled status
                 alias=$(echo "$sender_config" | jq -r '.alias')
@@ -1768,7 +1737,7 @@ send_test_notification_menu() {
         # --- 测试消息内容准备 ---
         local test_date_line; test_date_line=$(date)
         local test_subject="[${SCRIPT_NAME}] 测试通知"
-        
+
         case "$choice" in
             a|A)
                 log_info "正在向所有已启用的通知方式发送测试消息..."
@@ -1882,10 +1851,9 @@ apply_retention_policy() {
         local rclone_target="${RCLONE_TARGETS_ARRAY[$enabled_idx]}"
         log_info "正在为目标 ${rclone_target} 应用保留策略..."
 
-        # [FIX] 使用 mapfile 确保安全处理文件名
         local backups_to_process=()
         mapfile -t backups_to_process < <(rclone lsf --files-only "${rclone_target}" | grep -E '\.zip$|\.tar\.gz$' | sort)
-        
+
         if [ ${#backups_to_process[@]} -eq 0 ]; then
             log_warn "在 ${rclone_target} 中未找到备份文件，跳过。"
             continue
@@ -1901,7 +1869,7 @@ apply_retention_policy() {
                 for (( i=0; i<num_to_delete; i++ )); do
                     local file_to_delete="${backups_to_process[$i]}"
                     local target_path_for_delete="${rclone_target%/}/${file_to_delete}"
-                    
+
                     log_info "正在删除: ${target_path_for_delete}"
                     if rclone deletefile "${target_path_for_delete}"; then
                         deleted_count=$((deleted_count + 1))
@@ -1953,7 +1921,7 @@ check_temp_space() {
 
     local available_space_kb
     available_space_kb=$(df -k "$(dirname "$TEMP_DIR")" | awk 'NR==2 {print $4}')
-    
+
     local required_hr
     required_hr=$(numfmt --to=iec-i --suffix=B --format="%.1f" "$((required_space_kb * 1024))")
     local available_hr
@@ -1987,27 +1955,26 @@ perform_sync_backup() {
         local path_to_sync="${BACKUP_SOURCE_PATHS_ARRAY[$i]}"
         local path_basename
         path_basename=$(basename "$path_to_sync")
-        
+
         log_info "--- 正在处理路径 $((i+1))/${total_paths_to_backup}: ${path_to_sync} ---"
-        
+
         if [[ ! -e "$path_to_sync" ]]; then
             log_error "路径 '$path_to_sync' 不存在，跳过。"
             GLOBAL_NOTIFICATION_REPORT_BODY+=$'\n\n'"🔄 路径同步"$'\n'"源目录：${path_to_sync}"$'\n'"状态：❌ 失败 (路径不存在)"
             any_sync_failed="true"
             continue
         fi
-        
+
         local path_sync_block=$'\n\n'"🔄 路径同步"$'\n'"源目录：${path_to_sync}"
         path_sync_block+=$'\n'"☁️ 上传状态"
-        
+
         local path_has_failure="false"
         for enabled_idx in "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}"; do
             local rclone_target="${RCLONE_TARGETS_ARRAY[$enabled_idx]}"
-            # [FIX] 正确引用变量
             local sync_destination="${rclone_target%/}/${path_basename}"
             local formatted_target
             formatted_target=$(echo "$rclone_target" | sed 's/:/: /')
-            
+
             log_info "正在同步 ${path_to_sync} 到 ${sync_destination}..."
             if rclone sync "$path_to_sync" "$sync_destination" --progress ${bw_limit_arg}; then
                 log_info "同步到 ${rclone_target} 成功！"
@@ -2046,7 +2013,7 @@ perform_archive_backup() {
 
     local timestamp
     timestamp=$(date +%Y%m%d%H%M%S)
-    
+
     local archive_ext=".zip"
     if [[ "$COMPRESSION_FORMAT" == "tar.gz" ]]; then
         archive_ext=".tar.gz"
@@ -2066,10 +2033,8 @@ perform_archive_backup() {
             if [[ -n "$ZIP_PASSWORD" ]]; then
                 zip_args+=(-P "$ZIP_PASSWORD")
             fi
-            # [FIX] 正确引用变量数组
             zip "${zip_args[@]}" "$temp_archive_path" "${BACKUP_SOURCE_PATHS_ARRAY[@]}" || compress_success=false
         else # tar.gz
-            # [FIX] 正确引用变量数组
             GZIP="-${COMPRESSION_LEVEL}" tar -czf "$temp_archive_path" "${BACKUP_SOURCE_PATHS_ARRAY[@]}" || compress_success=false
         fi
 
@@ -2094,7 +2059,7 @@ perform_archive_backup() {
             sanitized_path_name=$(echo "$path_display_name" | sed 's/[^a-zA-Z0-9_-]/_/g')
             local archive_name="${sanitized_path_name}_${timestamp}${archive_ext}"
             local temp_archive_path="${TEMP_DIR}/${archive_name}"
-            
+
             log_info "--- 正在处理路径 $((i+1))/${total_paths_to_backup}: ${current_backup_path} ---"
 
             if [[ ! -e "$current_backup_path" ]]; then
@@ -2111,10 +2076,8 @@ perform_archive_backup() {
                 if [[ -n "$ZIP_PASSWORD" ]]; then
                     zip_args+=(-P "$ZIP_PASSWORD")
                 fi
-                # [FIX] 正确引用变量
                 (cd "$(dirname "$current_backup_path")" && zip "${zip_args[@]}" "$temp_archive_path" "$(basename "$current_backup_path")") || compress_success=false
             else # tar.gz
-                # [FIX] 正确引用变量
                 (cd "$(dirname "$current_backup_path")" && GZIP="-${COMPRESSION_LEVEL}" tar -czf "$temp_archive_path" "$(basename "$current_backup_path")") || compress_success=false
             fi
 
@@ -2124,11 +2087,11 @@ perform_archive_backup() {
                 any_op_failed="true"
                 continue
             fi
-            
+
             if ! upload_archive "$temp_archive_path" "$archive_name" "$current_backup_path"; then
                 any_op_failed="true"
             fi
-            
+
             rm -f "$temp_archive_path"
         done
     fi
@@ -2142,11 +2105,10 @@ perform_archive_backup() {
     fi
 }
 
-# --- [修复] 备份执行与报告函数 ---
+# 备份执行与报告函数
 perform_backup() {
     local backup_type="$1"
-    
-    # --- 通知报告生成 ---
+
     GLOBAL_NOTIFICATION_REPORT_BODY=""
     GLOBAL_NOTIFICATION_FAILURE_REASON=""
     GLOBAL_NOTIFICATION_OVERALL_STATUS="success"
@@ -2171,7 +2133,7 @@ perform_backup() {
         send_notification "$error_message" "${final_subject}备份失败"
         return 1
     fi
-    
+
     # 执行备份
     local backup_result=0
     if [[ "$BACKUP_MODE" == "sync" ]]; then
@@ -2182,18 +2144,17 @@ perform_backup() {
         backup_result=$?
     fi
 
-    # --- 构建并发送最终报告 ---
+    # 构建并发送最终报告
     local final_status_emoji="✅"
     local final_status_text="备份成功"
     local mode_name=$([[ "$BACKUP_MODE" == "sync" ]] && echo "同步模式" || echo "归档模式")
 
-    # [FIX] 使用 backup_result 来判断最终状态
     if [[ "$backup_result" -ne 0 ]]; then
         final_status_emoji="❌"
         final_status_text="备份失败"
     fi
     final_subject+="${final_status_text}"
-    
+
     if [[ "$GLOBAL_NOTIFICATION_OVERALL_STATUS" != "success" && -n "$GLOBAL_NOTIFICATION_FAILURE_REASON" ]]; then
         GLOBAL_NOTIFICATION_REPORT_BODY+=$'\n\n'"原因：${GLOBAL_NOTIFICATION_FAILURE_REASON}"
     fi
@@ -2204,12 +2165,11 @@ perform_backup() {
     local final_footer="${final_status_emoji} 状态：${final_status_text}"
 
     GLOBAL_NOTIFICATION_REPORT_BODY="${GLOBAL_NOTIFICATION_REPORT_BODY#"${GLOBAL_NOTIFICATION_REPORT_BODY%%[![:space:]]*}"}"
-    
+
     local final_message="${final_header}"$'\n\n'"${GLOBAL_NOTIFICATION_REPORT_BODY}"$'\n\n'"${final_footer}"
 
     send_notification "$final_message" "$final_subject"
 
-    # [FIX] 只有在备份完全成功时才更新时间戳
     if [[ "$backup_result" -eq 0 ]]; then
         log_info "备份成功完成，正在更新时间戳。"
         LAST_AUTO_BACKUP_TIMESTAMP=$(date +%s)
@@ -2217,7 +2177,7 @@ perform_backup() {
     else
         log_warn "备份过程存在失败，不更新上次备份时间戳。"
     fi
-    
+
     return $backup_result
 }
 
@@ -2230,7 +2190,7 @@ upload_archive() {
 
     local backup_file_size
     backup_file_size=$(du -h "$temp_archive_path" | awk '{print $1}')
-    
+
     local num_enabled_targets=${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}
     log_info "压缩完成 (大小: ${backup_file_size})。准备上传到 ${num_enabled_targets} 个已启用的目标..."
 
@@ -2248,8 +2208,7 @@ upload_archive() {
         local rclone_target="${RCLONE_TARGETS_ARRAY[$enabled_idx]}"
         local formatted_target
         formatted_target=$(echo "$rclone_target" | sed 's/:/: /')
-        
-        # [FIX] 正确引用变量
+
         local destination_path="${rclone_target%/}/${archive_name}"
 
         log_info "正在上传到 Rclone 目标: ${destination_path}"
@@ -2278,7 +2237,7 @@ upload_archive() {
     done
 
     GLOBAL_NOTIFICATION_REPORT_BODY+="${archive_block}${upload_block}"
-    
+
     if [[ "$has_upload_failure" == "true" ]]; then
         GLOBAL_NOTIFICATION_OVERALL_STATUS="failure"
     fi
@@ -2292,11 +2251,12 @@ upload_archive() {
 }
 
 
+# Rclone 安装/卸载
 manage_rclone_installation() {
     while true; do
         display_header
         echo -e "${BLUE}=== 8. Rclone 安装/卸载 ===${NC}"
-        
+
         if command -v rclone &> /dev/null; then
             local rclone_version
             rclone_version=$(rclone --version | head -n 1)
@@ -2316,7 +2276,10 @@ manage_rclone_installation() {
         case $choice in
             1)
                 log_info "正在从 rclone.org 下载并执行官方安装脚本..."
-                if curl https://rclone.org/install.sh | sudo bash; then
+                local install_output
+                install_output=$(curl https://rclone.org/install.sh | sudo bash 2>&1 | tee /dev/tty)
+
+                if echo "$install_output" | grep -q -e "Successfully installed" -e "is already installed"; then
                     log_info "Rclone 安装/更新成功！"
                 else
                     log_error "Rclone 安装/更新失败，请检查网络或 sudo 权限。"
@@ -2329,7 +2292,8 @@ manage_rclone_installation() {
                     press_enter_to_continue
                     continue
                 fi
-                read -rp "警告: 这将从系统中移除 Rclone 本体程序。本脚本将无法工作，确定吗？(y/N): " confirm
+                echo -ne "${RED}警告: 这将从系统中移除 Rclone 本体程序。本脚本将无法工作，确定吗？(y/N): ${NC}"
+                read -r confirm
                 if [[ "$confirm" =~ ^[Yy]$ ]]; then
                     log_warn "正在卸载 Rclone..."
                     sudo rm -f /usr/bin/rclone /usr/local/bin/rclone
@@ -2351,60 +2315,158 @@ manage_rclone_installation() {
     done
 }
 
+# 配置导入/导出
 manage_config_import_export() {
+    # 辅助函数：用于显示单个配置文件的状态
+    display_config_file_status() {
+        local file_path="$1"
+        local display_name="$2"
+        local file_basename
+        file_basename=$(basename "$file_path")
+
+        if [[ -f "$file_path" ]]; then
+            local file_size
+            file_size=$(du -h "$file_path" 2>/dev/null | awk '{print $1}')
+            echo -e "  - ${display_name} (${file_basename}): ${GREEN}✔ 存在${NC} (大小: ${file_size})"
+        else
+            echo -e "  - ${display_name} (${file_basename}): ${YELLOW}✖ 不存在${NC}"
+        fi
+    }
+
     while true; do
         display_header
-        echo -e "${BLUE}=== 10. 配置导入/导出 ===${NC}"
-        echo "此功能可将当前所有设置导出为便携文件，或从文件导入。"
-        
-        if [[ -f "$CONFIG_FILE" ]]; then
-            local config_size
-            config_size=$(du -h "$CONFIG_FILE" 2>/dev/null | awk '{print $1}')
-            echo "当前配置文件的位置: ${CONFIG_FILE} (大小: ${config_size:-未知})"
-        else
-            echo "当前配置文件的位置: 文件不存在"
+        echo -e "${BLUE}=== 10. 配置导入/导出 (完整归档) ===${NC}"
+        echo "此功能可将所有设置备份到一个压缩包，或从压缩包中恢复。"
+        echo ""
+
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 当前配置状态 ━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "配置目录: ${YELLOW}${CONFIG_DIR}${NC}"
+
+        display_config_file_status "$CONFIG_FILE" "主配置文件"
+        display_config_file_status "$NOTIFICATIONS_CONFIG_FILE" "通知配置文件"
+
+        if [[ -d "$CONFIG_DIR" ]]; then
+            local total_size
+            total_size=$(du -sh "$CONFIG_DIR" 2>/dev/null | awk '{print $1}')
+            echo -e "目录总大小: ${GREEN}${total_size}${NC}"
         fi
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
         echo ""
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "  1. ${YELLOW}导出配置到文件${NC}"
-        echo -e "  2. ${YELLOW}从文件导入配置${NC}"
+        echo -e "  1. ${YELLOW}导出完整配置到归档包 (.tar.gz)${NC}"
+        echo -e "  2. ${YELLOW}从归档包导入完整配置${NC}"
+        echo -e "  3. ${RED}恢复到上次导入前的配置状态${NC}"
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo -e "  0. ${RED}返回主菜单${NC}"
         read -rp "请输入选项: " choice
 
         case $choice in
-            1)
-                local export_file
-                export_file="$(dirname "$0")/personal_backup.conf"
-                read -rp "确定要将当前配置导出到 ${export_file} 吗？(Y/n): " confirm_export
-                if [[ ! "$confirm_export" =~ ^[Nn]$ ]]; then
-                    save_config # 确保导出的是最新配置
-                    cp "$CONFIG_FILE" "$export_file"
-                    log_info "配置已成功导出到: ${export_file}"
+            1) # 导出
+                save_config
+                local default_export_path="$HOME/personal_backup_config_$(date +%Y%m%d_%H%M%S).tar.gz"
+                read -rp "请输入导出路径和文件名 [默认为: ${default_export_path}]: " export_path
+                export_path="${export_path:-$default_export_path}"
+
+                log_info "准备导出位于以下目录的所有配置文件:"
+                echo "  - $CONFIG_DIR"
+
+                if [ ! -d "$CONFIG_DIR" ] || [ -z "$(ls -A "$CONFIG_DIR" 2>/dev/null)" ]; then
+                    log_warn "配置目录为空或不存在，没有文件可以导出。"
+                    press_enter_to_continue
+                    continue
+                fi
+
+                if tar -czf "$export_path" -C "$(dirname "$CONFIG_DIR")" "$(basename "$CONFIG_DIR")"; then
+                    log_info "配置已成功导出到: ${export_path}"
                 else
-                    log_info "已取消导出。"
+                    log_error "导出失败！请检查路径和权限。"
                 fi
                 press_enter_to_continue
                 ;;
-            2)
-                read -rp "请输入配置文件的绝对路径: " import_file
-                if [[ -f "$import_file" ]]; then
-                    read -rp "${RED}警告：这将覆盖当前所有设置！确定要从 '${import_file}' 导入吗？(y/N): ${NC}" confirm_import
-                    if [[ "$confirm_import" =~ ^[Yy]$ ]]; then
-                        if [[ -f "$CONFIG_FILE" ]]; then
-                            cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
-                            log_warn "当前配置已备份到 ${CONFIG_FILE}.bak"
-                        fi
-                        cp "$import_file" "$CONFIG_FILE"
-                        log_info "配置导入成功！请重启脚本以使新配置生效。"
+
+            2) # 导入
+                read -rp "请输入要导入的配置归档包 (.tar.gz) 的绝对路径: " import_file
+
+                if [[ ! -f "$import_file" ]]; then
+                    log_error "文件 '${import_file}' 不存在。"
+                    press_enter_to_continue
+                    continue
+                fi
+
+                echo ""
+                log_warn "即将从归档包导入配置。归档包内容预览:"
+                echo -e "${YELLOW}--------------------------------------------------${NC}"
+                tar -tvf "$import_file"
+                echo -e "${YELLOW}--------------------------------------------------${NC}"
+                echo ""
+
+                echo -ne "${RED}警告：这将覆盖当前所有设置！确定要导入吗？(y/N): ${NC}"
+                read -r confirm_import
+                if [[ "$confirm_import" =~ ^[Yy]$ ]]; then
+                    local backup_dir="${CONFIG_DIR}.bak.$(date +%Y%m%d_%H%M%S)"
+                    if [[ -d "$CONFIG_DIR" ]]; then
+                        mv "$CONFIG_DIR" "$backup_dir"
+                        log_warn "当前配置已完整备份到: ${backup_dir}"
+                    fi
+
+                    log_info "正在导入配置..."
+                    mkdir -p "$CONFIG_DIR"
+                    if tar -xzf "$import_file" -C "$(dirname "$CONFIG_DIR")"; then
+                        log_info "配置导入成功！"
+                        log_warn "请重启脚本以使新配置生效。"
                         press_enter_to_continue
                         exit 0
                     else
-                        log_info "已取消导入。"
+                        log_error "导入失败！归档包可能已损坏。"
+                        log_info "正在尝试恢复之前的配置..."
+                        rm -rf "$CONFIG_DIR"
+                        mv "$backup_dir" "$CONFIG_DIR"
+                        log_info "已恢复到导入前的状态。"
                     fi
                 else
-                    log_error "文件 '${import_file}' 不存在。"
+                    log_info "已取消导入。"
+                fi
+                press_enter_to_continue
+                ;;
+            3) # 恢复
+                display_header
+                echo -e "${BLUE}--- 恢复导入前的配置 ---${NC}"
+                local backup_dirs=()
+                mapfile -t backup_dirs < <(find "$(dirname "$CONFIG_DIR")" -maxdepth 1 -type d -name "$(basename "$CONFIG_DIR").bak.*" 2>/dev/null | sort -r)
+
+                if [ ${#backup_dirs[@]} -eq 0 ]; then
+                    log_warn "没有找到可供恢复的备份配置。"
+                    press_enter_to_continue
+                    continue
+                fi
+
+                echo "找到以下可恢复的配置备份 (按时间倒序):"
+                for i in "${!backup_dirs[@]}"; do
+                    echo "  $((i+1)). $(basename "${backup_dirs[$i]}")"
+                done
+                echo ""
+                echo "  0. 取消"
+                read -rp "请选择要恢复的备份序号: " restore_choice
+
+                if [[ "$restore_choice" =~ ^[0-9]+$ ]] && [ "$restore_choice" -gt 0 ] && [ "$restore_choice" -le ${#backup_dirs[@]} ]; then
+                    local dir_to_restore="${backup_dirs[$((restore_choice - 1))]}"
+                    echo -ne "${RED}确定要用 '$(basename "$dir_to_restore")' 覆盖当前配置吗? (y/N): ${NC}"
+                    read -r confirm_restore
+                    if [[ "$confirm_restore" =~ ^[Yy]$ ]]; then
+                        if [[ -d "$CONFIG_DIR" ]]; then
+                            mv "$CONFIG_DIR" "${CONFIG_DIR}.restoring_$(date +%s)"
+                        fi
+                        mv "$dir_to_restore" "$CONFIG_DIR"
+                        log_info "配置已成功恢复！"
+                        log_warn "请重启脚本以加载恢复的配置。"
+                        press_enter_to_continue
+                        exit 0
+                    else
+                        log_info "已取消恢复。"
+                    fi
+                elif [[ "$restore_choice" != "0" ]]; then
+                    log_error "无效选项。"
                 fi
                 press_enter_to_continue
                 ;;
@@ -2414,54 +2476,29 @@ manage_config_import_export() {
     done
 }
 
-toggle_space_check() {
-    display_header
-    echo -e "${BLUE}--- 备份前临时空间检查 ---${NC}"
-    echo "开启后，在“归档模式”开始前，脚本会先计算所需空间并与可用空间对比。"
-    echo -e "关闭此选项可略微加快备份启动速度，但有因空间不足导致备份中途失败的风险。"
-
-    local check_status="已开启"
-    if [[ "$ENABLE_SPACE_CHECK" != "true" ]]; then
-        check_status="已关闭"
-    fi
-    echo -e "当前状态: ${GREEN}${check_status}${NC}"
-
-    read -rp "您想切换状态吗？ (y/N): " choice
-    if [[ "$choice" =~ ^[Yy]$ ]]; then
-        if [[ "$ENABLE_SPACE_CHECK" == "true" ]]; then
-            ENABLE_SPACE_CHECK="false"
-            log_warn "备份前临时空间检查已关闭。"
-        else
-            ENABLE_SPACE_CHECK="true"
-            log_info "备份前临时空间检查已开启。"
-        fi
-        save_config
-    else
-        log_info "状态未改变。"
-    fi
-    press_enter_to_continue
-}
-
+# [优化] 日志与维护菜单
 system_maintenance_menu() {
     while true; do
         display_header
         echo -e "${BLUE}=== 11. 日志与维护 ===${NC}"
-        echo ""
         local log_info_str="(文件不存在)"
         if [[ -f "$LOG_FILE" ]]; then
             local log_size
             log_size=$(du -h "$LOG_FILE" 2>/dev/null | awk '{print $1}')
-            log_info_str="(大小: ${log_size}, 位置: ${LOG_FILE})"
+            log_info_str="(大小: ${log_size})"
         fi
 
-        local level_names=("" "DEBUG" "INFO" "WARN" "ERROR")
-        local console_level_name=${level_names[$CONSOLE_LOG_LEVEL]}
-        local file_level_name=${level_names[$FILE_LOG_LEVEL]}
+        local rotated_count
+        rotated_count=$(find "$LOG_DIR" -type f -name "*.rotated" 2>/dev/null | wc -l)
 
-        echo -e "  1. ${YELLOW}设置日志级别${NC} (终端: ${console_level_name}, 文件: ${file_level_name})"
-        echo -e "  2. ${YELLOW}查看日志文件${NC} ${log_info_str}"
+        echo ""
+        echo -e "  1. ${YELLOW}设置日志级别${NC}"
+        echo -e "  2. ${YELLOW}查看当前日志文件${NC} ${log_info_str}"
+        echo -e "  3. ${YELLOW}清空当前日志文件${NC}"
+        echo -e "  4. ${YELLOW}删除所有旧的轮转日志${NC} (共: ${rotated_count} 个)"
         local space_check_status=$([[ "$ENABLE_SPACE_CHECK" == "true" ]] && echo "已开启" || echo "已关闭")
-        echo -e "  3. ${YELLOW}切换备份前空间检查${NC} (当前: ${space_check_status})"
+        echo -e "  5. ${YELLOW}切换备份前空间检查${NC} (当前: ${space_check_status})"
+        echo -e "  6. ${YELLOW}设置日志轮转大小${NC} (当前: ${LOG_MAX_SIZE_MB} MB)"
         echo ""
         echo -e "  0. ${RED}返回主菜单${NC}"
         read -rp "请输入选项: " choice
@@ -2476,12 +2513,55 @@ system_maintenance_menu() {
                     press_enter_to_continue
                 fi
                 ;;
-            3) toggle_space_check ;;
+            3)
+                echo -ne "${RED}警告：这将清空当前的日志文件，操作不可逆！确定吗？(y/N): ${NC}"
+                read -r confirm
+                if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                    > "$LOG_FILE"
+                    log_info "当前日志文件已清空。"
+                else
+                    log_info "已取消操作。"
+                fi
+                press_enter_to_continue
+                ;;
+            4)
+                if [[ "$rotated_count" -eq 0 ]]; then
+                    log_warn "没有找到可删除的轮转日志。"
+                else
+                    echo -ne "${RED}警告：这将删除 ${rotated_count} 个轮转日志文件，操作不可逆！确定吗？(y/N): ${NC}"
+                    read -r confirm
+                    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                        find "$LOG_DIR" -type f -name "*.rotated" -delete
+                        log_info "所有轮转日志已被删除。"
+                    else
+                        log_info "已取消操作。"
+                    fi
+                fi
+                press_enter_to_continue
+                ;;
+            5) toggle_space_check ;;
+            6) set_log_rotation_size ;;
             0) break ;;
             *) log_error "无效选项。"; press_enter_to_continue ;;
         esac
     done
 }
+
+# [优化] 设置日志轮转大小的函数
+set_log_rotation_size() {
+    display_header
+    echo -e "${BLUE}--- 设置日志轮转大小 ---${NC}"
+    read -rp "请输入新的日志文件轮转大小 (MB，建议大于1) [当前: ${LOG_MAX_SIZE_MB}]: " new_size
+    if [[ "$new_size" =~ ^[0-9]+$ ]] && [ "$new_size" -gt 0 ]; then
+        LOG_MAX_SIZE_MB="$new_size"
+        save_config
+        log_info "日志轮转大小已设置为 ${LOG_MAX_SIZE_MB} MB。"
+    else
+        log_error "输入无效，请输入一个正整数。"
+    fi
+    press_enter_to_continue
+}
+
 
 manage_log_settings() {
     while true; do
@@ -2519,21 +2599,21 @@ manage_log_settings() {
 
 set_log_level() {
     local target="$1" # "console" or "file"
-    
+
     local current_level_val
     if [[ "$target" == "console" ]]; then
         current_level_val=$CONSOLE_LOG_LEVEL
     else
         current_level_val=$FILE_LOG_LEVEL
     fi
-    
+
     echo "请为 ${target} 选择新的日志级别 [当前: ${current_level_val}]:"
     echo "  1. DEBUG"
     echo "  2. INFO"
     echo "  3. WARN"
     echo "  4. ERROR"
     read -rp "请输入选项 (1-4): " level_choice
-    
+
     if [[ "$level_choice" =~ ^[1-4]$ ]]; then
         if [[ "$target" == "console" ]]; then
             CONSOLE_LOG_LEVEL=$level_choice
@@ -2552,16 +2632,20 @@ set_log_level() {
 uninstall_script() {
     display_header
     echo -e "${RED}=== 99. 卸载脚本 ===${NC}"
-    read -rp "警告：这将删除所有脚本文件、配置文件和日志文件。确定吗？(y/N): " confirm
+    echo -ne "${RED}警告：这将删除所有脚本文件、配置文件和日志文件。确定吗？(y/N): ${NC}"
+    read -r confirm
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         log_warn "开始卸载..."
-        rm -f "$CONFIG_FILE" 2>/dev/null && log_info "删除配置文件: $CONFIG_FILE"
-        rm -f "$TELEGRAM_BOTS_CONFIG_FILE" 2>/dev/null && log_info "删除 Telegram 配置: $TELEGRAM_BOTS_CONFIG_FILE"
-        rm -f "$EMAIL_SENDERS_CONFIG_FILE" 2>/dev/null && log_info "删除 Email 配置: $EMAIL_SENDERS_CONFIG_FILE"
-        rmdir "$CONFIG_DIR" 2>/dev/null && log_info "删除配置目录: $CONFIG_DIR"
-        rm -f "$LOG_FILE" 2>/dev/null && log_info "删除日志文件: $LOG_FILE"
-        rm -f "${LOG_FILE}".*.rotated 2>/dev/null && log_info "删除轮转日志"
-        rmdir "$LOG_DIR" 2>/dev/null && log_info "删除日志目录: $LOG_DIR"
+
+        local marker="# personal_backup_rclone_marker"
+        local current_crontab
+        current_crontab=$(crontab -l 2>/dev/null | grep -vF "$marker")
+        (echo "${current_crontab}") | crontab -
+        log_info "已从 crontab 移除定时任务。"
+
+        rm -rf "$CONFIG_DIR" 2>/dev/null && log_info "删除配置目录: $CONFIG_DIR"
+        rm -rf "$LOG_DIR" 2>/dev/null && log_info "删除日志目录: $LOG_DIR"
+
         log_warn "删除脚本文件: $(readlink -f "$0")" && rm -f "$(readlink -f "$0")"
         echo -e "${GREEN}卸载完成。${NC}"
         exit 0
@@ -2580,14 +2664,14 @@ show_main_menu() {
         last_backup_str=$(date -d "@$LAST_AUTO_BACKUP_TIMESTAMP" '+%Y-%m-%d %H:%M:%S')
     fi
     echo -e "上次备份: ${last_backup_str}"
-    
+
     local next_backup_str="取决于间隔设置"
     if [[ "$LAST_AUTO_BACKUP_TIMESTAMP" -ne 0 ]]; then
         local next_ts=$((LAST_AUTO_BACKUP_TIMESTAMP + AUTO_BACKUP_INTERVAL_DAYS * 86400))
         next_backup_str=$(date -d "@$next_ts" '+%Y-%m-%d %H:%M:%S')
     fi
     echo -e "下次预估: ${next_backup_str}"
-    
+
     local mode_text="归档模式"
     if [[ "$BACKUP_MODE" == "sync" ]]; then
         mode_text="同步模式"
@@ -2599,7 +2683,7 @@ show_main_menu() {
     human_cron_info=$(parse_cron_to_human "$(get_cron_job_info)")
     echo -e "  1. ${YELLOW}自动备份与计划任务${NC} (间隔: ${AUTO_BACKUP_INTERVAL_DAYS} 天, Cron: ${human_cron_info})"
     echo -e "  2. ${YELLOW}手动备份${NC}"
-    
+
     local strategy_text="独立打包"
     if [[ "$PACKAGING_STRATEGY" == "single" ]]; then
         strategy_text="合并打包"
@@ -2609,7 +2693,7 @@ show_main_menu() {
         mode_text_short="同步"
     fi
     echo -e "  3. ${YELLOW}自定义备份路径与模式${NC} (路径: ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个, 打包: ${strategy_text}, 模式: ${mode_text_short})"
-    
+
     local format_text="$COMPRESSION_FORMAT"
     if [[ "$COMPRESSION_FORMAT" == "zip" && -n "$ZIP_PASSWORD" ]]; then
         format_text+=" (有密码)"
@@ -2617,13 +2701,16 @@ show_main_menu() {
     echo -e "  4. ${YELLOW}压缩包格式与选项${NC} (当前: ${format_text})"
     echo -e "  5. ${YELLOW}云存储设定${NC} (Rclone)"
 
-    # --- [重构] 新的通知状态显示逻辑 ---
     local enabled_methods=()
-    if check_json_file "$TELEGRAM_BOTS_CONFIG_FILE" "Telegram" >/dev/null && [[ "$(jq 'map(select(.enabled == true)) | length' "$TELEGRAM_BOTS_CONFIG_FILE" 2>/dev/null)" -gt 0 ]]; then
-        enabled_methods+=("Telegram")
-    fi
-    if check_json_file "$EMAIL_SENDERS_CONFIG_FILE" "Email" >/dev/null && [[ "$(jq 'map(select(.enabled == true)) | length' "$EMAIL_SENDERS_CONFIG_FILE" 2>/dev/null)" -gt 0 ]]; then
-        enabled_methods+=("邮件")
+    local notifications_config
+    notifications_config=$(load_notification_config)
+    if [[ -n "$notifications_config" ]]; then
+        if [[ "$(echo "$notifications_config" | jq '.telegram_bots[]? | select(.enabled == true) | length')" -gt 0 ]]; then
+            enabled_methods+=("Telegram")
+        fi
+        if [[ "$(echo "$notifications_config" | jq '.email_senders[]? | select(.enabled == true) | length')" -gt 0 ]]; then
+            enabled_methods+=("邮件")
+        fi
     fi
 
     local notification_status_display
@@ -2649,7 +2736,7 @@ show_main_menu() {
         rclone_version_text="(${rclone_version})"
     fi
     echo -e "  8. ${YELLOW}Rclone 安装/卸载${NC} ${rclone_version_text}"
-    
+
     echo -e "  9. ${YELLOW}从云端恢复到本地${NC} (仅适用于归档模式)"
     echo -e "  10. ${YELLOW}配置导入/导出${NC}"
     echo -e "  11. ${YELLOW}日志与维护${NC}"
@@ -2684,7 +2771,7 @@ check_auto_backup() {
     load_config
     rotate_log_if_needed
     acquire_lock
-    
+
     local current_timestamp
     current_timestamp=$(date +%s)
     local interval_seconds
@@ -2699,7 +2786,6 @@ check_auto_backup() {
         return 1
     fi
 
-    # [修复] 将时间计算和比较操作分开，以确保逻辑正确
     local elapsed_time=$(( current_timestamp - LAST_AUTO_BACKUP_TIMESTAMP ))
     if [[ "$LAST_AUTO_BACKUP_TIMESTAMP" -eq 0 || "$elapsed_time" -ge "$interval_seconds" ]]; then
         log_info "执行自动备份..."
@@ -2717,12 +2803,12 @@ main() {
         echo -e "${RED}[ERROR] 无法创建临时目录。${NC}"
         exit 1
     fi
-    
+
     if [[ "$1" == "check_auto_backup" ]]; then
         check_auto_backup
         exit 0
     fi
-    
+
     # 交互模式
     load_config
     rotate_log_if_needed
@@ -3034,7 +3120,7 @@ create_rclone_crypt_remote() {
     fi
 
     local obscured_pass1=$(rclone obscure "$pass1")
-    local obscured_pass2=$(rclone obscure "$pass2")
+    local obscured_pass2=$(rclone obscure "$password")
 
     log_info "正在创建 Rclone 远程端: ${remote_name}..."
     if rclone config create "$remote_name" crypt remote "$target_remote" password "$obscured_pass1" password2 "$obscured_pass2"; then
@@ -3156,7 +3242,7 @@ get_rclone_direct_contents() {
     return 0
 }
 
-# --- [FIX & 优化] 改进的 Rclone 路径选择函数 ---
+# [FIX & 优化] 改进的 Rclone 路径选择函数
 choose_rclone_path() {
     local remote_name="$1"
     local current_remote_path="/"
@@ -3223,7 +3309,6 @@ choose_rclone_path() {
                         log_error "创建文件夹失败！请检查名称和权限。"
                         press_enter_to_continue
                     fi
-                    # 无需手动进入，循环刷新即可看到新文件夹
                 else
                     log_warn "文件夹名称不能为空。"
                     press_enter_to_continue
@@ -3314,7 +3399,7 @@ view_and_manage_rclone_targets() {
 
         case "$choice" in
             a|A)
-                read -rp "请输入您已通过 'rclone config' 或助手配置好的远程端名称: " remote_name
+                read -rp "请输入您已通过 'rclone config' 或脚本配置好的远程端名称: " remote_name
                 if ! check_rclone_remote_exists "$remote_name"; then
                     log_error "错误: Rclone 远程端 '${remote_name}' 不存在！"
                 elif choose_rclone_path "$remote_name"; then
@@ -3449,7 +3534,7 @@ test_rclone_remotes() {
 
             if rclone lsjson --max-depth 1 "${remote_to_test}:" >/dev/null 2>&1; then
                 log_info "连接测试成功！ '${remote_to_test}' 可用。"
-                
+
                 echo -e "${GREEN}--- 详细信息 (部分后端可能不支持) ---${NC}"
                 if ! rclone about "${remote_to_test}:"; then
                     echo "无法获取详细的存储空间信息。"
