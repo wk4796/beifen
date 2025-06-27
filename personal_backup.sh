@@ -2056,27 +2056,30 @@ perform_backup() {
 
     local readable_time
     readable_time=$(date '+%Y-%m-%d %H:%M:%S')
+    local hostname
+    hostname=$(hostname)
 
     local final_subject="[${SCRIPT_NAME}] "
 
     # 预检
     if [ ${#BACKUP_SOURCE_PATHS_ARRAY[@]} -eq 0 ]; then
         log_error "未设置任何备份源路径。"
-        local error_message="📦 ${SCRIPT_NAME}"$'\n'"🕒 时间：${readable_time}"$'\n'"❌ 状态：备份失败"$'\n'"原因：未设置任何备份源路径。"
+        local error_message="📦 ${SCRIPT_NAME}"$'\n'"💻 主机名：${hostname}"$'\n'"🕒 时间：${readable_time}"$'\n'"❌ 状态：备份失败"$'\n'"原因：未设置任何备份源路径。"
         send_notification "$error_message" "${final_subject}备份失败"
         return 1
     fi
     if [ ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} -eq 0 ]; then
         log_error "未启用任何 Rclone 目标。"
-        local error_message="📦 ${SCRIPT_NAME}"$'\n'"🕒 时间：${readable_time}"$'\n'"❌ 状态：备份失败"$'\n'"原因：未启用任何 Rclone 备份目标。"
+        local error_message="📦 ${SCRIPT_NAME}"$'\n'"💻 主机名：${hostname}"$'\n'"🕒 时间：${readable_time}"$'\n'"❌ 状态：备份失败"$'\n'"原因：未启用任何 Rclone 备份目标。"
         send_notification "$error_message" "${final_subject}备份失败"
         return 1
     fi
     
-    # 发送 "开始" 消息
-    local mode_name=$([[ "$BACKUP_MODE" == "sync" ]] && echo "同步模式" || echo "归档模式")
-    local start_message="📦 ${SCRIPT_NAME}"$'\n'"🕒 时间：${readable_time}"$'\n'"🔧 模式：${backup_type} · ${mode_name}"$'\n'"▶️ 状态：备份已开始..."
-    send_notification "$start_message" "${final_subject}备份开始"
+    # [修改] 注释掉 "备份开始" 的通知
+    # # 发送 "开始" 消息
+    # local mode_name=$([[ "$BACKUP_MODE" == "sync" ]] && echo "同步模式" || echo "归档模式")
+    # local start_message="📦 ${SCRIPT_NAME}"$'\n'"💻 主机名：${hostname}"$'\n'"🕒 时间：${readable_time}"$'\n'"🔧 模式：${backup_type} · ${mode_name}"$'\n'"▶️ 状态：备份已开始..."
+    # send_notification "$start_message" "${final_subject}备份开始"
     
     # 执行备份
     local backup_result=0
@@ -2091,6 +2094,8 @@ perform_backup() {
     # --- 构建并发送最终报告 ---
     local final_status_emoji="✅"
     local final_status_text="备份完成"
+    local mode_name=$([[ "$BACKUP_MODE" == "sync" ]] && echo "同步模式" || echo "归档模式")
+
 
     if [[ "$GLOBAL_NOTIFICATION_OVERALL_STATUS" != "success" ]] || [[ "$backup_result" -ne 0 ]]; then
         final_status_emoji="❌"
@@ -2103,7 +2108,7 @@ perform_backup() {
         final_subject+="备份成功"
     fi
 
-    local final_header="📦 ${SCRIPT_NAME}"$'\n'"🕒 时间：${readable_time}"$'\n'"🔧 模式：${backup_type} · ${mode_name}"$'\n'"📁 备份路径：共 ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个"
+    local final_header="📦 ${SCRIPT_NAME}"$'\n'"💻 主机名：${hostname}"$'\n'"🕒 时间：${readable_time}"$'\n'"🔧 模式：${backup_type} · ${mode_name}"$'\n'"📁 备份路径：共 ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个"
 
     local final_footer="${final_status_emoji} 状态：${final_status_text}"
 
@@ -2576,8 +2581,10 @@ check_auto_backup() {
     rotate_log_if_needed
     acquire_lock
     
-    local current_timestamp=$(date +%s)
-    local interval_seconds=$(( AUTO_BACKUP_INTERVAL_DAYS * 24 * 3600 ))
+    local current_timestamp
+    current_timestamp=$(date +%s)
+    local interval_seconds
+    interval_seconds=$(( AUTO_BACKUP_INTERVAL_DAYS * 24 * 3600 ))
 
     if [ ${#BACKUP_SOURCE_PATHS_ARRAY[@]} -eq 0 ]; then
         log_error "自动备份失败：未设置备份源。"
@@ -2588,7 +2595,9 @@ check_auto_backup() {
         return 1
     fi
 
-    if [[ "$LAST_AUTO_BACKUP_TIMESTAMP" -eq 0 || $(( current_timestamp - LAST_AUTO_BACKUP_TIMESTAMP >= interval_seconds )) ]]; then
+    # [修复] 将时间计算和比较操作分开，以确保逻辑正确
+    local elapsed_time=$(( current_timestamp - LAST_AUTO_BACKUP_TIMESTAMP ))
+    if [[ "$LAST_AUTO_BACKUP_TIMESTAMP" -eq 0 || "$elapsed_time" -ge "$interval_seconds" ]]; then
         log_info "执行自动备份..."
         perform_backup "自动备份 (Cron)"
     else
@@ -3290,7 +3299,7 @@ test_rclone_remotes() {
 
         if [ ${#remotes_list[@]} -eq 0 ]; then
             log_warn "未发现任何已配置的 Rclone 远程端。"
-            log_info "请先使用 '[助手] 创建新的 Rclone 远程端' 或 'rclone config' 进行配置。"
+            log_info "请先使用 '创建新的 Rclone 远程端' 或 'rclone config' 进行配置。"
             press_enter_to_continue
             break
         fi
