@@ -195,6 +195,62 @@ press_enter_to_continue() {
     clear_screen
 }
 
+# --- 获取 Cron 任务信息 ---
+get_cron_job_info() {
+    local script_path
+    script_path=$(readlink -f "$0")
+    # 从 crontab 中查找包含脚本路径和特定命令的行
+    local cron_job
+    cron_job=$(crontab -l 2>/dev/null | grep -F "$script_path check_auto_backup")
+    
+    if [[ -n "$cron_job" ]]; then
+        # 提取 cron 表达式 (前五个字段)
+        echo "$cron_job" | awk '{print $1,$2,$3,$4,$5}'
+    else
+        echo "未设置"
+    fi
+}
+
+# [重构 & 修复] 将 Cron 表达式转化为易于理解的说明
+parse_cron_to_human() {
+    local cron_string="$1"
+    if [[ "$cron_string" == "未设置" ]]; then
+        echo "未设置"
+        return
+    fi
+    
+    # 使用 awk 来健壮地解析，无论有多少空格
+    local minute hour day_of_month month day_of_week
+    minute=$(echo "$cron_string" | awk '{print $1}')
+    hour=$(echo "$cron_string" | awk '{print $2}')
+    day_of_month=$(echo "$cron_string" | awk '{print $3}')
+    month=$(echo "$cron_string" | awk '{print $4}')
+    day_of_week=$(echo "$cron_string" | awk '{print $5}')
+
+    # 仅处理 'M H * * *' 这种由本脚本创建的简单格式
+    if [[ "$day_of_month" == "*" && "$month" == "*" && "$day_of_week" == "*" && "$minute" =~ ^[0-9]+$ && "$hour" =~ ^[0-9]+$ ]]; then
+        # [FIX] 强制使用 10 进制处理小时和分钟，避免 08, 09 被当作无效八进制数
+        local hour_decimal=$((10#$hour))
+        local minute_decimal=$((10#$minute))
+        
+        local formatted_hour=$(printf "%02d" "$hour_decimal")
+        local formatted_minute=$(printf "%02d" "$minute_decimal")
+        
+        local period="凌晨"
+        if (( hour_decimal >= 6 && hour_decimal < 12 )); then period="早上";
+        elif (( hour_decimal >= 12 && hour_decimal < 13 )); then period="中午";
+        elif (( hour_decimal >= 13 && hour_decimal < 18 )); then period="下午";
+        elif (( hour_decimal >= 18 && hour_decimal < 24 )); then period="晚上";
+        fi
+
+        echo "每天${period} ${formatted_hour} 点 ${formatted_minute} 分"
+    else
+        # 对于更复杂的 cron 表达式，直接返回原始值
+        echo "$cron_string"
+    fi
+}
+
+
 # --- 配置保存和加载 ---
 
 # 保存配置到文件
@@ -228,7 +284,6 @@ save_config() {
         echo "RCLONE_TARGETS_STRING=\"$RCLONE_TARGETS_STRING\""
         echo "ENABLED_RCLONE_TARGET_INDICES_STRING=\"$ENABLED_RCLONE_TARGET_INDICES_STRING\""
         echo "RCLONE_TARGETS_METADATA_STRING=\"$RCLONE_TARGETS_METADATA_STRING\""
-        # [移除] 旧的通知变量不再保存
     } > "$CONFIG_FILE"
 
     log_info "配置已保存到 $CONFIG_FILE"
@@ -716,10 +771,12 @@ restore_backup() {
 
 manage_auto_backup_menu() {
     while true; do
+        local human_cron_info
+        human_cron_info=$(parse_cron_to_human "$(get_cron_job_info)")
         display_header
         echo -e "${BLUE}=== 1. 自动备份与计划任务 ===${NC}"
-        echo -e "  1. ${YELLOW}自动备份与计划任务${NC} (当前: ${AUTO_BACKUP_INTERVAL_DAYS} 天)"
-        echo -e "  2. ${YELLOW}配置 Cron 定时任务${NC}"
+        echo -e "  1. ${YELLOW}设置自动备份间隔${NC} (间隔: ${AUTO_BACKUP_INTERVAL_DAYS} 天)"
+        echo -e "  2. ${YELLOW}配置 Cron 定时任务${NC} (当前: ${human_cron_info})"
         echo ""
         echo -e "  0. ${RED}返回主菜单${NC}"
         read -rp "请输入选项: " choice
@@ -736,7 +793,7 @@ manage_auto_backup_menu() {
 set_auto_backup_interval() {
     display_header
     echo -e "${BLUE}--- 设置自动备份间隔 ---${NC}"
-    read -rp "请输入新的自动备份间隔时间（天数，最小1天）[当前: ${AUTO_BACKUP_INTERVAL_DAYS}]: " interval_input
+    read -rp "请输入新的自动备份间隔时间（天数，最小1天）[间隔: ${AUTO_BACKUP_INTERVAL_DAYS}]: " interval_input
     if [[ "$interval_input" =~ ^[0-9]+$ ]] && [ "$interval_input" -ge 1 ]; then
         AUTO_BACKUP_INTERVAL_DAYS="$interval_input"
         save_config
@@ -763,8 +820,9 @@ setup_cron_job() {
     local cron_minute="${cron_time#*:}"
     local cron_hour="${cron_time%%:*}"
     
-    cron_minute=$(printf "%d" "$cron_minute")
-    cron_hour=$(printf "%d" "$cron_hour")
+    # [FIX] 强制使用 10 进制处理数字，避免 08, 09 被当作无效八进制数
+    cron_minute=$((10#${cron_minute}))
+    cron_hour=$((10#${cron_hour}))
 
     local script_path
     script_path=$(readlink -f "$0")
@@ -1194,7 +1252,7 @@ set_cloud_storage() {
 
 
 # ==============================================================================
-# ===                      新版消息通知模块 (JSON 版本)                      ===
+# ===                         新版消息通知模块 (JSON 版本)                       ===
 # ==============================================================================
 
 # --- JSON 配置文件辅助函数 ---
@@ -2075,12 +2133,6 @@ perform_backup() {
         return 1
     fi
     
-    # [修改] 注释掉 "备份开始" 的通知
-    # # 发送 "开始" 消息
-    # local mode_name=$([[ "$BACKUP_MODE" == "sync" ]] && echo "同步模式" || echo "归档模式")
-    # local start_message="📦 ${SCRIPT_NAME}"$'\n'"💻 主机名：${hostname}"$'\n'"🕒 时间：${readable_time}"$'\n'"🔧 模式：${backup_type} · ${mode_name}"$'\n'"▶️ 状态：备份已开始..."
-    # send_notification "$start_message" "${final_subject}备份开始"
-    
     # 执行备份
     local backup_result=0
     if [[ "$BACKUP_MODE" == "sync" ]]; then
@@ -2502,9 +2554,20 @@ show_main_menu() {
     echo -e "备份模式: ${GREEN}${mode_text}${NC}    备份源: ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个  已启用目标: ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} 个"
 
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 功能选项 ━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  1. ${YELLOW}自动备份与计划任务${NC} (当前间隔: ${AUTO_BACKUP_INTERVAL_DAYS} 天)"
+    local human_cron_info
+    human_cron_info=$(parse_cron_to_human "$(get_cron_job_info)")
+    echo -e "  1. ${YELLOW}自动备份与计划任务${NC} (间隔: ${AUTO_BACKUP_INTERVAL_DAYS} 天, Cron: ${human_cron_info})"
     echo -e "  2. ${YELLOW}手动备份${NC}"
-    echo -e "  3. ${YELLOW}自定义备份路径与模式${NC}"
+    
+    local strategy_text="独立打包"
+    if [[ "$PACKAGING_STRATEGY" == "single" ]]; then
+        strategy_text="合并打包"
+    fi
+    local mode_text_short="归档"
+    if [[ "$BACKUP_MODE" == "sync" ]]; then
+        mode_text_short="同步"
+    fi
+    echo -e "  3. ${YELLOW}自定义备份路径与模式${NC} (路径: ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个, 打包: ${strategy_text}, 模式: ${mode_text_short})"
     
     local format_text="$COMPRESSION_FORMAT"
     if [[ "$COMPRESSION_FORMAT" == "zip" && -n "$ZIP_PASSWORD" ]]; then
@@ -2635,7 +2698,7 @@ main() {
 }
 
 # ================================================================
-# ===         RCLONE 云存储管理函数 (无需修改)                 ===
+# ===           RCLONE 云存储管理函数 (无需修改)                 ===
 # ================================================================
 
 prompt_and_add_target() {
