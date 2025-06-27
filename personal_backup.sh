@@ -89,6 +89,7 @@ initialize_directories() {
         exit 1
     fi
     if ! mkdir -p "$LOG_DIR" 2>/dev/null; then
+        # 在日志系统完全工作前，只能用 echo 输出到标准错误流
         echo -e "${RED}[ERROR] 无法创建日志目录: $LOG_DIR。请检查权限。${NC}" >&2
         exit 1
     fi
@@ -182,7 +183,7 @@ clear_screen() {
 display_header() {
     clear_screen
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}        $SCRIPT_NAME        ${NC}"
+    echo -e "${GREEN}       $SCRIPT_NAME       ${NC}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 }
@@ -506,7 +507,7 @@ send_telegram_message() {
     fi
 }
 
-# --- [重构] 邮件发送函数, 接受发件人的 JSON 配置 ---
+# --- [修复] 邮件发送函数, 接受发件人的 JSON 配置 ---
 send_email_message() {
     local sender_config_json="$1"
     local message_content="$2"
@@ -571,6 +572,7 @@ EOF
         curl_tls_option=""
     fi
 
+    local curl_exit_code=0
     if curl --silent --show-error --url "${curl_protocol}://${host}:${port}" \
         ${curl_tls_option} \
         --user "${user}:${pass}" \
@@ -578,13 +580,14 @@ EOF
         "${mail_rcpt_args[@]}" \
         --upload-file "$mail_body_file"; then
         log_info "邮件发送成功 ([${alias}])。"
-        return 0
     else
         log_error "邮件发送失败 ([${alias}])！请检查配置、网络或 curl 错误输出。"
-        return 1
+        curl_exit_code=1
     fi
-
+    
+    # [FIX] 无论 curl 成功或失败，都确保删除临时文件
     rm -f "$mail_body_file"
+    return "$curl_exit_code"
 }
 
 # --- [重构 & 修复] 统一的通知发送函数，支持多通道 ---
@@ -595,30 +598,41 @@ send_notification() {
     # --- 发送 Telegram ---
     local telegram_bots_file="$TELEGRAM_BOTS_CONFIG_FILE"
     if [[ -f "$telegram_bots_file" ]]; then
-        local enabled_bots
-        enabled_bots=$(jq -c '.[] | select(.enabled == true)' "$telegram_bots_file" 2>/dev/null)
-        
-        if [[ -n "$enabled_bots" ]]; then
-            while IFS= read -r bot_config; do
-                send_telegram_message "$bot_config" "$message_content" || true
-            done <<< "$enabled_bots"
+        # [FIX] 增加对 jq 命令执行结果的检查
+        if ! jq -e '.' "$telegram_bots_file" >/dev/null 2>&1; then
+             log_error "Telegram 配置文件 ($telegram_bots_file) 格式错误，跳过发送。"
+        else
+            local enabled_bots
+            enabled_bots=$(jq -c '.[] | select(.enabled == true)' "$telegram_bots_file")
+            
+            if [[ -n "$enabled_bots" ]]; then
+                while IFS= read -r bot_config; do
+                    send_telegram_message "$bot_config" "$message_content" || true
+                done <<< "$enabled_bots"
+            fi
         fi
     fi
 
     # --- 发送 邮件 ---
     local email_senders_file="$EMAIL_SENDERS_CONFIG_FILE"
     if [[ -f "$email_senders_file" ]]; then
-        local enabled_senders
-        enabled_senders=$(jq -c '.[] | select(.enabled == true)' "$email_senders_file" 2>/dev/null)
+        # [FIX] 增加对 jq 命令执行结果的检查
+        if ! jq -e '.' "$email_senders_file" >/dev/null 2>&1; then
+            log_error "Email 配置文件 ($email_senders_file) 格式错误，跳过发送。"
+        else
+            local enabled_senders
+            enabled_senders=$(jq -c '.[] | select(.enabled == true)' "$email_senders_file")
 
-        if [[ -n "$enabled_senders" ]]; then
-            while IFS= read -r sender_config; do
-                send_email_message "$sender_config" "$message_content" "$subject" || true
-            done <<< "$enabled_senders"
+            if [[ -n "$enabled_senders" ]]; then
+                while IFS= read -r sender_config; do
+                    send_email_message "$sender_config" "$message_content" "$subject" || true
+                done <<< "$enabled_senders"
+            fi
         fi
     fi
 }
 
+# --- [修复] 恢复备份函数 ---
 restore_backup() {
     display_header
     echo -e "${BLUE}=== 从云端恢复到本地 ===${NC}"
@@ -648,7 +662,7 @@ restore_backup() {
         return
     fi
 
-    if ! [[ "$target_choice" =~ ^[0-9]+$ ]] || [ "$target_choice" -gt ${#enabled_targets[@]} ]; then
+    if ! [[ "$target_choice" =~ ^[0-9]+$ ]] || [ "$target_choice" -le 0 ] || [ "$target_choice" -gt ${#enabled_targets[@]} ]; then
         log_error "无效选项。"
         press_enter_to_continue
         return
@@ -657,17 +671,15 @@ restore_backup() {
     local selected_target="${enabled_targets[$((target_choice-1))]}"
     log_info "正在从 ${selected_target} 获取备份列表..."
     
-    local backup_files_str
-    backup_files_str=$(rclone lsf --files-only "${selected_target}" | grep -E '\.zip$|\.tar\.gz$' | sort -r)
+    # [FIX] 使用 mapfile 替代 command substitution，更安全地处理带空格的文件名
+    local backup_files=()
+    mapfile -t backup_files < <(rclone lsf --files-only "${selected_target}" | grep -E '\.zip$|\.tar\.gz$' | sort -r)
 
-    if [[ -z "$backup_files_str" ]]; then
+    if [ ${#backup_files[@]} -eq 0 ]; then
         log_error "在 ${selected_target} 中未找到任何 .zip 或 .tar.gz 备份文件。"
         press_enter_to_continue
         return
     fi
-    
-    local backup_files=()
-    mapfile -t backup_files <<< "$backup_files_str"
     
     log_info "发现以下备份文件（按名称逆序排序）："
     for i in "${!backup_files[@]}"; do
@@ -682,18 +694,15 @@ restore_backup() {
         return
     fi
 
-    if ! [[ "$file_choice" =~ ^[0-9]+$ ]] || [ "$file_choice" -gt ${#backup_files[@]} ]; then
+    if ! [[ "$file_choice" =~ ^[0-9]+$ ]] || [ "$file_choice" -le 0 ] || [ "$file_choice" -gt ${#backup_files[@]} ]; then
         log_error "无效选项。"
         press_enter_to_continue
         return
     fi
 
     local selected_file="${backup_files[$((file_choice-1))]}"
-    local remote_file_path="${selected_target}"
-    if [[ "${remote_file_path: -1}" != "/" ]]; then
-        remote_file_path+="/"
-    fi
-    remote_file_path+="${selected_file}"
+    # 确保路径被正确引用
+    local remote_file_path="${selected_target%/}/${selected_file}"
 
     local temp_archive_path="${TEMP_DIR}/${selected_file}"
     log_warn "正在下载备份文件: ${selected_file}..."
@@ -733,13 +742,14 @@ restore_backup() {
                         read -s -p "解压失败，文件可能已加密。请输入密码 (留空则跳过): " restore_pass
                         echo ""
                         if [[ -n "$restore_pass" ]]; then
+                            # [FIX] 增加对错误密码的判断
                             if unzip -o -P "$restore_pass" "${temp_archive_path}" -d "${restore_dir}"; then
                                 log_info "解压完成！"
                             else
                                 log_error "密码错误或文件损坏，解压失败！"
                             fi
                         else
-                            log_error "解压失败！"
+                            log_error "未提供密码，解压失败！"
                         fi
                     fi
                 elif [[ "$selected_file" == *.tar.gz ]]; then
@@ -826,7 +836,7 @@ setup_cron_job() {
 
     local script_path
     script_path=$(readlink -f "$0")
-    local cron_command="${cron_minute} ${cron_hour} * * * ${script_path} check_auto_backup >> \"${LOG_FILE}\" 2>&1"
+    local cron_command="${cron_minute} ${cron_hour} * * * \"${script_path}\" check_auto_backup >> \"${LOG_FILE}\" 2>&1"
     
     if crontab -l 2>/dev/null | grep -qF "$script_path check_auto_backup"; then
         log_warn "检测到已存在此脚本的定时任务。"
@@ -881,7 +891,8 @@ add_backup_path() {
     fi
 
     local resolved_path
-    resolved_path=$(realpath -q "$path_input" 2>/dev/null)
+    # [FIX] 处理波浪号扩展
+    eval resolved_path=$(realpath -q "$path_input" 2>/dev/null)
 
     if [[ -z "$resolved_path" ]]; then
         log_error "输入的路径 '$path_input' 无效或不存在。"
@@ -943,7 +954,7 @@ view_and_manage_backup_paths() {
                     fi
 
                     local resolved_new_path
-                    resolved_new_path=$(realpath -q "$new_path_input" 2>/dev/null)
+                    eval resolved_new_path=$(realpath -q "$new_path_input" 2>/dev/null)
 
                     if [[ -z "$resolved_new_path" || (! -d "$resolved_new_path" && ! -f "$resolved_new_path") ]]; then
                         log_error "错误：新路径无效或不存在。"
@@ -1252,18 +1263,38 @@ set_cloud_storage() {
 
 
 # ==============================================================================
-# ===                         新版消息通知模块 (JSON 版本)                       ===
+# ===                      新版消息通知模块 (JSON 版本)                      ===
 # ==============================================================================
 
 # --- JSON 配置文件辅助函数 ---
 
+# [FIX] 增加对 jq 命令执行结果的检查
+check_json_file() {
+    local file_path="$1"
+    local file_alias="$2"
+    if [[ ! -f "$file_path" ]]; then
+        # 文件不存在不是一个错误，可以稍后创建
+        return 0
+    fi
+    if ! jq -e '.' "$file_path" >/dev/null 2>&1; then
+        log_error "通知配置文件损坏: ${file_path} (${file_alias})。请修复或删除此文件。"
+        return 1
+    fi
+    return 0
+}
+
+
 # 加载 Telegram Bot 配置, 如果文件不存在则返回空数组
 load_telegram_bots() {
+    if ! check_json_file "$TELEGRAM_BOTS_CONFIG_FILE" "Telegram"; then
+        echo "[]"
+        return
+    fi
     if [[ ! -f "$TELEGRAM_BOTS_CONFIG_FILE" ]]; then
         echo "[]"
         return
     fi
-    jq '.' "$TELEGRAM_BOTS_CONFIG_FILE" 2>/dev/null || echo "[]"
+    jq '.' "$TELEGRAM_BOTS_CONFIG_FILE"
 }
 
 # 保存 Telegram Bot 配置
@@ -1275,11 +1306,15 @@ save_telegram_bots() {
 
 # 加载 Email 发件人配置, 如果文件不存在则返回空数组
 load_email_senders() {
+    if ! check_json_file "$EMAIL_SENDERS_CONFIG_FILE" "Email"; then
+        echo "[]"
+        return
+    fi
     if [[ ! -f "$EMAIL_SENDERS_CONFIG_FILE" ]]; then
         echo "[]"
         return
     fi
-    jq '.' "$EMAIL_SENDERS_CONFIG_FILE" 2>/dev/null || echo "[]"
+    jq '.' "$EMAIL_SENDERS_CONFIG_FILE"
 }
 
 # 保存 Email 发件人配置
@@ -1299,6 +1334,12 @@ manage_telegram_bots() {
         
         local bots_json
         bots_json=$(load_telegram_bots)
+        # 如果 load_telegram_bots 因为文件损坏而返回空，则 bots_json 也是空的
+        if ! jq -e '.' <<< "$bots_json" >/dev/null 2>&1; then
+            press_enter_to_continue
+            break
+        fi
+
         local bot_count
         bot_count=$(echo "$bots_json" | jq 'length')
 
@@ -1308,9 +1349,8 @@ manage_telegram_bots() {
             echo "已配置的机器人列表:"
             for i in $(seq 0 $((bot_count - 1))); do
                 local alias enabled status
-                # 提取数据，确保在 jq 失败时有默认值，防止脚本退出
-                alias=$(echo "$bots_json" | jq -r ".[$i].alias" 2>/dev/null || echo "无效条目")
-                enabled=$(echo "$bots_json" | jq -r ".[$i].enabled" 2>/dev/null || echo "false")
+                alias=$(echo "$bots_json" | jq -r ".[$i].alias")
+                enabled=$(echo "$bots_json" | jq -r ".[$i].enabled")
                 status=$([[ "$enabled" == "true" ]] && echo -e "[${GREEN}已启用${NC}]" || echo "[已禁用]")
                 echo -e "  $((i+1)). ${alias} ${status}"
             done
@@ -1485,6 +1525,11 @@ manage_email_senders() {
         
         local senders_json
         senders_json=$(load_email_senders)
+        if ! jq -e '.' <<< "$senders_json" >/dev/null 2>&1; then
+            press_enter_to_continue
+            break
+        fi
+
         local sender_count
         sender_count=$(echo "$senders_json" | jq 'length')
 
@@ -1494,9 +1539,9 @@ manage_email_senders() {
             echo "已配置的发件人列表:"
             for i in $(seq 0 $((sender_count - 1))); do
                 local alias enabled status recipients_count
-                alias=$(echo "$senders_json" | jq -r ".[$i].alias" 2>/dev/null || echo "无效条目")
-                enabled=$(echo "$senders_json" | jq -r ".[$i].enabled" 2>/dev/null || echo "false")
-                recipients_count=$(echo "$senders_json" | jq ".[$i].recipients | length" 2>/dev/null || echo "0")
+                alias=$(echo "$senders_json" | jq -r ".[$i].alias")
+                enabled=$(echo "$senders_json" | jq -r ".[$i].enabled")
+                recipients_count=$(echo "$senders_json" | jq ".[$i].recipients | length")
                 status=$([[ "$enabled" == "true" ]] && echo -e "[${GREEN}已启用${NC}]" || echo "[已禁用]")
                 echo -e "  $((i+1)). ${alias} (收件人: ${recipients_count}) ${status}"
             done
@@ -1674,7 +1719,7 @@ send_test_notification_menu() {
 
         # 加载并显示 Telegram 配置
         local bots_json=$(load_telegram_bots)
-        if [[ "$(echo "$bots_json" | jq 'length')" -gt 0 ]]; then
+        if jq -e '.' <<< "$bots_json" >/dev/null 2>&1 && [[ "$(echo "$bots_json" | jq 'length')" -gt 0 ]]; then
             echo "--- Telegram 机器人 ---"
             local temp_bots_configs
             mapfile -t temp_bots_configs < <(echo "$bots_json" | jq -c '.[]')
@@ -1691,7 +1736,7 @@ send_test_notification_menu() {
 
         # 加载并显示 Email 配置
         local senders_json=$(load_email_senders)
-        if [[ "$(echo "$senders_json" | jq 'length')" -gt 0 ]]; then
+        if jq -e '.' <<< "$senders_json" >/dev/null 2>&1 && [[ "$(echo "$senders_json" | jq 'length')" -gt 0 ]]; then
             echo "--- 邮件发件人 ---"
             local temp_senders_configs
             mapfile -t temp_senders_configs < <(echo "$senders_json" | jq -c '.[]')
@@ -1837,19 +1882,14 @@ apply_retention_policy() {
         local rclone_target="${RCLONE_TARGETS_ARRAY[$enabled_idx]}"
         log_info "正在为目标 ${rclone_target} 应用保留策略..."
 
-        local backups_list
-        backups_list=$(rclone lsf --files-only "${rclone_target}" | grep -E '\.zip$|\.tar\.gz$' || true)
+        # [FIX] 使用 mapfile 确保安全处理文件名
+        local backups_to_process=()
+        mapfile -t backups_to_process < <(rclone lsf --files-only "${rclone_target}" | grep -E '\.zip$|\.tar\.gz$' | sort)
         
-        if [[ -z "$backups_list" ]]; then
+        if [ ${#backups_to_process[@]} -eq 0 ]; then
             log_warn "在 ${rclone_target} 中未找到备份文件，跳过。"
             continue
         fi
-
-        local sorted_backups
-        sorted_backups=$(echo "$backups_list" | sort)
-
-        local backups_to_process=()
-        mapfile -t backups_to_process <<< "$sorted_backups"
 
         local deleted_count=0
         local total_found=${#backups_to_process[@]}
@@ -1860,14 +1900,10 @@ apply_retention_policy() {
                 log_warn "发现 ${num_to_delete} 个旧备份，将删除..."
                 for (( i=0; i<num_to_delete; i++ )); do
                     local file_to_delete="${backups_to_process[$i]}"
+                    local target_path_for_delete="${rclone_target%/}/${file_to_delete}"
                     
-                    local target_path_for_delete="${rclone_target}"
-                    if [[ "${target_path_for_delete: -1}" != "/" ]]; then
-                        target_path_for_delete+="/"
-                    fi
-                    
-                    log_info "正在删除: ${target_path_for_delete}${file_to_delete}"
-                    if rclone deletefile "${target_path_for_delete}${file_to_delete}"; then
+                    log_info "正在删除: ${target_path_for_delete}"
+                    if rclone deletefile "${target_path_for_delete}"; then
                         deleted_count=$((deleted_count + 1))
                     fi
                 done
@@ -1885,13 +1921,10 @@ apply_retention_policy() {
                 file_timestamp=$(date -d "${timestamp_str}" +%s 2>/dev/null || echo 0)
 
                 if [[ "$file_timestamp" -ne 0 && "$file_timestamp" -lt "$cutoff_timestamp" ]]; then
-                    local target_path_for_delete="${rclone_target}"
-                    if [[ "${target_path_for_delete: -1}" != "/" ]]; then
-                        target_path_for_delete+="/"
-                    fi
+                    local target_path_for_delete="${rclone_target%/}/${item}"
 
-                    log_info "正在删除: ${target_path_for_delete}${item}"
-                    if rclone deletefile "${target_path_for_delete}${item}"; then
+                    log_info "正在删除: ${target_path_for_delete}"
+                    if rclone deletefile "${target_path_for_delete}"; then
                         deleted_count=$((deleted_count + 1))
                     fi
                 fi
@@ -1970,6 +2003,7 @@ perform_sync_backup() {
         local path_has_failure="false"
         for enabled_idx in "${ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]}"; do
             local rclone_target="${RCLONE_TARGETS_ARRAY[$enabled_idx]}"
+            # [FIX] 正确引用变量
             local sync_destination="${rclone_target%/}/${path_basename}"
             local formatted_target
             formatted_target=$(echo "$rclone_target" | sed 's/:/: /')
@@ -2032,8 +2066,10 @@ perform_archive_backup() {
             if [[ -n "$ZIP_PASSWORD" ]]; then
                 zip_args+=(-P "$ZIP_PASSWORD")
             fi
+            # [FIX] 正确引用变量数组
             zip "${zip_args[@]}" "$temp_archive_path" "${BACKUP_SOURCE_PATHS_ARRAY[@]}" || compress_success=false
         else # tar.gz
+            # [FIX] 正确引用变量数组
             GZIP="-${COMPRESSION_LEVEL}" tar -czf "$temp_archive_path" "${BACKUP_SOURCE_PATHS_ARRAY[@]}" || compress_success=false
         fi
 
@@ -2075,8 +2111,10 @@ perform_archive_backup() {
                 if [[ -n "$ZIP_PASSWORD" ]]; then
                     zip_args+=(-P "$ZIP_PASSWORD")
                 fi
+                # [FIX] 正确引用变量
                 (cd "$(dirname "$current_backup_path")" && zip "${zip_args[@]}" "$temp_archive_path" "$(basename "$current_backup_path")") || compress_success=false
             else # tar.gz
+                # [FIX] 正确引用变量
                 (cd "$(dirname "$current_backup_path")" && GZIP="-${COMPRESSION_LEVEL}" tar -czf "$temp_archive_path" "$(basename "$current_backup_path")") || compress_success=false
             fi
 
@@ -2104,6 +2142,7 @@ perform_archive_backup() {
     fi
 }
 
+# --- [修复] 备份执行与报告函数 ---
 perform_backup() {
     local backup_type="$1"
     
@@ -2145,20 +2184,20 @@ perform_backup() {
 
     # --- 构建并发送最终报告 ---
     local final_status_emoji="✅"
-    local final_status_text="备份完成"
+    local final_status_text="备份成功"
     local mode_name=$([[ "$BACKUP_MODE" == "sync" ]] && echo "同步模式" || echo "归档模式")
 
-
-    if [[ "$GLOBAL_NOTIFICATION_OVERALL_STATUS" != "success" ]] || [[ "$backup_result" -ne 0 ]]; then
+    # [FIX] 使用 backup_result 来判断最终状态
+    if [[ "$backup_result" -ne 0 ]]; then
         final_status_emoji="❌"
         final_status_text="备份失败"
-        final_subject+="${final_status_text}"
-        if [[ -n "$GLOBAL_NOTIFICATION_FAILURE_REASON" ]]; then
-             GLOBAL_NOTIFICATION_REPORT_BODY+=$'\n\n'"原因：${GLOBAL_NOTIFICATION_FAILURE_REASON}"
-        fi
-    else
-        final_subject+="备份成功"
     fi
+    final_subject+="${final_status_text}"
+    
+    if [[ "$GLOBAL_NOTIFICATION_OVERALL_STATUS" != "success" && -n "$GLOBAL_NOTIFICATION_FAILURE_REASON" ]]; then
+        GLOBAL_NOTIFICATION_REPORT_BODY+=$'\n\n'"原因：${GLOBAL_NOTIFICATION_FAILURE_REASON}"
+    fi
+
 
     local final_header="📦 ${SCRIPT_NAME}"$'\n'"💻 主机名：${hostname}"$'\n'"🕒 时间：${readable_time}"$'\n'"🔧 模式：${backup_type} · ${mode_name}"$'\n'"📁 备份路径：共 ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个"
 
@@ -2170,9 +2209,13 @@ perform_backup() {
 
     send_notification "$final_message" "$final_subject"
 
-    if [[ "$final_status_text" == "备份完成" ]]; then
+    # [FIX] 只有在备份完全成功时才更新时间戳
+    if [[ "$backup_result" -eq 0 ]]; then
+        log_info "备份成功完成，正在更新时间戳。"
         LAST_AUTO_BACKUP_TIMESTAMP=$(date +%s)
         save_config
+    else
+        log_warn "备份过程存在失败，不更新上次备份时间戳。"
     fi
     
     return $backup_result
@@ -2206,13 +2249,11 @@ upload_archive() {
         local formatted_target
         formatted_target=$(echo "$rclone_target" | sed 's/:/: /')
         
-        local destination_path="${rclone_target}"
-        if [[ "${destination_path: -1}" != "/" ]]; then
-            destination_path+="/"
-        fi
+        # [FIX] 正确引用变量
+        local destination_path="${rclone_target%/}/${archive_name}"
 
         log_info "正在上传到 Rclone 目标: ${destination_path}"
-        if rclone copyto "$temp_archive_path" "${destination_path}${archive_name}" --progress ${bw_limit_arg}; then
+        if rclone copyto "$temp_archive_path" "${destination_path}" --progress ${bw_limit_arg}; then
             log_info "上传到 ${rclone_target} 成功！"
             upload_block+=$'\n'"${formatted_target} ✅ 上传成功"
             any_upload_succeeded_for_path="true"
@@ -2220,7 +2261,7 @@ upload_archive() {
             if [[ "$ENABLE_INTEGRITY_CHECK" == "true" ]]; then
                 log_info "正在对 ${rclone_target} 上的文件进行完整性校验..."
                 local check_output=""
-                if ! check_output=$(rclone check "$temp_archive_path" "${destination_path}${archive_name}" 2>&1); then
+                if ! check_output=$(rclone check "$temp_archive_path" "${destination_path}" 2>&1); then
                     log_error "校验失败！云端文件可能已损坏！详细信息:\n${check_output}"
                     upload_block+=" (校验失败 ❌)"
                     has_upload_failure="true"
@@ -2551,7 +2592,7 @@ show_main_menu() {
     if [[ "$BACKUP_MODE" == "sync" ]]; then
         mode_text="同步模式"
     fi
-    echo -e "备份模式: ${GREEN}${mode_text}${NC}    备份源: ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个  已启用目标: ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} 个"
+    echo -e "备份模式: ${GREEN}${mode_text}${NC}   备份源: ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个  已启用目标: ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} 个"
 
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 功能选项 ━━━━━━━━━━━━━━━━━━${NC}"
     local human_cron_info
@@ -2578,10 +2619,10 @@ show_main_menu() {
 
     # --- [重构] 新的通知状态显示逻辑 ---
     local enabled_methods=()
-    if [[ -f "$TELEGRAM_BOTS_CONFIG_FILE" ]] && [[ "$(jq 'map(select(.enabled == true)) | length' "$TELEGRAM_BOTS_CONFIG_FILE" 2>/dev/null)" -gt 0 ]]; then
+    if check_json_file "$TELEGRAM_BOTS_CONFIG_FILE" "Telegram" >/dev/null && [[ "$(jq 'map(select(.enabled == true)) | length' "$TELEGRAM_BOTS_CONFIG_FILE" 2>/dev/null)" -gt 0 ]]; then
         enabled_methods+=("Telegram")
     fi
-    if [[ -f "$EMAIL_SENDERS_CONFIG_FILE" ]] && [[ "$(jq 'map(select(.enabled == true)) | length' "$EMAIL_SENDERS_CONFIG_FILE" 2>/dev/null)" -gt 0 ]]; then
+    if check_json_file "$EMAIL_SENDERS_CONFIG_FILE" "Email" >/dev/null && [[ "$(jq 'map(select(.enabled == true)) | length' "$EMAIL_SENDERS_CONFIG_FILE" 2>/dev/null)" -gt 0 ]]; then
         enabled_methods+=("邮件")
     fi
 
@@ -2698,7 +2739,7 @@ main() {
 }
 
 # ================================================================
-# ===           RCLONE 云存储管理函数 (无需修改)                 ===
+# ===               RCLONE 云存储管理函数 (无需修改)               ===
 # ================================================================
 
 prompt_and_add_target() {
@@ -3115,6 +3156,7 @@ get_rclone_direct_contents() {
     return 0
 }
 
+# --- [FIX & 优化] 改进的 Rclone 路径选择函数 ---
 choose_rclone_path() {
     local remote_name="$1"
     local current_remote_path="/"
@@ -3144,16 +3186,17 @@ choose_rclone_path() {
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
         echo "  (输入上方序号以进入文件夹)"
         if [[ "$current_remote_path" != "/" ]]; then
-            echo -e "  ${YELLOW}m${NC} - 返回上一级目录"
+            echo -e "  ${YELLOW}b${NC} - 返回上一级目录 (Back)"
         fi
-        echo -e "  ${YELLOW}k${NC} - 将当前路径 '${current_remote_path}' 设为目标"
-        echo -e "  ${YELLOW}a${NC} - 手动输入新路径"
+        echo -e "  ${YELLOW}n${NC} - 在当前路径下新建文件夹 (New)"
+        echo -e "  ${YELLOW}s${NC} - 将当前路径 '${current_remote_path}' 设为目标 (Select)"
+        echo -e "  ${YELLOW}m${NC} - 手动输入新路径 (Manual)"
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo -e "  ${RED}x${NC} - 取消并返回"
         read -rp "请输入您的选择 (数字或字母): " choice
 
         case "$choice" in
-            "m" | "M" )
+            "b" | "B" ) # Back
                 if [[ "$current_remote_path" != "/" ]]; then
                     local parent_dir
                     parent_dir=$(dirname "${current_remote_path%/}")
@@ -3162,6 +3205,28 @@ choose_rclone_path() {
                     else
                         current_remote_path="/"
                     fi
+                fi
+                ;;
+            "n" | "N") # New Folder
+                read -rp "请输入新文件夹名称: " new_folder_name
+                if [[ -n "$new_folder_name" ]]; then
+                    log_info "正在创建文件夹: ${new_folder_name}"
+                    # 正确拼接路径并处理根目录情况
+                    local new_folder_path="${current_remote_path%/}"
+                    if [[ "$new_folder_path" == "/" ]]; then
+                        new_folder_path="/${new_folder_name}"
+                    else
+                        new_folder_path="${new_folder_path}/${new_folder_name}"
+                    fi
+
+                    if ! rclone mkdir "${remote_name}:${new_folder_path}"; then
+                        log_error "创建文件夹失败！请检查名称和权限。"
+                        press_enter_to_continue
+                    fi
+                    # 无需手动进入，循环刷新即可看到新文件夹
+                else
+                    log_warn "文件夹名称不能为空。"
+                    press_enter_to_continue
                 fi
                 ;;
             [0-9]* )
@@ -3182,11 +3247,11 @@ choose_rclone_path() {
                     log_error "无效序号。"; press_enter_to_continue
                 fi
                 ;;
-            [kK] )
+            [sS] ) # Select
                 final_selected_path="$current_remote_path"
                 break
                 ;;
-            [aA] )
+            [mM] ) # Manual
                 read -rp "请输入新的目标路径 (e.g., /backups/path/): " new_path_input
                 local new_path="$new_path_input"
                 if [[ "${new_path:0:1}" != "/" ]]; then
