@@ -19,7 +19,7 @@ NOTIFICATIONS_CONFIG_FILE="$CONFIG_DIR/notifications.json"
 LOG_MAX_SIZE_MB=8
 CONSOLE_LOG_LEVEL=2 # 默认 INFO
 FILE_LOG_LEVEL=1    # 默认 DEBUG
-ENABLE_SPACE_CHECK="true"         # 备份前临时空间检查
+ENABLE_SPACE_CHECK="true"          # 备份前临时空间检查
 
 # --- 日志级别定义 ---
 # 值越小，级别越低，输出越详细
@@ -175,7 +175,7 @@ clear_screen() {
 display_header() {
     clear_screen
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}       $SCRIPT_NAME       ${NC}"
+    echo -e "${GREEN}        $SCRIPT_NAME        ${NC}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 }
@@ -396,7 +396,7 @@ check_dependencies() {
                     fi
                 elif command -v apt-get &> /dev/null; then
                     if [[ "$pkg" == "cron" ]]; then
-                       pkg="cron"
+                        pkg="cron"
                     fi
                     if sudo apt-get update -qq >/dev/null && sudo apt-get install -y "$pkg"; then
                         log_info "'${pkg}' 安装成功。"
@@ -406,7 +406,7 @@ check_dependencies() {
                     fi
                 elif command -v yum &> /dev/null; then
                     if [[ "$pkg" == "cron" ]]; then
-                       pkg="cronie"
+                        pkg="cronie"
                     fi
                     if sudo yum install -y "$pkg"; then
                         log_info "'${pkg}' 安装成功。"
@@ -751,6 +751,8 @@ manage_auto_backup_menu() {
         human_cron_info=$(parse_cron_to_human "$(get_cron_job_info)")
         display_header
         echo -e "${BLUE}=== 1. 自动备份与计划任务 ===${NC}"
+        echo "说明：Cron定时任务 像一个每天中午12:26准时响起的“闹钟”，负责启动脚本；而 x 天备份间隔 则是脚本的“判断规则”，当被闹钟唤醒后，它会检查距离上次成功备份是否已满 x 天，只有满足这个条件时，才会真正执行一次新备份"
+        echo ""
         echo -e "  1. ${YELLOW}设置自动备份间隔${NC} (间隔: ${AUTO_BACKUP_INTERVAL_DAYS} 天)"
         echo -e "  2. ${YELLOW}配置 Cron 定时任务${NC} (当前: ${human_cron_info})"
         echo ""
@@ -1232,7 +1234,7 @@ set_cloud_storage() {
 
 
 # ==============================================================================
-# ===                      新版消息通知模块 (JSON 版本)                      ===
+# ===                                新版消息通知模块 (JSON 版本)                                ===
 # ==============================================================================
 
 # --- JSON 配置文件辅助函数 ---
@@ -1476,7 +1478,7 @@ manage_email_recipients() {
         esac
 
         if [[ "$config_changed" == "true" ]]; then
-             save_notification_config "$notifications_config"
+                save_notification_config "$notifications_config"
         fi
     done
 }
@@ -1486,7 +1488,7 @@ manage_email_senders() {
     notifications_config=$(load_notification_config)
     if [[ -z "$notifications_config" ]]; then press_enter_to_continue; return; fi
 
-     while true; do
+    while true; do
         display_header
         echo -e "${BLUE}=== 管理邮件发件人 ===${NC}"
 
@@ -1626,7 +1628,7 @@ manage_email_senders() {
             t|T)
                 if [[ "$sender_count" -eq 0 ]]; then log_warn "没有可切换状态的发件人。"; press_enter_to_continue; continue; fi
                 read -rp "请输入要切换状态的发件人序号: " index
-                 if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le "$sender_count" ]; then
+                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le "$sender_count" ]; then
                     local real_index=$((index - 1))
                     local current_state new_state
                     current_state=$(echo "$notifications_config" | jq ".email_senders[$real_index].enabled")
@@ -1644,7 +1646,7 @@ manage_email_senders() {
         esac
 
         if [[ "$config_changed" == "true" ]]; then
-             save_notification_config "$notifications_config"
+                save_notification_config "$notifications_config"
         fi
     done
 }
@@ -1763,7 +1765,7 @@ send_test_notification_menu() {
                             local test_body_tg="这是一条来自脚本的测试消息。如果您收到此消息，说明您的 'Telegram' 通知配置正确。"$'\n'"- ${test_date_line}"
                             send_telegram_message "$config_json" "$test_body_tg" || true
                         elif [[ "$config_type" == "email_sender" ]]; then
-                             local test_body_email="这是一条来自脚本的测试消息。如果您收到此消息，说明您的 '邮件' 通知配置正确。"$'\n'"- ${test_date_line}"
+                                local test_body_email="这是一条来自脚本的测试消息。如果您收到此消息，说明您的 '邮件' 通知配置正确。"$'\n'"- ${test_date_line}"
                             send_email_message "$config_json" "$test_body_email" "$test_subject" || true
                         fi
                     fi
@@ -1787,7 +1789,7 @@ set_retention_policy() {
             "none") echo -e "  无保留策略（所有备份将保留）" ;;
             "count") echo -e "  保留最新 ${RETENTION_VALUE} 个备份" ;;
             "days")  echo -e "  保留最近 ${RETENTION_VALUE} 天内的备份" ;;
-            *)       echo -e "  未知策略或未设置" ;;
+            *)      echo -e "  未知策略或未设置" ;;
         esac
         echo ""
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
@@ -2676,7 +2678,7 @@ show_main_menu() {
     if [[ "$BACKUP_MODE" == "sync" ]]; then
         mode_text="同步模式"
     fi
-    echo -e "备份模式: ${GREEN}${mode_text}${NC}   备份源: ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个  已启用目标: ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} 个"
+    echo -e "备份模式: ${GREEN}${mode_text}${NC}    备份源: ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个  已启用目标: ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} 个"
 
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 功能选项 ━━━━━━━━━━━━━━━━━━${NC}"
     local human_cron_info
