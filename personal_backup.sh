@@ -19,7 +19,7 @@ NOTIFICATIONS_CONFIG_FILE="$CONFIG_DIR/notifications.json"
 LOG_MAX_SIZE_MB=8
 CONSOLE_LOG_LEVEL=2 # 默认 INFO
 FILE_LOG_LEVEL=1    # 默认 DEBUG
-ENABLE_SPACE_CHECK="true"          # 备份前临时空间检查
+ENABLE_SPACE_CHECK="true"         # 备份前临时空间检查
 
 # --- 日志级别定义 ---
 # 值越小，级别越低，输出越详细
@@ -34,7 +34,7 @@ BACKUP_SOURCE_PATHS_STRING="" # 用于配置文件保存的路径字符串
 PACKAGING_STRATEGY="separate" # "separate" (独立打包) or "single" (合并打包)
 
 # 新增功能配置
-BACKUP_MODE="archive"         # "archive" (归档模式) or "sync" (同步模式)
+BACKUP_MODE="archive"       # "archive" (归档模式) or "sync" (同步模式)
 ENABLE_INTEGRITY_CHECK="true" # "true" or "false"，备份后完整性校验
 
 # 压缩格式配置
@@ -1234,7 +1234,7 @@ set_cloud_storage() {
 
 
 # ==============================================================================
-# ===                                新版消息通知模块 (JSON 版本)                                ===
+# ===                           新版消息通知模块 (JSON 版本)                       ===
 # ==============================================================================
 
 # --- JSON 配置文件辅助函数 ---
@@ -2631,30 +2631,98 @@ set_log_level() {
 }
 
 
+# [优化] 卸载脚本函数 (v3, 最终修正版)
 uninstall_script() {
     display_header
     echo -e "${RED}=== 99. 卸载脚本 ===${NC}"
-    echo -ne "${RED}警告：这将删除所有脚本文件、配置文件和日志文件。确定吗？(y/N): ${NC}"
-    read -r confirm
+    echo -e "${YELLOW}此操作将从您的系统中彻底移除此脚本及其所有相关数据。${NC}"
+    echo ""
+
+    # --- 1. 识别所有相关文件和目录 ---
+    local script_path
+    script_path=$(readlink -f "$0")
+    local config_dir_path="$CONFIG_DIR"
+    local log_dir_path="$LOG_DIR"
+    local config_backup_dirs=()
+    # 使用 find 查找所有备份目录
+    mapfile -t config_backup_dirs < <(find "$(dirname "$config_dir_path")" -maxdepth 1 -type d -name "$(basename "$config_dir_path").bak.*" 2>/dev/null)
+    local marker="# personal_backup_rclone_marker"
+    local cron_job_exists=false
+    if crontab -l 2>/dev/null | grep -qF "$marker"; then
+        cron_job_exists=true
+    fi
+
+    # --- 2. 向用户清晰展示将要删除的内容 ---
+    echo -e "${RED}警告：以下文件和目录将被永久删除：${NC}"
+    echo "──────────────────────────────────────────────────"
+    echo -e "  - ${YELLOW}脚本文件:${NC} $script_path"
+    if [[ -d "$config_dir_path" ]]; then
+        echo -e "  - ${YELLOW}配置目录:${NC} $config_dir_path"
+    fi
+    if [[ -d "$log_dir_path" ]]; then
+        echo -e "  - ${YELLOW}日志目录:${NC} $log_dir_path"
+    fi
+    if [[ ${#config_backup_dirs[@]} -gt 0 ]]; then
+        echo -e "  - ${YELLOW}导入前的配置备份:${NC}"
+        for backup_dir in "${config_backup_dirs[@]}"; do
+            echo "    - $backup_dir"
+        done
+    fi
+    if [[ "$cron_job_exists" == "true" ]]; then
+        echo -e "  - ${YELLOW}计划任务:${NC} 将从 crontab 中移除"
+    fi
+    echo "──────────────────────────────────────────────────"
+    echo ""
+
+    # --- 3. 二次确认 (y/N) ---
+    echo -e "${RED}此操作不可撤销！${NC}"
+    read -rp "您确定要继续吗？ (y/N): " confirm
+
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        log_warn "开始卸载..."
+        # 从这里开始，不再使用 log_* 函数，改用 echo
+        echo -e "${YELLOW}[WARN] 确认成功，开始执行卸载...${NC}"
+        sleep 1
 
-        local marker="# personal_backup_rclone_marker"
-        local current_crontab
-        current_crontab=$(crontab -l 2>/dev/null | grep -vF "$marker")
-        (echo "${current_crontab}") | crontab -
-        log_info "已从 crontab 移除定时任务。"
+        # --- 4. 执行删除操作 ---
+        
+        # 移除 Crontab
+        if [[ "$cron_job_exists" == "true" ]]; then
+            (crontab -l 2>/dev/null | grep -vF "$marker") | crontab -
+            echo -e "${GREEN}[INFO] 已从 crontab 移除定时任务。${NC}"
+        else
+            echo -e "${GREEN}[INFO] 未发现相关的定时任务。${NC}"
+        fi
 
-        rm -rf "$CONFIG_DIR" 2>/dev/null && log_info "删除配置目录: $CONFIG_DIR"
-        rm -rf "$LOG_DIR" 2>/dev/null && log_info "删除日志目录: $LOG_DIR"
+        # 删除配置目录
+        if [[ -d "$config_dir_path" ]]; then
+            rm -rf "$config_dir_path"
+            echo -e "${GREEN}[INFO] 已删除配置目录: $config_dir_path${NC}"
+        fi
 
-        log_warn "删除脚本文件: $(readlink -f "$0")" && rm -f "$(readlink -f "$0")"
-        echo -e "${GREEN}卸载完成。${NC}"
+        # 删除日志目录
+        if [[ -d "$log_dir_path" ]]; then
+            rm -rf "$log_dir_path"
+            echo -e "${GREEN}[INFO] 已删除日志目录: $log_dir_path${NC}"
+        fi
+        
+        # 删除配置备份目录
+        if [[ ${#config_backup_dirs[@]} -gt 0 ]]; then
+            for backup_dir in "${config_backup_dirs[@]}"; do
+                rm -rf "$backup_dir"
+                echo -e "${GREEN}[INFO] 已删除配置备份目录: $backup_dir${NC}"
+            done
+        fi
+
+        # --- 5. 脚本自我删除 (可靠版) ---
+        echo -e "${YELLOW}[WARN] 正在安排脚本自我删除: $script_path${NC}"
+        nohup /bin/sh -c "sleep 1 && rm -f -- \"$script_path\"" >/dev/null 2>&1 &
+
+        echo -e "${GREEN}✅ 卸载完成。感谢您的使用！${NC}"
         exit 0
     else
-        log_info "取消卸载。"
+        log_info "已取消卸载操作。"
+        press_enter_to_continue
     fi
-    press_enter_to_continue
 }
 
 show_main_menu() {
@@ -2678,7 +2746,7 @@ show_main_menu() {
     if [[ "$BACKUP_MODE" == "sync" ]]; then
         mode_text="同步模式"
     fi
-    echo -e "备份模式: ${GREEN}${mode_text}${NC}    备份源: ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个  已启用目标: ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} 个"
+    echo -e "备份模式: ${GREEN}${mode_text}${NC}     备份源: ${#BACKUP_SOURCE_PATHS_ARRAY[@]} 个  已启用目标: ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} 个"
 
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 功能选项 ━━━━━━━━━━━━━━━━━━${NC}"
     local human_cron_info
@@ -2827,7 +2895,7 @@ main() {
 }
 
 # ================================================================
-# ===               RCLONE 云存储管理函数 (无需修改)               ===
+# ===           RCLONE 云存储管理函数 (无需修改)               ===
 # ================================================================
 
 prompt_and_add_target() {
