@@ -91,13 +91,19 @@ initialize_directories() {
 
 # 确保在脚本退出时清理临时目录和锁文件
 cleanup() {
+    # 只有当日志文件还存在时，才尝试写入日志
+    local can_log=false
+    if [[ -f "$LOG_FILE" ]]; then
+        can_log=true
+    fi
+
     if [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]]; then
         rm -rf "$TEMP_DIR"
-        log_debug "清理临时目录: $TEMP_DIR"
+        if [[ "$can_log" == "true" ]]; then log_debug "清理临时目录: $TEMP_DIR"; fi
     fi
     if [ -f "$LOCK_FILE" ] && [ "$(cat "$LOCK_FILE")" -eq "$$" ]; then
         rm -f "$LOCK_FILE"
-        log_debug "移除进程锁: $LOCK_FILE"
+        if [[ "$can_log" == "true" ]]; then log_debug "移除进程锁: $LOCK_FILE"; fi
     fi
 }
 
@@ -115,7 +121,10 @@ _log() {
 
     # 写入日志文件
     if [[ $level_value -ge $FILE_LOG_LEVEL ]]; then
-        echo "$(date '+%Y-%m-%d %H:%M:%S') [${level_name}] - ${plain_message}" >> "$LOG_FILE"
+        # 增加判断，防止在卸载后因目录不存在而报错
+        if [ -d "$(dirname "$LOG_FILE")" ]; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') [${level_name}] - ${plain_message}" >> "$LOG_FILE"
+        fi
     fi
 
     # 输出到终端
@@ -2631,7 +2640,7 @@ set_log_level() {
 }
 
 
-# [优化] 卸载脚本函数 (v3, 最终修正版)
+# [优化] 卸载脚本函数 (v4, 带 rclone 卸载选项)
 uninstall_script() {
     display_header
     echo -e "${RED}=== 99. 卸载脚本 ===${NC}"
@@ -2644,16 +2653,20 @@ uninstall_script() {
     local config_dir_path="$CONFIG_DIR"
     local log_dir_path="$LOG_DIR"
     local config_backup_dirs=()
-    # 使用 find 查找所有备份目录
     mapfile -t config_backup_dirs < <(find "$(dirname "$config_dir_path")" -maxdepth 1 -type d -name "$(basename "$config_dir_path").bak.*" 2>/dev/null)
     local marker="# personal_backup_rclone_marker"
     local cron_job_exists=false
     if crontab -l 2>/dev/null | grep -qF "$marker"; then
         cron_job_exists=true
     fi
+    # [新增] 检查 rclone 是否已安装
+    local rclone_installed=false
+    if command -v rclone &> /dev/null; then
+        rclone_installed=true
+    fi
 
     # --- 2. 向用户清晰展示将要删除的内容 ---
-    echo -e "${RED}警告：以下文件和目录将被永久删除：${NC}"
+    echo -e "${RED}警告：以下【脚本相关】文件和目录将被永久删除：${NC}"
     echo "──────────────────────────────────────────────────"
     echo -e "  - ${YELLOW}脚本文件:${NC} $script_path"
     if [[ -d "$config_dir_path" ]]; then
@@ -2676,16 +2689,23 @@ uninstall_script() {
 
     # --- 3. 二次确认 (y/N) ---
     echo -e "${RED}此操作不可撤销！${NC}"
-    read -rp "您确定要继续吗？ (y/N): " confirm
+    read -rp "您确定要继续卸载【脚本】吗？ (y/N): " confirm
 
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        # 从这里开始，不再使用 log_* 函数，改用 echo
+        
+        # [新增] 在确认后，询问是否卸载 rclone
+        local uninstall_rclone=false
+        if [[ "$rclone_installed" == "true" ]]; then
+            read -rp "检测到 Rclone 已安装。是否一并卸载 Rclone 本体？(y/N): " rclone_confirm
+            if [[ "$rclone_confirm" =~ ^[Yy]$ ]]; then
+                uninstall_rclone=true
+            fi
+        fi
+
         echo -e "${YELLOW}[WARN] 确认成功，开始执行卸载...${NC}"
         sleep 1
 
         # --- 4. 执行删除操作 ---
-        
-        # 移除 Crontab
         if [[ "$cron_job_exists" == "true" ]]; then
             (crontab -l 2>/dev/null | grep -vF "$marker") | crontab -
             echo -e "${GREEN}[INFO] 已从 crontab 移除定时任务。${NC}"
@@ -2693,27 +2713,32 @@ uninstall_script() {
             echo -e "${GREEN}[INFO] 未发现相关的定时任务。${NC}"
         fi
 
-        # 删除配置目录
         if [[ -d "$config_dir_path" ]]; then
             rm -rf "$config_dir_path"
             echo -e "${GREEN}[INFO] 已删除配置目录: $config_dir_path${NC}"
         fi
 
-        # 删除日志目录
         if [[ -d "$log_dir_path" ]]; then
             rm -rf "$log_dir_path"
             echo -e "${GREEN}[INFO] 已删除日志目录: $log_dir_path${NC}"
         fi
         
-        # 删除配置备份目录
         if [[ ${#config_backup_dirs[@]} -gt 0 ]]; then
             for backup_dir in "${config_backup_dirs[@]}"; do
                 rm -rf "$backup_dir"
                 echo -e "${GREEN}[INFO] 已删除配置备份目录: $backup_dir${NC}"
             done
         fi
+        
+        # [新增] 根据用户选择卸载 rclone
+        if [[ "$uninstall_rclone" == "true" ]]; then
+            echo -e "${YELLOW}[INFO] 正在卸载 Rclone... (可能需要输入 sudo 密码)${NC}"
+            sudo rm -f /usr/bin/rclone /usr/local/bin/rclone
+            sudo rm -f /usr/local/share/man/man1/rclone.1
+            echo -e "${GREEN}[INFO] Rclone 已卸载。${NC}"
+        fi
 
-        # --- 5. 脚本自我删除 (可靠版) ---
+        # --- 5. 脚本自我删除 ---
         echo -e "${YELLOW}[WARN] 正在安排脚本自我删除: $script_path${NC}"
         nohup /bin/sh -c "sleep 1 && rm -f -- \"$script_path\"" >/dev/null 2>&1 &
 
