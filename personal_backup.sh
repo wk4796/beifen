@@ -2289,7 +2289,8 @@ manage_rclone_installation() {
                         press_enter_to_continue
                         continue
                     fi
-                    curl https://rclone.org/install.sh | sudo bash
+                    # [修复] 加上 || true 来处理 rclone 脚本在“已是最新版”时返回非零退出码的情况
+                    curl https://rclone.org/install.sh | sudo bash || true
                     log_info "Rclone 更新操作完成。"
                     press_enter_to_continue
                     ;;
@@ -2331,7 +2332,8 @@ manage_rclone_installation() {
                         press_enter_to_continue
                         continue
                     fi
-                    curl https://rclone.org/install.sh | sudo bash
+                    # [修复] 同样加上 || true
+                    curl https://rclone.org/install.sh | sudo bash || true
                     log_info "Rclone 安装操作完成。"
                     press_enter_to_continue
                     ;;
