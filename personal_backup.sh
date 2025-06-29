@@ -2262,67 +2262,88 @@ upload_archive() {
 }
 
 
-# Rclone 安装/卸载
+# [修改] Rclone 安装/更新/卸载
 manage_rclone_installation() {
     while true; do
         display_header
-        echo -e "${BLUE}=== 8. Rclone 安装/卸载 ===${NC}"
+        echo -e "${BLUE}=== 8. Rclone 安装/更新/卸载 ===${NC}"
 
         if command -v rclone &> /dev/null; then
+            # --- Rclone 已安装 ---
             local rclone_version
             rclone_version=$(rclone --version | head -n 1)
             echo -e "当前状态: ${GREEN}已安装${NC} (${rclone_version})"
-        else
-            echo -e "当前状态: ${RED}未安装${NC}"
-        fi
-        echo ""
+            echo ""
+            echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+            echo -e "  1. ${YELLOW}更新 Rclone 到最新版本${NC}"
+            echo -e "  2. ${YELLOW}卸载 Rclone${NC}"
+            echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            echo -e "  0. ${RED}返回主菜单${NC}"
+            read -rp "请输入选项: " choice
 
-        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "  1. ${YELLOW}安装或更新 Rclone${NC}"
-        echo -e "  2. ${YELLOW}卸载 Rclone${NC}"
-        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "  0. ${RED}返回主菜单${NC}"
-        read -rp "请输入选项: " choice
-
-        case $choice in
-            1)
-                log_info "正在从 rclone.org 下载并执行官方安装脚本..."
-                local install_output
-                install_output=$(curl https://rclone.org/install.sh | sudo bash 2>&1 | tee /dev/tty)
-
-                if echo "$install_output" | grep -q -e "Successfully installed" -e "is already installed"; then
-                    log_info "Rclone 安装/更新成功！"
-                else
-                    log_error "Rclone 安装/更新失败，请检查网络或 sudo 权限。"
-                fi
-                press_enter_to_continue
-                ;;
-            2)
-                if ! command -v rclone &> /dev/null; then
-                    log_warn "Rclone 未安装，无需卸载。"
+            case $choice in
+                1) # Update
+                    log_info "正在从 rclone.org 下载并执行官方安装脚本以更新 Rclone..."
+                    if ! command -v curl >/dev/null; then
+                        log_error "需要 'curl' 来执行此操作，但未安装。"
+                        press_enter_to_continue
+                        continue
+                    fi
+                    curl https://rclone.org/install.sh | sudo bash
+                    log_info "Rclone 更新操作完成。"
                     press_enter_to_continue
-                    continue
-                fi
-                echo -ne "${RED}警告: 这将从系统中移除 Rclone 本体程序。本脚本将无法工作，确定吗？(y/N): ${NC}"
-                read -r confirm
-                if [[ "$confirm" =~ ^[Yy]$ ]]; then
-                    log_warn "正在卸载 Rclone..."
-                    sudo rm -f /usr/bin/rclone /usr/local/bin/rclone
-                    sudo rm -f /usr/local/share/man/man1/rclone.1
-                    log_info "Rclone 已卸载。"
-                else
-                    log_info "已取消卸载。"
-                fi
-                press_enter_to_continue
-                ;;
-            0)
-                break
-                ;;
-            *)
-                log_error "无效选项。"
-                press_enter_to_continue
-                ;;
-        esac
+                    ;;
+                2) # Uninstall
+                    read -rp "$(echo -e "${RED}警告: 这将从系统中移除 Rclone 本体程序。确定吗？(y/N): ${NC}")" confirm
+                    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                        log_warn "正在卸载 Rclone... (可能需要输入 sudo 密码)"
+                        sudo rm -f /usr/bin/rclone /usr/local/bin/rclone
+                        sudo rm -f /usr/local/share/man/man1/rclone.1
+                        log_info "Rclone 已卸载。"
+                    else
+                        log_info "已取消卸载。"
+                    fi
+                    press_enter_to_continue
+                    ;;
+                0)
+                    break
+                    ;;
+                *)
+                    log_error "无效选项。"
+                    press_enter_to_continue
+                    ;;
+            esac
+        else
+            # --- Rclone 未安装 ---
+            echo -e "当前状态: ${RED}未安装${NC}"
+            echo ""
+            echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+            echo -e "  1. ${YELLOW}安装 Rclone${NC}"
+            echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            echo -e "  0. ${RED}返回主菜单${NC}"
+            read -rp "请输入选项: " choice
+
+            case $choice in
+                1) # Install
+                    log_info "正在从 rclone.org 下载并执行官方安装脚本以安装 Rclone..."
+                    if ! command -v curl >/dev/null; then
+                        log_error "需要 'curl' 来执行此操作，但未安装。"
+                        press_enter_to_continue
+                        continue
+                    fi
+                    curl https://rclone.org/install.sh | sudo bash
+                    log_info "Rclone 安装操作完成。"
+                    press_enter_to_continue
+                    ;;
+                0)
+                    break
+                    ;;
+                *)
+                    log_error "无效选项。"
+                    press_enter_to_continue
+                    ;;
+            esac
+        fi
     done
 }
 
@@ -2830,7 +2851,7 @@ show_main_menu() {
         rclone_version=$(rclone --version | head -n 1)
         rclone_version_text="(${rclone_version})"
     fi
-    echo -e "  8. ${YELLOW}Rclone 安装/卸载${NC} ${rclone_version_text}"
+    echo -e "  8. ${YELLOW}Rclone 安装/更新/卸载${NC} ${rclone_version_text}"
 
     echo -e "  9. ${YELLOW}从云端恢复到本地${NC} (仅适用于归档模式)"
     echo -e "  10. ${YELLOW}配置导入/导出${NC}"
