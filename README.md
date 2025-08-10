@@ -128,13 +128,13 @@
 
 1. **保存脚本文件**
 
-   * 在你的终端中，创建一个名为 `personal_backup_rclone.sh` 的文件。例如，将其保存在你的主目录 (`~`) 下：
+   * 在你的终端中，创建一个名为 `bf.sh` 的文件。例如，将其保存在你的主目录 (`~`) 下：
 
      ```bash
-     nano ~/personal_backup_rclone.sh
+     nano ~/bf.sh
      ```
 
-   * 将本脚本文件（在 GitHub 仓库中将是 `personal_backup_rclone.sh` 的文件内容）完整复制并粘贴到 `nano` 编辑器中。
+   * 将本脚本文件（在 GitHub 仓库中将是 `bf.sh` 的文件内容）完整复制并粘贴到 `nano` 编辑器中。
 
    * 保存并退出 `nano`：按下 `Ctrl + X`，输入 `Y`，然后按 `Enter`。
 
@@ -143,7 +143,7 @@
    * 在终端中执行以下命令，使脚本可运行：
 
      ```bash
-     chmod +x ~/personal_backup_rclone.sh
+     chmod +x ~/bf.sh
      ```
 
 3. **设置快捷启动 (可选，但推荐)**
@@ -157,10 +157,10 @@
    * 滚动到文件底部，添加以下行：
 
      ```bash
-     alias bf='bash ~/personal_backup_rclone.sh'
+     alias bf='bash ~/bf.sh'
      ```
 
-     **注意**：如果 `personal_backup_rclone.sh` 文件不在你的主目录，请替换为其实际的完整路径。
+     **注意**：如果 `bf.sh` 文件不在你的主目录，请替换为其实际的完整路径。
 
    * 保存并退出 (`Ctrl + X`, `Y`, `Enter`)。
 
