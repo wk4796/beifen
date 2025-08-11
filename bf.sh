@@ -2581,6 +2581,20 @@ system_maintenance_menu() {
     done
 }
 
+# [新增] 切换备份前空间检查的函数
+toggle_space_check() {
+    if [[ "$ENABLE_SPACE_CHECK" == "true" ]]; then
+        ENABLE_SPACE_CHECK="false"
+        log_warn "备份前空间检查已关闭。"
+    else
+        ENABLE_SPACE_CHECK="true"
+        log_info "备份前空间检查已开启。"
+    fi
+    save_config
+    press_enter_to_continue
+}
+
+
 # [优化] 设置日志轮转大小的函数
 set_log_rotation_size() {
     display_header
