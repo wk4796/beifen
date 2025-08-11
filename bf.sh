@@ -4,8 +4,8 @@ set -e # Exit immediately if a command exits with a non-zero status.
 # 脚本全局配置
 SCRIPT_NAME="个人自用数据备份 (Rclone)"
 # 使用 XDG Base Directory Specification
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/personal_backup_rclone"
-LOG_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/personal_backup_rclone"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/bf"
+LOG_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/bf"
 CONFIG_FILE="$CONFIG_DIR/config"
 LOG_FILE="$LOG_DIR/log.txt"
 LOCK_FILE="$CONFIG_DIR/script.lock"
@@ -200,7 +200,7 @@ press_enter_to_continue() {
 # --- 获取 Cron 任务信息 ---
 get_cron_job_info() {
     local cron_job
-    local marker="# personal_backup_rclone_marker"
+    local marker="# bf_marker"
     cron_job=$(crontab -l 2>/dev/null | grep -F "$marker")
 
     if [[ -n "$cron_job" ]]; then
@@ -798,7 +798,7 @@ setup_cron_job() {
     echo "此助手可以帮助您添加一个系统的定时任务，以实现无人值守自动备份。"
     echo -e "${YELLOW}它会自动将必要的 PATH 环境变量注入 crontab，确保脚本能被正确执行。${NC}"
 
-    local marker="# personal_backup_rclone_marker"
+    local marker="# bf_marker"
     local path_line="PATH=${PATH}"
 
     read -rp "请输入您希望每天执行检查的时间 (24小时制, HH:MM, 例如 03:00): " cron_time
@@ -822,7 +822,7 @@ setup_cron_job() {
 
     # 获取当前 crontab 内容，并移除旧的条目
     local current_crontab
-    current_crontab=$(crontab -l 2>/dev/null | grep -vF "$marker")
+    current_crontab=$(crontab -l 2>/dev/null | grep -vF "$marker" || true)
 
     # 使用用户输入的原始 cron_time 变量进行显示，保证格式正确
     read -rp "您想将定时任务设置为每天 ${cron_time} 吗？(Y/n): " confirm
@@ -2677,7 +2677,7 @@ uninstall_script() {
     local log_dir_path="$LOG_DIR"
     local config_backup_dirs=()
     mapfile -t config_backup_dirs < <(find "$(dirname "$config_dir_path")" -maxdepth 1 -type d -name "$(basename "$config_dir_path").bak.*" 2>/dev/null)
-    local marker="# personal_backup_rclone_marker"
+    local marker="# bf_marker"
     local cron_job_exists=false
     if crontab -l 2>/dev/null | grep -qF "$marker"; then
         cron_job_exists=true
@@ -2916,7 +2916,7 @@ check_auto_backup() {
 main() {
     initialize_directories
 
-    TEMP_DIR=$(mktemp -d -t personal_backup_rclone_XXXXXX)
+    TEMP_DIR=$(mktemp -d -t bf_XXXXXX)
     if [ ! -d "$TEMP_DIR" ]; then
         echo -e "${RED}[ERROR] 无法创建临时目录。${NC}"
         exit 1
