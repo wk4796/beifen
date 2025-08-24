@@ -38,7 +38,7 @@ BACKUP_MODE="archive"       # "archive" (归档模式) or "sync" (同步模式)
 ENABLE_INTEGRITY_CHECK="true" # "true" or "false"，备份后完整性校验
 
 # 压缩格式配置
-COMPRESSION_FORMAT="zip"      # "zip" or "tar.gz"
+COMPRESSION_FORMAT="tar.gz"      # "zip" or "tar.gz"
 COMPRESSION_LEVEL=6           # 1 (fastest) to 9 (best)
 ZIP_PASSWORD=""               # Password for zip files, empty for none
 
