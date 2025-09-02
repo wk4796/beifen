@@ -2,6 +2,11 @@
 
 这是一个我个人使用的 Bash 脚本，用于实现数据文件的自动化和手动备份到多种云存储（通过 Rclone），并提供详细的 Telegram 消息通知和云端备份保留策略。脚本提供了友好的命令行菜单界面，方便用户进行配置和操作。
 
+# 在您想要安装的机器上，进入目标目录，执行以下命令即可：
+```
+bash <(curl -sL https://raw.githubusercontent.com/wk4796/beifen/main/install_bf.sh)
+```
+
 ## 目录
 
 * [功能特性](#功能特性)
