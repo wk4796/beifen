@@ -15,6 +15,10 @@ NC='\033[0m'
 
 # --- 主函数 ---
 main() {
+    # --- 这里是修正的地方 ---
+    # 在脚本执行期间启用别名展开功能
+    shopt -s expand_aliases
+
     # 检查是使用 curl 还是 wget
     if command -v curl >/dev/null 2>&1; then
         DOWNLOADER="curl -sL"
@@ -63,7 +67,6 @@ main() {
         return 1
     fi
 
-    # --- 这里是修正的地方 ---
     echo -e "检测到您正在使用 ${SHELL_TYPE}，将修改配置文件: ${CYAN}${PROFILE_FILE}${NC}"
     
     # 4. 创建别名命令
