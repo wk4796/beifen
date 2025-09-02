@@ -15,6 +15,9 @@ NC='\033[0m'
 
 # --- 主函数 ---
 main() {
+    # 在脚本执行期间启用别名展开功能
+    shopt -s expand_aliases
+    
     # 检查是使用 curl 还是 wget
     if command -v curl >/dev/null 2>&1; then
         DOWNLOADER="curl -sL"
@@ -52,15 +55,18 @@ main() {
     elif [ -n "$BASH_VERSION" ]; then
         PROFILE_FILE="$HOME/.bashrc"
         SHELL_TYPE="Bash"
-    elif [ -f "$HOME/.zshrc" ]; then
-        PROFILE_FILE="$HOME/.zshrc"
-        SHELL_TYPE="Zsh"
-    elif [ -f "$HOME/.bashrc" ]; then
-        PROFILE_FILE="$HOME/.bashrc"
-        SHELL_TYPE="Bash"
     else
-        echo -e "${RED}错误：无法检测到 .zshrc 或 .bashrc 文件。${NC}"
-        return 1
+        # Fallback for non-standard shells
+        if [ -f "$HOME/.zshrc" ]; then
+            PROFILE_FILE="$HOME/.zshrc"
+            SHELL_TYPE="Zsh (Fallback)"
+        elif [ -f "$HOME/.bashrc" ]; then
+            PROFILE_FILE="$HOME/.bashrc"
+            SHELL_TYPE="Bash (Fallback)"
+        else
+            echo -e "${RED}错误：无法检测到 .zshrc 或 .bashrc 文件。${NC}"
+            return 1
+        fi
     fi
 
     echo -e "检测到您正在使用 ${SHELL_TYPE}，将修改配置文件: ${CYAN}${PROFILE_FILE}${NC}"
@@ -79,7 +85,20 @@ main() {
     fi
     
     # 5. 在当前 Shell 会话中也定义这个别名，使其立即生效
+    echo -e "${CYAN}--- 开始调试 ---${NC}"
+    echo "将要执行的别名命令: ${ALIAS_CMD}"
     eval "${ALIAS_CMD}"
+    echo "别名设置完毕。正在检查 'bf' 是否已定义..."
+    
+    # 检查别名是否真的被设置成功
+    if alias bf >/dev/null 2>&1; then
+        echo -e "${GREEN}调试成功: 'bf' 别名已在当前 Shell 中成功设置。${NC}"
+        echo -e "${CYAN}--- 调试结束 ---${NC}"
+    else
+        echo -e "${RED}调试失败: 'bf' 别名未能在当前 Shell 中设置！请检查您的 Shell 配置。${NC}"
+        echo -e "${CYAN}--- 调试结束 ---${NC}"
+        return 1
+    fi
     
     # 6. 最终提示并自动运行
     echo ""
@@ -92,8 +111,7 @@ main() {
     echo ""
     
     # 7. 自动运行 bf.sh
-    # 直接使用完整路径执行，避免依赖于可能尚未生效的别名
-    "${DEST_PATH}"
+    bf
 }
 
 # 执行主函数
