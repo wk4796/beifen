@@ -22,7 +22,7 @@ main() {
         DOWNLOADER="wget -qO-"
     else
         echo -e "${RED}错误：此脚本需要 curl 或 wget，但两者均未安装。${NC}"
-        return 1 # 使用 return 代替 exit
+        return 1
     fi
 
     echo -e "${GREEN}=== 开始安装个人备份脚本 (bf.sh) ===${NC}"
@@ -31,7 +31,7 @@ main() {
     echo -e "${YELLOW}正在下载脚本到: ${CYAN}${DEST_PATH}${NC}"
     if ! ${DOWNLOADER} "${SOURCE_URL}" > "${DEST_PATH}"; then
         echo -e "${RED}下载失败！请检查您的网络连接或 URL 是否正确。${NC}"
-        return 1 # 使用 return 代替 exit
+        return 1
     fi
     echo "下载成功！"
 
@@ -46,14 +46,12 @@ main() {
     PROFILE_FILE=""
     SHELL_TYPE=""
 
-    # 优先检测当前 Shell 类型
     if [ -n "$ZSH_VERSION" ]; then
         PROFILE_FILE="$HOME/.zshrc"
         SHELL_TYPE="Zsh"
     elif [ -n "$BASH_VERSION" ]; then
         PROFILE_FILE="$HOME/.bashrc"
         SHELL_TYPE="Bash"
-    # 如果变量不存在，则检查文件
     elif [ -f "$HOME/.zshrc" ]; then
         PROFILE_FILE="$HOME/.zshrc"
         SHELL_TYPE="Zsh"
@@ -62,15 +60,15 @@ main() {
         SHELL_TYPE="Bash"
     else
         echo -e "${RED}错误：无法检测到 .zshrc 或 .bashrc 文件。${NC}"
-        return 1 # 使用 return 代替 exit
+        return 1
     fi
 
-    echo "检测到您正在使用 ${SHELL_TYPE}，将修改配置文件: ${CYAN}${PROFILE_FILE}${NC}"
+    # --- 这里是修正的地方 ---
+    echo -e "检测到您正在使用 ${SHELL_TYPE}，将修改配置文件: ${CYAN}${PROFILE_FILE}${NC}"
     
     # 4. 创建别名命令
     ALIAS_CMD="alias bf='${DEST_PATH}'"
     
-    # 检查别名是否已存在于文件中
     if grep -qF -- "${ALIAS_CMD}" "${PROFILE_FILE}"; then
         echo -e "${GREEN}别名已存在于配置文件中，无需重复添加。${NC}"
     else
@@ -81,7 +79,7 @@ main() {
         echo "别名写入成功！"
     fi
     
-    # 5. !!! 关键步骤: 在当前 Shell 会话中也定义这个别名，使其立即生效 !!!
+    # 5. 在当前 Shell 会话中也定义这个别名，使其立即生效
     eval "${ALIAS_CMD}"
     
     # 6. 最终提示并自动运行
@@ -89,7 +87,7 @@ main() {
     echo -e "${GREEN}================================================================${NC}"
     echo -e "${GREEN}🎉 恭喜！脚本已安装并激活！${NC}"
     echo ""
-    echo "别名 'bf' 已在当前终端中生效，并已写入您的启动配置。"
+    echo -e "别名 'bf' 已在当前终端中生效，并已写入您的启动配置。"
     echo -e "现在将为您自动启动 ${YELLOW}bf.sh${NC} ..."
     echo -e "${GREEN}================================================================${NC}"
     echo ""
