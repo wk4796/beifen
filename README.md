@@ -6,6 +6,8 @@
 ```
 source <(curl -sL https://raw.githubusercontent.com/wk4796/beifen/main/install_bf.sh)
 ```
+### 脚本别名为：`tu`
+直接输入`tu`就可以进入脚本
 
 ## 目录
 
