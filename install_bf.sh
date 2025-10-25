@@ -4,8 +4,8 @@
 # --- 配置 ---
 SOURCE_URL="https://raw.githubusercontent.com/wk4796/beifen/main/bf.sh"
 DEST_FILE="bf.sh"
-# [修改] 安装路径改为 $HOME, 与 fenlei 保持一致
-DEST_PATH="$HOME/${DEST_FILE}"
+# [恢复] 安装路径改回当前目录 (pwd)
+DEST_PATH="$(pwd)/${DEST_FILE}"
 
 # --- 颜色定义 ---
 RED='\033[0;31m'
@@ -30,7 +30,7 @@ main() {
     # [修改] 统一提示
     echo -e "${GREEN}=== 开始安装个人备份脚本 (bf.sh) ===${NC}"
 
-    # 1. 下载脚本到 $HOME 目录
+    # 1. 下载脚本到当前目录
     # [修改] 统一提示
     echo -e "${YELLOW}正在从 GitHub 下载脚本到: ${CYAN}${DEST_PATH}${NC}"
     if ! ${DOWNLOADER} "${SOURCE_URL}" > "${DEST_PATH}"; then
@@ -80,7 +80,7 @@ main() {
         # [修改] 统一提示
         echo -e "检测到您正在使用 ${SHELL_TYPE}，将修改配置文件: ${CYAN}${PROFILE_FILE}${NC}"
 
-        # 4. 创建别名命令 (别名仍为 bf)
+        # 4. 创建别名命令 (别名仍为 bf, 但路径现在是基于 pwd 的)
         ALIAS_CMD="alias bf='${DEST_PATH}'"
 
         if grep -qF -- "${ALIAS_CMD}" "${PROFILE_FILE}"; then
@@ -109,7 +109,7 @@ main() {
     # 5. 在当前 Shell 会话中也定义这个别名，使其立即生效
     eval "${ALIAS_CMD}"
 
-    # 6. 最终提示并自动运行 (已修改)
+    # 6. 最终提示并自动运行 (包含黄色警告)
     echo ""
     echo -e "${GREEN}================================================================${NC}"
     # [修改] 统一提示
