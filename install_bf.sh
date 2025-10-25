@@ -42,7 +42,7 @@ main() {
 
     # 3. 自动配置 Shell 环境
     echo -e "${YELLOW}正在尝试自动配置 Shell 环境...${NC}"
-    
+
     PROFILE_FILE=""
     SHELL_TYPE=""
 
@@ -64,10 +64,10 @@ main() {
     fi
 
     echo -e "检测到您正在使用 ${SHELL_TYPE}，将修改配置文件: ${CYAN}${PROFILE_FILE}${NC}"
-    
+
     # 4. 创建别名命令
     ALIAS_CMD="alias bf='${DEST_PATH}'"
-    
+
     if grep -qF -- "${ALIAS_CMD}" "${PROFILE_FILE}"; then
         echo -e "${GREEN}别名已存在于配置文件中，无需重复添加。${NC}"
     else
@@ -77,20 +77,23 @@ main() {
         echo "${ALIAS_CMD}" >> "${PROFILE_FILE}"
         echo "别名写入成功！"
     fi
-    
+
     # 5. 在当前 Shell 会话中也定义这个别名，使其立即生效
     eval "${ALIAS_CMD}"
-    
-    # 6. 最终提示并自动运行
+
+    # 6. 最终提示并自动运行 (已修改)
     echo ""
     echo -e "${GREEN}================================================================${NC}"
     echo -e "${GREEN}🎉 恭喜！脚本已安装并激活！${NC}"
     echo ""
     echo -e "别名 'bf' 已在当前终端中生效，并已写入您的启动配置。"
     echo -e "现在将为您自动启动 ${YELLOW}bf.sh${NC} ..."
+    # *** 新增提示 ***
+    echo -e "${YELLOW}如果脚本未自动弹出主菜单，请手动输入 'bf' 命令运行。${NC}"
+    # *** 结束新增 ***
     echo -e "${GREEN}================================================================${NC}"
     echo ""
-    
+
     # 7. 自动运行 bf.sh
     # 直接使用完整路径执行，避免依赖于可能尚未生效的别名
     "${DEST_PATH}"
