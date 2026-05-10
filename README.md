@@ -115,7 +115,9 @@ source <(curl -sL https://raw.githubusercontent.com/wk4796/beifen/main/install_b
 
   * `tar`: 用于 `.tar.gz` 文件的压缩。
 
-  * `curl`: 用于安装 Rclone 和发送 Telegram 消息。
+  * `curl`: 用于安装 Rclone 和发送通知消息。
+
+  * `jq`: 用于处理 Webhook 和多通道通知的 JSON 格式配置。
 
   * `realpath`: 用于解析文件真实路径 (通常包含在 `coreutils` 包中)。
 
@@ -332,11 +334,39 @@ echo $0
 
 ### 6. 消息通知设定 (Telegram)
 
-配置 Telegram 机器人，以便在备份过程中接收通知：
+配置通知服务，以便在备份完成后接收结果通知。本脚本支持同时启用多种通知：
 
-* **启用/禁用通知**：切换 Telegram 通知功能。
+* **管理 Telegram 机器人**：添加并管理多个 Telegram Bot Token 和 Chat ID。
 
-* **设置/修改凭证**：输入你的 Telegram Bot Token 和 Chat ID。**注意：这些凭证会被保存到脚本的配置文件中。**
+* **管理 邮件发件人**：配置 SMTP 发件服务器并管理收件人列表。
+
+* **管理 Webhook (微信/钉钉/Server酱等)**：支持自定义 URL、请求方法、Headers 和注入动态变量的 Body 模板。
+
+* **发送测试通知**：配置完毕后可单独测试各个通道是否能正常收到消息。
+
+**【附】微信 ClawBot 推送配置教程**
+
+如果你希望将备份结果直接推送到微信卡片，请在菜单选择 `3. 管理 Webhook` -> `a - 添加新 Webhook`，并严格按照以下内容填写：
+
+1. **别名**：`微信推送` (或自定义)
+
+2. **Webhook URL**：
+```bash
+https://ilinkai.weixin.qq.com/ilink/bot/sendmessage
+```
+
+4. **请求方法**：`POST` (直接按回车默认)
+
+5. **请求头 (Headers)**：(请将 `$your_bot_token` 替换为真实的 Token，整行复制)
+```bash
+Content-Type: application/json, AuthorizationType: ilink_bot_token, Authorization: Bearer $your_bot_token, iLink-App-Id: bot, iLink-App-ClientVersion: 131335
+```
+
+6. **Body 模板**：(请将 `$your_user_id` 替换为真实的微信 ID，保留 `@im.wechat`)
+```bash
+{"msg":{"from_user_id":"","to_user_id":"$your_user_id@im.wechat","client_id":"bf-#{timestamp}","message_type":2,"message_state":2,"item_list":[{"type":1,"text_item":{"text":"#{message}"}}]},"base_info":{"channel_version":"2.1.7"}}
+```
+*(注：模板中已内置 `#{timestamp}` 变量作为 `client_id`，用于突破微信防重复提交的屏蔽机制。)*
 
 ### 7. 设置备份保留策略 (云端)
 
