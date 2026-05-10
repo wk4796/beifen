@@ -580,7 +580,7 @@ EOF
     return "$curl_exit_code"
 }
 
-# Webhook 发送函数
+# Webhook 发送函数 (修复支持 #{timestamp})
 send_webhook_message() {
     local webhook_config_json="$1"
     local message_content="$2"
@@ -599,8 +599,9 @@ send_webhook_message() {
 
     local current_hostname=$(hostname)
     local current_time=$(date '+%Y-%m-%d %H:%M:%S')
+    local current_timestamp=$(date +%s) # 新增时间戳变量
 
-    # 使用 jq 的 walk 函数安全地遍历模板，替换变量值，同时避免破坏 JSON 结构 (自动处理换行符转义等)
+    # 使用 jq 的 walk 函数安全地遍历模板，替换变量值，同时避免破坏 JSON 结构
     local safe_body
     safe_body=$(echo "$body_template" | jq -c \
         --arg subject "$subject" \
@@ -608,7 +609,8 @@ send_webhook_message() {
         --arg status "$status" \
         --arg hostname "$current_hostname" \
         --arg time "$current_time" \
-        'walk(if type == "string" then gsub("#{subject}"; $subject) | gsub("#{message}"; $message) | gsub("#{status}"; $status) | gsub("#{hostname}"; $hostname) | gsub("#{time}"; $time) else . end)')
+        --arg timestamp "$current_timestamp" \
+        'walk(if type == "string" then gsub("#{subject}"; $subject) | gsub("#{message}"; $message) | gsub("#{status}"; $status) | gsub("#{hostname}"; $hostname) | gsub("#{time}"; $time) | gsub("#{timestamp}"; $timestamp) else . end)')
 
     log_info "正在通过 Webhook [${alias}] 发送通知..."
 
@@ -1797,6 +1799,7 @@ manage_webhooks() {
                 echo "  #{status}   - 状态 (success 或 failure)"
                 echo "  #{hostname} - 主机名"
                 echo "  #{time}     - 时间"
+                echo "  #{timestamp}- 时间戳 (可用于防重复提交验证)"
                 echo -e "${YELLOW}提示: ClawBot/Server酱 常用模板: {\"title\": \"#{subject}\", \"desp\": \"#{message}\"}${NC}"
                 read -rp "请输入 Body 模板 (单行 JSON 格式) [留空则不发送 Body]: " new_body
 
