@@ -31,7 +31,7 @@ source <(curl -sL https://raw.githubusercontent.com/wk4796/beifen/main/install_b
 
   * [5. 云存储设定 (Rclone)](#5-云存储设定-rclone)
 
-  * [6. 消息通知设定 (Telegram)](#6-消息通知设定-telegram)
+  * [6. 消息通知设定 (Telegram)](#6-消息通知设定-支持多通道与Webhook)
 
   * [7. 设置备份保留策略 (云端)](#7-设置备份保留策略-云端)
 
@@ -332,7 +332,7 @@ echo $0
 
 * **备份后完整性校验**：开启或关闭备份文件上传后的完整性校验功能。
 
-### 6. 消息通知设定 (Telegram)
+### 6. 消息通知设定 (支持多通道与Webhook)
 
 配置通知服务，以便在备份完成后接收结果通知。本脚本支持同时启用多种通知：
 
