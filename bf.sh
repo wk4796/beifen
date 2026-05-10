@@ -345,7 +345,7 @@ check_dependencies() {
     deps["df"]="coreutils;用于检查磁盘空间"
     deps["du"]="coreutils;用于计算文件大小"
     deps["less"]="less;用于分页查看日志文件"
-    deps["curl"]="curl;用于发送 Telegram 和邮件通知，以及安装 rclone"
+    deps["curl"]="curl;用于发送 Telegram、邮件和 Webhook 通知，以及安装 rclone"
     deps["jq"]="jq;用于处理 JSON 格式的通知配置"
     deps["crontab"]="cron;用于管理定时任务"
 
@@ -469,7 +469,7 @@ check_dependencies() {
 }
 
 
-# Telegram 发送函数, 接受 Bot 的 JSON 配置
+# Telegram 发送函数
 send_telegram_message() {
     local bot_config_json="$1"
     local message_content="$2"
@@ -502,7 +502,7 @@ send_telegram_message() {
     fi
 }
 
-# 邮件发送函数, 接受发件人的 JSON 配置
+# 邮件发送函数
 send_email_message() {
     local sender_config_json="$1"
     local message_content="$2"
@@ -580,10 +580,72 @@ EOF
     return "$curl_exit_code"
 }
 
+# Webhook 发送函数
+send_webhook_message() {
+    local webhook_config_json="$1"
+    local message_content="$2"
+    local subject="$3"
+    local status="${4:-unknown}"
+
+    local alias url method headers_json body_template
+    alias=$(echo "$webhook_config_json" | jq -r '.alias')
+    url=$(echo "$webhook_config_json" | jq -r '.url')
+    method=$(echo "$webhook_config_json" | jq -r '.method')
+    headers_json=$(echo "$webhook_config_json" | jq -c '.headers')
+    body_template=$(echo "$webhook_config_json" | jq -c '.body_template')
+
+    if [[ -z "$url" || "$url" == "null" ]]; then return 1; fi
+    if ! command -v curl &> /dev/null; then log_error "发送 Webhook 需要 'curl'，但未安装。"; return 1; fi
+
+    local current_hostname=$(hostname)
+    local current_time=$(date '+%Y-%m-%d %H:%M:%S')
+
+    # 使用 jq 的 walk 函数安全地遍历模板，替换变量值，同时避免破坏 JSON 结构 (自动处理换行符转义等)
+    local safe_body
+    safe_body=$(echo "$body_template" | jq -c \
+        --arg subject "$subject" \
+        --arg message "$message_content" \
+        --arg status "$status" \
+        --arg hostname "$current_hostname" \
+        --arg time "$current_time" \
+        'walk(if type == "string" then gsub("#{subject}"; $subject) | gsub("#{message}"; $message) | gsub("#{status}"; $status) | gsub("#{hostname}"; $hostname) | gsub("#{time}"; $time) else . end)')
+
+    log_info "正在通过 Webhook [${alias}] 发送通知..."
+
+    local curl_cmd=(curl -s -X "$method" "$url")
+    
+    # 提取 headers 数组并添加到 curl 命令
+    local headers_array
+    mapfile -t headers_array < <(echo "$headers_json" | jq -r '.[]')
+    for header in "${headers_array[@]}"; do
+        curl_cmd+=(-H "$header")
+    done
+
+    # 添加解析后的安全 Body
+    if [[ "$method" != "GET" && -n "$safe_body" && "$safe_body" != "null" && "$safe_body" != "{}" ]]; then
+        curl_cmd+=(-d "$safe_body")
+    fi
+
+    local response
+    response=$("${curl_cmd[@]}" 2>&1)
+    local curl_exit_code=$?
+
+    if [[ $curl_exit_code -eq 0 ]]; then
+        log_info "Webhook 通知发送成功 ([${alias}])。"
+        log_debug "Webhook 响应: $response"
+        return 0
+    else
+        log_error "Webhook 通知发送失败 ([${alias}])！Curl 错误码: $curl_exit_code"
+        log_debug "Curl 输出: $response"
+        return 1
+    fi
+}
+
 # 统一的通知发送函数，支持多通道
 send_notification() {
     local message_content="$1"
     local subject="$2"
+    local status="${3:-success}"
 
     local notifications_config
     notifications_config=$(load_notification_config)
@@ -608,6 +670,15 @@ send_notification() {
         while IFS= read -r sender_config; do
             send_email_message "$sender_config" "$message_content" "$subject" || true
         done <<< "$enabled_senders"
+    fi
+
+    # --- 发送 Webhook ---
+    local enabled_webhooks
+    enabled_webhooks=$(echo "$notifications_config" | jq -c '.webhooks[]? | select(.enabled == true)')
+    if [[ -n "$enabled_webhooks" ]]; then
+        while IFS= read -r webhook_config; do
+            send_webhook_message "$webhook_config" "$message_content" "$subject" "$status" || true
+        done <<< "$enabled_webhooks"
     fi
 }
 
@@ -1270,7 +1341,7 @@ load_notification_config() {
     fi
 
     if [[ ! -f "$NOTIFICATIONS_CONFIG_FILE" || ! -s "$NOTIFICATIONS_CONFIG_FILE" ]]; then
-        jq -n '{telegram_bots: [], email_senders: []}'
+        jq -n '{telegram_bots: [], email_senders: [], webhooks: []}'
         return
     fi
 
@@ -1281,6 +1352,9 @@ load_notification_config() {
     fi
     if ! echo "$config" | jq -e '.email_senders' > /dev/null; then
         config=$(echo "$config" | jq '.email_senders = []')
+    fi
+    if ! echo "$config" | jq -e '.webhooks' > /dev/null; then
+        config=$(echo "$config" | jq '.webhooks = []')
     fi
     echo "$config"
 }
@@ -1661,17 +1735,192 @@ manage_email_senders() {
 }
 
 
+# --- Webhook 管理模块 ---
+
+manage_webhooks() {
+    local notifications_config
+    notifications_config=$(load_notification_config)
+    if [[ -z "$notifications_config" ]]; then press_enter_to_continue; return; fi
+
+    while true; do
+        display_header
+        echo -e "${BLUE}=== 管理 Webhook 机器人 ===${NC}"
+
+        local webhooks_json
+        webhooks_json=$(echo "$notifications_config" | jq '.webhooks')
+        local webhook_count
+        webhook_count=$(echo "$webhooks_json" | jq 'length')
+
+        if [[ "$webhook_count" -eq 0 ]]; then
+            log_warn "当前未配置任何 Webhook。"
+        else
+            echo "已配置的 Webhook 列表:"
+            for i in $(seq 0 $((webhook_count - 1))); do
+                local alias enabled status
+                alias=$(echo "$webhooks_json" | jq -r ".[$i].alias")
+                enabled=$(echo "$webhooks_json" | jq -r ".[$i].enabled")
+                status=$([[ "$enabled" == "true" ]] && echo -e "[${GREEN}已启用${NC}]" || echo "[已禁用]")
+                echo -e "  $((i+1)). ${alias} ${status}"
+            done
+        fi
+
+        echo ""
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
+        echo "  a - 添加新 Webhook"
+        echo "  m - 修改 Webhook"
+        echo "  d - 删除 Webhook"
+        echo "  t - 切换启用/禁用状态"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "  0 - ${RED}返回上一级${NC}"
+        read -rp "请输入选项: " choice
+
+        local config_changed=false
+        case "$choice" in
+            a|A)
+                echo -e "${YELLOW}--- 添加新 Webhook ---${NC}"
+                read -rp "为 Webhook 起一个别名 (例如: 微信 ClawBot): " new_alias
+                read -rp "请输入 Webhook URL: " new_url
+                read -rp "请求方法 (GET/POST/PUT) [默认 POST]: " new_method
+                new_method=${new_method:-POST}
+
+                echo "请输入请求头 (Headers)，多个请求头用英文逗号分隔"
+                read -rp "例如: Content-Type: application/json, Authorization: Bearer xxx [默认 Content-Type: application/json]: " new_headers_input
+                new_headers_input=${new_headers_input:-"Content-Type: application/json"}
+
+                # 将逗号分隔的 header 转换成 JSON 数组格式
+                local headers_json
+                headers_json=$(echo "$new_headers_input" | awk -F',' '{printf "["; for(i=1;i<=NF;i++) {gsub(/^[ \t]+|[ \t]+$/, "", $i); printf "\"%s\"", $i; if(i<NF) printf ","}; printf "]"}')
+
+                echo -e "\n${GREEN}支持注入的变量：${NC}"
+                echo "  #{subject}  - 通知标题"
+                echo "  #{message}  - 通知正文"
+                echo "  #{status}   - 状态 (success 或 failure)"
+                echo "  #{hostname} - 主机名"
+                echo "  #{time}     - 时间"
+                echo -e "${YELLOW}提示: ClawBot/Server酱 常用模板: {\"title\": \"#{subject}\", \"desp\": \"#{message}\"}${NC}"
+                read -rp "请输入 Body 模板 (单行 JSON 格式) [留空则不发送 Body]: " new_body
+
+                if [[ -n "$new_alias" && -n "$new_url" ]]; then
+                    local new_webhook
+                    if [[ -z "$new_body" ]]; then new_body="{}"; fi
+                    
+                    if ! echo "$new_body" | jq -e . >/dev/null 2>&1; then
+                        log_error "Body 模板不是合法的 JSON 格式，添加失败！"
+                        press_enter_to_continue
+                        continue
+                    fi
+
+                    new_webhook=$(jq -n \
+                        --arg alias "$new_alias" \
+                        --arg url "$new_url" \
+                        --arg method "$new_method" \
+                        --argjson headers "$headers_json" \
+                        --argjson body_template "$new_body" \
+                        '{alias: $alias, url: $url, method: $method, headers: $headers, body_template: $body_template, enabled: true}')
+                    
+                    notifications_config=$(echo "$notifications_config" | jq ".webhooks += [$new_webhook]")
+                    config_changed=true
+                    log_info "Webhook '${new_alias}' 已添加并启用。"
+                else
+                    log_error "信息不完整，添加失败。"
+                fi
+                press_enter_to_continue
+                ;;
+            m|M)
+                if [[ "$webhook_count" -eq 0 ]]; then log_warn "没有可修改的 Webhook。"; press_enter_to_continue; continue; fi
+                read -rp "请输入要修改的 Webhook 序号: " index
+                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le "$webhook_count" ]; then
+                    local real_index=$((index - 1))
+                    local current_data
+                    current_data=$(echo "$notifications_config" | jq ".webhooks[$real_index]")
+                    local current_alias current_url current_method current_body
+                    current_alias=$(echo "$current_data" | jq -r '.alias')
+                    current_url=$(echo "$current_data" | jq -r '.url')
+                    current_method=$(echo "$current_data" | jq -r '.method')
+                    current_body=$(echo "$current_data" | jq -c '.body_template')
+
+                    echo "正在修改 '${current_alias}' (序号: $index)。按 Enter 跳过不修改的项。"
+                    read -rp "新别名 [${current_alias}]: " new_alias
+                    read -rp "新 URL [${current_url}]: " new_url
+                    read -rp "新请求方法 [${current_method}]: " new_method
+                    read -rp "新 Body 模板 (JSON) [保留原样请直接回车]: " new_body
+
+                    notifications_config=$(echo "$notifications_config" | jq ".webhooks[$real_index].alias = \"${new_alias:-$current_alias}\"")
+                    notifications_config=$(echo "$notifications_config" | jq ".webhooks[$real_index].url = \"${new_url:-$current_url}\"")
+                    notifications_config=$(echo "$notifications_config" | jq ".webhooks[$real_index].method = \"${new_method:-$current_method}\"")
+                    
+                    if [[ -n "$new_body" ]]; then
+                        if echo "$new_body" | jq -e . >/dev/null 2>&1; then
+                            notifications_config=$(echo "$notifications_config" | jq ".webhooks[$real_index].body_template = $new_body")
+                        else
+                            log_error "输入的新 Body 不是合法 JSON，已保留原 Body。"
+                        fi
+                    fi
+
+                    config_changed=true
+                    log_info "Webhook 信息已更新。"
+                else
+                    log_error "无效序号。"
+                fi
+                press_enter_to_continue
+                ;;
+
+            d|D)
+                if [[ "$webhook_count" -eq 0 ]]; then log_warn "没有可删除的 Webhook。"; press_enter_to_continue; continue; fi
+                read -rp "请输入要删除的 Webhook 序号: " index
+                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le "$webhook_count" ]; then
+                    local alias_to_delete
+                    alias_to_delete=$(echo "$notifications_config" | jq -r ".webhooks[$((index-1))].alias")
+                    read -rp "确定要删除 Webhook '${alias_to_delete}' 吗？(y/N): " confirm
+                    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                        notifications_config=$(echo "$notifications_config" | jq "del(.webhooks[$((index-1))])")
+                        config_changed=true
+                        log_info "Webhook 已删除。"
+                    fi
+                else
+                    log_error "无效序号。"
+                fi
+                press_enter_to_continue
+                ;;
+            t|T)
+                if [[ "$webhook_count" -eq 0 ]]; then log_warn "没有可切换状态的 Webhook。"; press_enter_to_continue; continue; fi
+                read -rp "请输入要切换状态的 Webhook 序号: " index
+                if [[ "$index" =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le "$webhook_count" ]; then
+                    local real_index=$((index - 1))
+                    local current_state new_state
+                    current_state=$(echo "$notifications_config" | jq ".webhooks[$real_index].enabled")
+                    new_state=$([[ "$current_state" == "true" ]] && echo "false" || echo "true")
+                    notifications_config=$(echo "$notifications_config" | jq ".webhooks[$real_index].enabled = $new_state")
+                    config_changed=true
+                    log_info "Webhook 状态已更新为: $new_state"
+                else
+                    log_error "无效序号。"
+                fi
+                press_enter_to_continue
+                ;;
+            0) break ;;
+            *) log_error "无效选项。"; press_enter_to_continue ;;
+        esac
+
+        if [[ "$config_changed" == "true" ]]; then
+            save_notification_config "$notifications_config"
+        fi
+    done
+}
+
+
 # --- 主通知设定菜单 ---
 set_notification_settings() {
     while true; do
         display_header
         echo -e "${BLUE}=== 6. 消息通知设定 ===${NC}"
-        echo "此菜单用于管理所有通知方式 (Telegram, 邮件等)。"
+        echo "此菜单用于管理所有通知方式 (Telegram, 邮件, Webhook 等)。"
         echo ""
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━ 操作选项 ━━━━━━━━━━━━━━━━━━${NC}"
         echo -e "  1. ${YELLOW}管理 Telegram 机器人${NC}"
         echo -e "  2. ${YELLOW}管理 邮件发件人${NC}"
-        echo -e "  3. ${YELLOW}发送测试通知${NC}"
+        echo -e "  3. ${YELLOW}管理 Webhook (微信/钉钉/Server酱等)${NC}"
+        echo -e "  4. ${YELLOW}发送测试通知${NC}"
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo -e "  0. ${RED}返回主菜单${NC}"
         read -rp "请输入选项: " choice
@@ -1679,7 +1928,8 @@ set_notification_settings() {
         case $choice in
             1) manage_telegram_bots ;;
             2) manage_email_senders ;;
-            3) send_test_notification_menu ;;
+            3) manage_webhooks ;;
+            4) send_test_notification_menu ;;
             0) break ;;
             *) log_error "无效选项。"; press_enter_to_continue ;;
         esac
@@ -1731,6 +1981,22 @@ send_test_notification_menu() {
             done
         fi
 
+        # 加载并显示 Webhook 配置
+        local temp_webhooks_configs
+        mapfile -t temp_webhooks_configs < <(echo "$notifications_config" | jq -c '.webhooks[]?')
+        if [ ${#temp_webhooks_configs[@]} -gt 0 ]; then
+            echo "--- Webhook ---"
+            for wh_config in "${temp_webhooks_configs[@]}"; do
+                local alias enabled status
+                alias=$(echo "$wh_config" | jq -r '.alias')
+                enabled=$(echo "$wh_config" | jq -r '.enabled')
+                status=$([[ "$enabled" == "true" ]] && echo -e "${GREEN}已启用${NC}" || echo "已禁用")
+                echo "  ${idx}. [Web] ${alias} (${status})"
+                all_configs+=("webhook||$wh_config")
+                ((idx++))
+            done
+        fi
+
         if [ ${#all_configs[@]} -eq 0 ]; then
             log_warn "没有配置任何通知方式。请先在 '消息通知设定' 中添加。"
             press_enter_to_continue
@@ -1746,14 +2012,14 @@ send_test_notification_menu() {
         read -rp "请输入选项: " choice
 
         # --- 测试消息内容准备 ---
-        local test_date_line; test_date_line=$(date)
+        local test_date_line; test_date_line=$(date '+%Y-%m-%d %H:%M:%S')
         local test_subject="[${SCRIPT_NAME}] 测试通知"
 
         case "$choice" in
             a|A)
                 log_info "正在向所有已启用的通知方式发送测试消息..."
                 local test_body_all="这是一条对所有已启用通道的群发测试消息。"$'\n'"- ${test_date_line}"
-                send_notification "$test_body_all" "$test_subject"
+                send_notification "$test_body_all" "$test_subject" "success"
                 press_enter_to_continue
                 ;;
             0) break ;;
@@ -1774,8 +2040,11 @@ send_test_notification_menu() {
                             local test_body_tg="这是一条来自脚本的测试消息。如果您收到此消息，说明您的 'Telegram' 通知配置正确。"$'\n'"- ${test_date_line}"
                             send_telegram_message "$config_json" "$test_body_tg" || true
                         elif [[ "$config_type" == "email_sender" ]]; then
-                                local test_body_email="这是一条来自脚本的测试消息。如果您收到此消息，说明您的 '邮件' 通知配置正确。"$'\n'"- ${test_date_line}"
+                            local test_body_email="这是一条来自脚本的测试消息。如果您收到此消息，说明您的 '邮件' 通知配置正确。"$'\n'"- ${test_date_line}"
                             send_email_message "$config_json" "$test_body_email" "$test_subject" || true
+                        elif [[ "$config_type" == "webhook" ]]; then
+                            local test_body_wh="这是一条来自脚本的测试消息。如果您收到此消息，说明您的 'Webhook' 通知配置正确。"$'\n'"- ${test_date_line}"
+                            send_webhook_message "$config_json" "$test_body_wh" "$test_subject" "success" || true
                         fi
                     fi
                 else
@@ -2135,13 +2404,13 @@ perform_backup() {
     if [ ${#BACKUP_SOURCE_PATHS_ARRAY[@]} -eq 0 ]; then
         log_error "未设置任何备份源路径。"
         local error_message="📦 ${SCRIPT_NAME}"$'\n'"💻 主机名：${hostname}"$'\n'"🕒 时间：${readable_time}"$'\n'"❌ 状态：备份失败"$'\n'"原因：未设置任何备份源路径。"
-        send_notification "$error_message" "${final_subject}备份失败"
+        send_notification "$error_message" "${final_subject}备份失败" "failure"
         return 1
     fi
     if [ ${#ENABLED_RCLONE_TARGET_INDICES_ARRAY[@]} -eq 0 ]; then
         log_error "未启用任何 Rclone 目标。"
         local error_message="📦 ${SCRIPT_NAME}"$'\n'"💻 主机名：${hostname}"$'\n'"🕒 时间：${readable_time}"$'\n'"❌ 状态：备份失败"$'\n'"原因：未启用任何 Rclone 备份目标。"
-        send_notification "$error_message" "${final_subject}备份失败"
+        send_notification "$error_message" "${final_subject}备份失败" "failure"
         return 1
     fi
 
@@ -2179,7 +2448,7 @@ perform_backup() {
 
     local final_message="${final_header}"$'\n\n'"${GLOBAL_NOTIFICATION_REPORT_BODY}"$'\n\n'"${final_footer}"
 
-    send_notification "$final_message" "$final_subject"
+    send_notification "$final_message" "$final_subject" "$GLOBAL_NOTIFICATION_OVERALL_STATUS"
 
     if [[ "$backup_result" -eq 0 ]]; then
         log_info "备份成功完成，正在更新时间戳。"
@@ -2842,6 +3111,9 @@ show_main_menu() {
         fi
         if [[ "$(echo "$notifications_config" | jq '.email_senders[]? | select(.enabled == true) | length')" -gt 0 ]]; then
             enabled_methods+=("邮件")
+        fi
+        if [[ "$(echo "$notifications_config" | jq '.webhooks[]? | select(.enabled == true) | length')" -gt 0 ]]; then
+            enabled_methods+=("Webhook")
         fi
     fi
 
