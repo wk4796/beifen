@@ -31,7 +31,7 @@ source <(curl -sL https://raw.githubusercontent.com/wk4796/beifen/main/install_b
 
   * [5. 云存储设定 (Rclone)](#5-云存储设定-rclone)
 
-  * [6. 消息通知设定 (Telegram)](#6-消息通知设定-支持多通道与Webhook)
+  * [6. 消息通知设定 (支持多通道与Webhook)](#6-消息通知设定-支持多通道与Webhook)
 
   * [7. 设置备份保留策略 (云端)](#7-设置备份保留策略-云端)
 
